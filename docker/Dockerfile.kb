@@ -1,0 +1,27 @@
+# KB server — SAPBERT FAISS + lexical search (Flask, :8765).
+# The FAISS index and adapter are mounted at runtime (they're large + licensed),
+# never copied into the image. Configure their paths via KB_INDEX_PATH /
+# KB_ADAPTER_PATH env vars (see docker-compose.yml).
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    KMP_DUPLICATE_LIB_OK=TRUE
+
+WORKDIR /app
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential curl \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-kb.txt .
+RUN pip install --no-cache-dir -r requirements-kb.txt
+
+COPY kb/ ./kb/
+COPY eltool/ ./eltool/
+
+EXPOSE 8765
+HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
+  CMD curl -fs http://localhost:8765/health || exit 1
+
+# Bind 0.0.0.0 so other containers can reach it. Index/adapter come from env.
+CMD ["python", "kb/server.py", "--host", "0.0.0.0", "--port", "8765"]

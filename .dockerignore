@@ -1,0 +1,16 @@
+.git
+.idea
+.venv
+venv
+**/__pycache__
+**/*.pyc
+logs
+sessions
+web/node_modules
+web/dist
+graph/out
+*.RRF
+# secrets / machine-local config — provided at runtime, never baked into images
+neo4j.yaml
+graph/graph_config.yaml
+.env

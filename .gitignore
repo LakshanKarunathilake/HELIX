@@ -1,0 +1,30 @@
+# Secrets — never commit these
+neo4j.yaml
+neo4j.docker.yaml
+config/neo4j.yaml
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node / web build
+web/node_modules/
+web/dist/
+
+# Local session data (may contain per-session API keys and annotations)
+sessions/
+
+# Runtime logs from run.sh
+logs/
+
+# Local graph-build config (machine-specific dataset paths) + generated CSVs
+graph/graph_config.yaml
+graph/out/
+*.RRF
+
+# Local eval config + results
+eval/eval_config.yaml
+eval/results.json

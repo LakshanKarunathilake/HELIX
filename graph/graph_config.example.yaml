@@ -1,0 +1,24 @@
+# HELIX — UMLS → Neo4j build configuration.
+#
+# Copy to graph/graph_config.yaml and edit. The RRF datasets are NOT stored in
+# this repo — point these at your licensed local UMLS files.
+#
+#   cp graph/graph_config.example.yaml graph/graph_config.yaml
+#   python graph/build_graph.py          # generate CSVs + import into Neo4j
+
+# ── UMLS source files (local, licensed — never committed) ─────────────────────
+mrrel: /path/to/UMLS/MRREL.RRF        # relationships (required)
+mrconso: /path/to/UMLS/MRCONSO.RRF    # concept names (omit to skip English names)
+
+# ── output ────────────────────────────────────────────────────────────────────
+output_dir: graph/out
+prefix: umls
+language: ENG          # concept-name language filter (MRCONSO LAT column)
+sample:                # optional: cap relationship count for a quick test build (blank = all)
+
+# ── Neo4j bulk-import (offline `neo4j-admin database import`) ─────────────────
+neo4j:
+  home: /path/to/neo4j-5.x     # NEO4J_HOME — must contain bin/neo4j-admin and import/
+  database: umls               # target database name (match `database:` in neo4j.yaml)
+  # Connection creds for the optional CREATE/START step are read from neo4j.yaml,
+  # so you only keep them in one place.

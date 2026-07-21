@@ -1,0 +1,34 @@
+# HELIX evaluation config. Copy to eval/eval_config.yaml and edit.
+#
+#   python eval/score.py --config eval/eval_config.yaml
+#
+# The KB server must be running (same endpoint HELIX uses).
+
+# ── gold dataset (already annotated) ──────────────────────────────────────────
+gold_file: /path/to/gold/eng-dev-with-cui.tsv
+delimiter: "\t"           # gold file delimiter
+gold_sep: "|"             # separator for multiple gold CUIs in one cell
+columns:
+  text: entity_text       # the mention string (queried against the KB)
+  gold: cui               # the gold CUI column (may be pipe-joined, e.g. C0024109|C0024117)
+  entity_type: entity_type   # optional; enables the per-type breakdown
+
+# ── KB endpoint (mirrors a session's KB config) ───────────────────────────────
+kb:
+  name: UMLS
+  endpoint_url: http://127.0.0.1:8765/query   # /dense and /lexical are derived from this
+  top_k: 10
+  response_path: results
+  id_field: id
+  label_field: label
+  score_field: score
+
+# ── which configurations to score ────────────────────────────────────────────
+configs: [lexical, dense, hybrid, hybrid_llm]
+
+# ── LLM re-ranker (only used by the hybrid_llm config) ────────────────────────
+llm:
+  model: claude-haiku-4-5   # needs ANTHROPIC_API_KEY in the environment
+  top_n: 10
+
+output: eval/results.json

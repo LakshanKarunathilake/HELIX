@@ -1,0 +1,10 @@
+# API server (FastAPI) — lightweight; no ML deps.
+pandas>=2.0
+requests>=2.31
+pydantic>=2.5
+pyyaml>=6.0
+fastapi>=0.111
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+anthropic>=0.86
+neo4j>=5.14

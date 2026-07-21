@@ -1,0 +1,73 @@
+# HELIX — all four services in containers.
+#
+#   cp .env.example .env            # fill in paths + secrets
+#   cp neo4j.docker.example.yaml neo4j.docker.yaml
+#   docker compose up --build       # open http://localhost:5173
+#
+# The large FAISS index + adapter are MOUNTED from the host (see .env), never
+# baked into images. See docker/README.md for the important caveats
+# (KB endpoint URL, Neo4j URI, CPU-only inference).
+
+services:
+  # 1. KB server (SAPBERT FAISS + lexical)
+  kb:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.kb
+    environment:
+      KB_HOST: 0.0.0.0
+      KB_PORT: "8765"
+      KB_INDEX_PATH: /data/index/${INDEX_PREFIX}
+      KB_ADAPTER_PATH: /data/adapter
+      KMP_DUPLICATE_LIB_OK: "TRUE"
+    volumes:
+      - ${INDEX_HOST_DIR}:/data/index:ro
+      - ${ADAPTER_HOST_DIR}:/data/adapter:ro
+      - ./kb/config.yaml:/app/kb/config.yaml:ro
+    ports:
+      - "8765:8765"
+
+  # 2. API server (FastAPI)
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - ./sessions:/app/sessions                                  # persist sessions
+      - ${NEO4J_CONFIG:-./neo4j.docker.yaml}:/app/neo4j.yaml:ro   # graph connection + schema
+      - ${CONTEXT_HOST_DIR:-./sessions}:/data/context:ro          # document texts (optional)
+    depends_on:
+      - kb
+    ports:
+      - "8000:8000"
+
+  # 3. Web app (nginx-served build, proxies /api → api)
+  web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web
+    depends_on:
+      - api
+    ports:
+      - "5173:80"
+
+  # 4. Neo4j (optional — remove this service if you run Neo4j on the host and
+  #    point neo4j.docker.yaml at host.docker.internal:7687 instead).
+  #    Enterprise is required for a named database (e.g. `umls`); Community only
+  #    serves the default `neo4j` database.
+  neo4j:
+    image: neo4j:5-enterprise
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-please-change}
+      NEO4J_ACCEPT_LICENSE_AGREEMENT: "yes"
+    volumes:
+      - neo4j-data:/data
+      - ./graph/out:/import:ro       # generated CSVs available for neo4j-admin import
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+
+volumes:
+  neo4j-data:

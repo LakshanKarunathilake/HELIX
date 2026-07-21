@@ -1,0 +1,43 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ELTool KB Server Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+server:
+  host: "127.0.0.1"   # use "0.0.0.0" to expose on the local network
+  port: 8765
+
+index:
+  # Path to the FAISS index prefix — no file extension.
+  # The server expects these three files to exist:
+  #   <path>.faiss
+  #   <path>_metadata.pkl
+  #   <path>_config.json
+  # path: "/Users/lakshankarunathilake/PycharmProjects/sapbert/utils/NEL/indexes/bioASQ_index/bioASQ_index"
+  # The updated and mapping on categorizations
+  path: "/Users/lakshankarunathilake/PycharmProjects/sapbert/utils/NEL/indexes/bioASQ_index_20260510/bioASQ_index"
+
+
+adapter:
+  # Local path to the adapter weights directory.
+  # Set to null if the adapter path is already stored in the index config,
+  # or if you want to use a HuggingFace Hub adapter name below.
+  path: "/Users/lakshankarunathilake/Documents/Adapters/UMLS/sapbert-mesh-adapter"
+
+  # HuggingFace Hub adapter name — mutually exclusive with adapter.path.
+  # Leave as null when using adapter.path.
+  name: null
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lexical search (BM25 + character n-gram) — used automatically for short
+# queries and always available at POST /query/lexical
+# ─────────────────────────────────────────────────────────────────────────────
+lexical:
+  # Set to false to skip building the lexical index entirely.
+  # POST /query/lexical will return 503; session enable_lexical flags are ignored.
+  enabled: false
+
+  # Character n-gram sizes to index. [2, 3] covers bigrams and trigrams.
+  ngram_sizes: [2, 3]
+
+  # RRF constant k — higher values reduce the impact of rank differences.
+  rrf_k: 60

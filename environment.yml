@@ -1,0 +1,24 @@
+# Conda environment for HELIX (backend + KB server).
+#
+#   conda env create -f environment.yml
+#   conda activate helix
+#   ./run.sh
+#
+# Notes:
+# - Python 3.11: best arm64 (Apple Silicon) support for torch/faiss/adapters.
+# - All Python deps come from requirements.txt (they are pip-first: adapters,
+#   anthropic, rank-bm25, fastapi, ...), so conda just provides the interpreter.
+# - If `faiss-cpu` fails to install via pip on Apple Silicon, install it from
+#   conda-forge instead, then re-run pip:
+#       conda install -n helix -c conda-forge faiss-cpu
+#       pip install -r requirements.txt
+# - Node.js (for the web app) is NOT managed here — install it separately
+#   (nvm, Homebrew, or `conda install -c conda-forge nodejs=20`).
+name: helix
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - -r requirements.txt

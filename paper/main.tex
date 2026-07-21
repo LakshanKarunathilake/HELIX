@@ -1,0 +1,548 @@
+% HELIX — IJCKG submission (Springer LNCS format)
+% Compile:  pdflatex main  ->  bibtex main  ->  pdflatex main  ->  pdflatex main
+%
+% Search this file for "TODO" to find every place you must fill in:
+%   - author / affiliation details
+%   - real numbers in the evaluation tables and charts (from eval/score.py)
+%   - UI screenshots (Figs. 2-3)
+%
+\documentclass[runningheads]{llncs}
+
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,fit,backgrounds}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage[hidelinks]{hyperref}
+\renewcommand\UrlFont{\color{blue}\rmfamily}
+
+% ---- helpers for drafting -----------------------------------------------------
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
+\newcommand{\result}[1]{\textcolor{blue!70!black}{\underline{#1}}} % illustrative placeholder number
+\lstset{basicstyle=\ttfamily\footnotesize,breaklines=true,frame=single,
+        columns=fullflexible,keepspaces=true}
+
+\begin{document}
+
+\title{\textbf{HELIX}: \textmd{\textbf{H}ybrid \textbf{E}ntity
+       \textbf{L}inking with \textbf{I}nteractive
+       e\textbf{X}pert-in-the-loop Annotation}}
+\titlerunning{HELIX: Hybrid, Graph-Aware Entity Linking Annotation}
+
+% TODO: add \orcidID{...} to each author if available.
+\author{Lakshan Karunathilake\inst{1,2} \and
+Hideaki Takeda\inst{2,1}}
+\authorrunning{L. Karunathilake and H. Takeda}
+\institute{The Graduate University for Advanced Studies (SOKENDAI),
+Shonan Village, Hayama, Kanagawa 240-0193, Japan \and
+National Institute of Informatics, 2-1-2 Hitotsubashi, Chiyoda-ku,
+Tokyo 101-8430, Japan\\
+\email{lakshan@nii.ac.jp} (corresponding author)\quad
+\email{takeda@nii.ac.jp}}
+
+\maketitle
+
+% ---- Abstract ----------------------------------------------------------------
+\begin{abstract}
+Linking entity mentions to canonical knowledge-base entries is central to
+building structured biomedical resources, yet automated systems remain below the
+precision that downstream use requires, leaving expert curation the bottleneck.
+We present \emph{HELIX}, an open-source, configurable annotation tool that unites
+hybrid candidate retrieval, LLM-based disambiguation, and knowledge-graph-aware
+human review in a single expert-in-the-loop workflow over any FAISS-indexable
+knowledge base. Retrieval fuses dense embeddings with a lexical index (BM25 and
+character $n$-grams), directly targeting the failure mode in which dense encoders
+produce uninformative embeddings for short mentions and abbreviations
+(e.g.\ ``DM'' $\rightarrow$ \emph{Diabetes Mellitus}) that lexical matching
+recovers. Over this grounded candidate set a large language model re-ranks
+(retrieval-augmented), returning a best match with a rationale and confidence
+while constrained to the retrieved identifiers. HELIX's distinguishing
+contribution is a two-level, graph-aware annotation process: at the
+\emph{individual} level, each mention's candidates are shown with their
+neighbourhood in a connected knowledge graph (Neo4j), so annotators disambiguate
+by graph context rather than surface text; at the \emph{document} level, the
+accepted entities are assembled into one subgraph, isolated picks are flagged for
+renegotiation, and identifiers can be rearranged until the document's entity set
+is globally coherent. We evaluate HELIX on a biomedical entity-linking corpus,
+reporting top-1 accuracy across lexical, dense, hybrid, and hybrid+LLM
+configurations with breakdowns by mention length and entity type, and a
+single-annotator case study of graph-assisted review. HELIX and a reproducible
+setup are released to support scalable entity-linking annotation.
+
+\keywords{Biomedical Entity Linking \and Knowledge Graphs \and
+Retrieval-Augmented Generation \and Human-in-the-Loop Annotation \and
+Hybrid Retrieval \and Collective Disambiguation.}
+\end{abstract}
+
+% ==============================================================================
+\section{Introduction}
+\label{sec:intro}
+
+Entity linking (EL) maps textual mentions to canonical entries in a knowledge
+base (KB) such as the UMLS Metathesaurus~\cite{umls}, and is a prerequisite for
+constructing biomedical knowledge graphs, normalising clinical text, and
+enabling structured search. Despite steady progress, fully automated biomedical
+EL still plateaus well below the precision required for curated resources: strong
+systems on recent shared tasks report top-1 accuracy in the range of roughly
+$0.7$~\cite{bionne,belb}. As a result, high-quality resource construction remains
+a human-in-the-loop activity in which expert curators verify, correct, and
+disambiguate system suggestions.
+
+Three gaps make this curation harder than it needs to be. First,
+\emph{short mentions and abbreviations} (``DM'', ``MI'', ``HTN'') are a systematic
+weakness of dense retrievers: with aggressive sub-word tokenisation and short
+maximum lengths, their embeddings carry little semantic signal, so the correct
+concept is frequently absent from the candidate list the annotator sees. Second,
+candidates are typically presented as \emph{flat text cards}---an identifier, a
+label, a few aliases---which strips away the relational structure that makes
+disambiguation easy for a human (is this ``lung'' an anatomical structure or a
+disease?). Third, EL is usually performed \emph{one mention at a time}, so
+decisions that ought to cohere across a document---two mentions of the same
+concept, or two related concepts---are made independently and can silently
+conflict.
+
+We address these gaps with \emph{HELIX}, a configurable, open-source
+expert-in-the-loop annotation tool. HELIX combines (i) hybrid dense$+$lexical
+retrieval that recovers short-mention candidates a dense encoder misses;
+(ii) a grounded large-language-model (LLM) re-ranker that picks the best
+candidate with a rationale and confidence, constrained to the retrieved
+identifiers; and (iii) a two-level, graph-aware review process backed by a Neo4j
+knowledge graph. At the \emph{individual} level, the annotator sees each
+mention's candidates together with their graph neighbourhood; at the
+\emph{document} level, all accepted entities are drawn as one subgraph in which
+isolated picks are flagged and can be renegotiated until the document is globally
+coherent, turning independent per-mention choices into a human-driven collective
+linking step.
+
+\medskip\noindent\textbf{Contributions.}
+\begin{enumerate}
+  \item A \emph{hybrid retrieval} back end (SAPBERT$+$FAISS dense retrieval fused
+        with a BM25/character-$n$-gram lexical index via reciprocal rank fusion)
+        that targets the short-mention failure mode of dense EL
+        (Sec.~\ref{sec:retrieval}).
+  \item A \emph{grounded LLM re-ranker} (retrieval-augmented) that selects among
+        retrieved candidates with rationale and confidence and cannot invent
+        out-of-KB identifiers (Sec.~\ref{sec:llm}).
+  \item A \emph{two-level graph-aware annotation workflow}: candidate-neighbourhood
+        disambiguation and a document-level coherence-negotiation view that flags
+        isolated picks for correction (Sec.~\ref{sec:graph}).
+  \item An \emph{open, reproducible system}---multi-select annotation, provenance
+        logging, containerised deployment, and an evaluation harness---together
+        with an empirical study on a biomedical corpus (Secs.~\ref{sec:impl}--\ref{sec:eval}).
+\end{enumerate}
+
+% ==============================================================================
+\section{Related Work}
+\label{sec:related}
+
+\subsubsection{Biomedical entity linking back ends.}
+Neural biomedical EL is dominated by bi-encoder retrieval over synonym-rich
+representations. BioSyn~\cite{biosyn} introduced synonym marginalisation, and
+SAPBERT~\cite{sapbert} self-aligns biomedical entity representations against UMLS
+synonymy, becoming the standard candidate generator. Lexical baselines such as
+QuickUMLS~\cite{quickumls} and scispaCy~\cite{scispacy} remain competitive on
+exact and near-exact matches and are fast and training-free. Benchmarks such as
+BELB~\cite{belb} unify heterogeneous corpora and KBs, and the BioNNE-L shared
+task~\cite{bionne} provides a multilingual evaluation setting. HELIX uses SAPBERT
+retrieval as one strand but pairs it with an explicit lexical strand precisely
+because dense encoders underperform on short mentions.
+
+\subsubsection{Retrieval-and-rerank and LLMs for EL.}
+The retrieve-and-rerank paradigm separates candidate generation from
+disambiguation. Recent work applies LLMs to the reranking stage: retrieval-augmented
+concept recognition~\cite{real}, constrained/contrastive decoding for biomedical
+EL~\cite{llm4bioel}, generative re-ranking~\cite{belink}, alias-based retrieval
+with LLM ranking for cross-lingual EL~\cite{bioelx}, and long-context,
+document-consistent linking~\cite{longbel}. HELIX follows this paradigm but keeps
+the human in the loop: the LLM produces a \emph{grounded} suggestion (restricted
+to retrieved identifiers, with a rationale and confidence) that the annotator
+confirms or overrides, rather than an autonomous prediction.
+
+\subsubsection{Graph-based and collective disambiguation.}
+A long line of work exploits KB structure for disambiguation, from topic-coherence
+over semantic graphs~\cite{collective2020} and Personalized-PageRank collective
+linking to entity-/relationship-embedding methods on knowledge
+graphs~\cite{kgdisamb2021}. These systems infer coherence \emph{automatically};
+HELIX instead \emph{surfaces} the graph neighbourhood to a human and makes the
+document-level coherence check an interactive, auditable step---a
+human-driven analogue of collective disambiguation.
+
+\subsubsection{Annotation tools.}
+General-purpose annotation platforms such as BRAT~\cite{brat} and
+INCEpTION~\cite{inception} support entity and KB-linking annotation, and
+INCEpTION adds machine assistance and active learning.
+MedCATTrainer~\cite{medcattrainer} targets biomedical NER$+$L with active
+learning. Evaluation and review tooling includes ELEVANT~\cite{elevant} for
+fine-grained EL error analysis and AnNER~\cite{anner} for annotation/review
+workflows in KG construction. Table~\ref{tab:tools} positions HELIX against these
+tools: to our knowledge HELIX is the first annotation tool to combine hybrid
+retrieval, a grounded LLM reranker, and a graph-neighbourhood/document-coherence
+review surface in one workflow.
+
+\begin{table}[t]
+\caption{HELIX vs.\ representative annotation tools. \todo{verify each cell against
+the latest tool versions before submission.}}
+\label{tab:tools}
+\centering
+\footnotesize
+\begin{tabular}{lccccc}
+\toprule
+Tool & KB linking & Dense retr. & Lexical retr. & LLM rerank & Graph view \\
+\midrule
+BRAT~\cite{brat}              & \checkmark & --         & --         & --         & -- \\
+INCEpTION~\cite{inception}    & \checkmark & partial    & \checkmark & --         & -- \\
+MedCATTrainer~\cite{medcattrainer} & \checkmark & \checkmark & \checkmark & -- & -- \\
+\textbf{HELIX (ours)}         & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ==============================================================================
+\section{System Overview}
+\label{sec:system}
+
+HELIX is a client--server application (Fig.~\ref{fig:arch}). A React front end
+talks to a FastAPI service, which orchestrates three back ends: a knowledge-base
+(KB) server exposing dense and lexical retrieval, an LLM re-ranker, and a Neo4j
+graph. All components are configurable per annotation session; the tool is
+domain-agnostic and works with any FAISS-indexable KB, with UMLS as our running
+case.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  node distance=6mm and 12mm,
+  box/.style={draw,rounded corners,align=center,minimum height=8mm,
+              inner sep=3pt,font=\footnotesize},
+  svc/.style={box,fill=blue!6},
+  store/.style={box,fill=black!5},
+  ext/.style={box,fill=green!6},
+  arr/.style={-{Latex[length=2mm]},thin}]
+  \node[svc] (web) {Web UI\\(React)};
+  \node[svc,right=of web] (api) {API\\(FastAPI)};
+  \node[svc,above right=5mm and 14mm of api] (kb) {KB server\\(SAPBERT$+$FAISS,\\BM25$+$$n$-gram)};
+  \node[ext,right=14mm of api] (llm) {LLM re-ranker\\(grounded, RAG)};
+  \node[store,below right=5mm and 14mm of api] (neo) {Neo4j\\knowledge graph};
+  \draw[arr] (web) -- node[above,font=\scriptsize]{HTTP} (api);
+  \draw[arr] (api) -- node[sloped,above,font=\scriptsize]{dense/lexical} (kb);
+  \draw[arr] (api) -- node[above,font=\scriptsize]{rerank} (llm);
+  \draw[arr] (api) -- node[sloped,below,font=\scriptsize]{Cypher} (neo);
+  \begin{scope}[on background layer]
+    \node[draw,dashed,rounded corners,fit=(kb)(llm)(neo),inner sep=6pt,
+          label={[font=\scriptsize]below:configurable back ends}] {};
+  \end{scope}
+\end{tikzpicture}
+\caption{HELIX architecture. The API fuses dense and lexical candidates from the
+KB server, optionally re-ranks them with a grounded LLM, and queries Neo4j for
+candidate/entity neighbourhoods. Each back end is optional and per-session
+configurable.}
+\label{fig:arch}
+\end{figure}
+
+% ------------------------------------------------------------------------------
+\subsection{Hybrid Candidate Retrieval}
+\label{sec:retrieval}
+
+For a mention $m$, HELIX obtains two candidate lists. The \emph{dense} list comes
+from SAPBERT~\cite{sapbert} embeddings indexed with FAISS~\cite{faiss} and scored
+by cosine similarity. The \emph{lexical} list comes from an index built at
+start-up from the same KB metadata, combining BM25~\cite{bm25} over alias
+documents with a character-$n$-gram inverted index (bigrams and trigrams) that
+matches abbreviations and misspellings the tokeniser would fragment. The two
+lexical signals are merged with reciprocal rank fusion (RRF)~\cite{rrf}:
+%
+\begin{equation}
+\mathrm{RRF}(d) = \sum_{r \in R} \frac{1}{k + \mathrm{rank}_r(d)},
+\label{eq:rrf}
+\end{equation}
+%
+where $R$ is the set of ranked lists (BM25, $n$-gram) and $k$ is a smoothing
+constant. The dense and lexical lists are then fused by identifier
+(de-duplicating, keeping the higher score) into a single ranked candidate set
+that HELIX presents to the annotator and passes to the reranker.
+
+The lexical strand is the component that recovers short mentions: an exact or
+near-exact alias match for ``DM'' surfaces \emph{Diabetes Mellitus} even when the
+dense encoder ranks it far down the list. Sec.~\ref{sec:eval} quantifies this
+effect by mention length.
+
+% ------------------------------------------------------------------------------
+\subsection{Grounded LLM Re-ranking}
+\label{sec:llm}
+
+When enabled, an LLM re-ranks the fused candidate set (retrieval-augmented
+generation): it receives the mention, its document context, and the top-$N$
+candidates with labels, aliases, semantic types, and definitions, and returns a
+single chosen identifier, a one-sentence rationale, and a calibrated confidence.
+Crucially the choice is \emph{grounded}: the identifier is constrained to the
+provided candidate set (enforced through a strict enumerated schema), so the LLM
+cannot hallucinate an out-of-KB concept. Requests use a fixed, cached system
+prompt and are memoised on disk keyed by the mention and candidate set, making
+runs cheap and reproducible; any failure falls back silently to the retrieval
+top-1 so the annotator is never blocked. The prompt and model are configurable
+per session (Sec.~\ref{sec:eval} compares models).
+
+% ------------------------------------------------------------------------------
+\subsection{Graph-Aware Disambiguation}
+\label{sec:graph}
+
+HELIX connects to a Neo4j knowledge graph whose nodes are concepts
+($\mathtt{(:Concept\ \{cui,\ name\})}$) and whose edges are typed relations
+($\mathtt{[:RELATES\_TO\ \{rel\}]}$). Two views expose this structure.
+
+\paragraph{Individual level.}
+For a mention's candidate set $C$, HELIX queries how the candidates connect to one
+another and to their one-hop neighbours (Listing~\ref{lst:cypher}), and renders a
+compact node-link graph in a floating, resizable panel. Candidates that inhabit
+different graph neighbourhoods are visibly distinct concepts, which makes
+type-level disambiguation immediate.
+
+\begin{lstlisting}[caption={Candidate-neighbourhood query (edges among candidates
+plus capped one-hop neighbours).},label={lst:cypher},language=SQL]
+MATCH (a:Concept)-[r:RELATES_TO]-(b:Concept)
+WHERE a.cui IN $ids AND b.cui IN $ids AND a.cui < b.cui
+RETURN a.cui AS source, b.cui AS target, r.rel AS rel
+\end{lstlisting}
+
+\paragraph{Document level.}
+Once every mention in a document has been annotated, HELIX assembles the accepted
+identifiers into one subgraph. Reciprocal edges are collapsed and each accepted
+concept is assigned a degree; concepts with no edge to any other accepted concept
+are flagged as \emph{isolated}. The reviewer inspects this subgraph, and for any
+isolated pick can optionally overlay that mention's alternative candidates
+(drawn on an outer ring in a distinct colour) to see which candidate connects to
+the rest of the document. Selecting a better-connected candidate rewrites the
+annotation and re-computes the coherence flags. This makes collective
+disambiguation an interactive, auditable step rather than an opaque inference,
+echoing coherence-based collective linking~\cite{collective2020,kgdisamb2021}
+while keeping the human in control.
+
+% ------------------------------------------------------------------------------
+\subsection{Annotation Workflow}
+\label{sec:workflow}
+
+The annotator sees, for each mention, the source document with the mention
+highlighted in context and a ranked, dual-view candidate list (dense and
+lexical). Selections are \emph{multi-valued}: a mention may map to several correct
+concepts, recorded pipe-joined (e.g.\ \texttt{C0011849|C0011860}). A configurable
+\emph{auto-select} mechanism pre-selects the top candidate (the LLM's pick when
+re-ranking is on, otherwise the highest-scoring candidate, with entity-type-aware
+tie-breaking) and advances after an adjustable countdown, which the annotator can
+interrupt. Every decision---accept, override, manual entry, NIL---is written to a
+self-documenting output, enabling the acceptance/override analysis in
+Sec.~\ref{sec:eval}. Figures~\ref{fig:ui}~and~\ref{fig:docreview} show the
+annotation and document-review surfaces.
+
+\begin{figure}[t]
+\centering
+\fbox{\parbox[c][45mm][c]{0.92\textwidth}{\centering\itshape
+\todo{Insert screenshot of the annotation screen: left = entity + highlighted
+document context; right = dense/lexical candidate lists, LLM pick banner, and the
+floating candidate-graph panel.}}}
+\caption{HELIX annotation interface (individual level).}
+\label{fig:ui}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\fbox{\parbox[c][45mm][c]{0.92\textwidth}{\centering\itshape
+\todo{Insert screenshot of the document-review screen: left = mention list with
+connected/isolated status dots; right = the document subgraph (selected entities
+inner ring, candidate suggestions outer ring in a distinct colour).}}}
+\caption{Document-level coherence-negotiation view.}
+\label{fig:docreview}
+\end{figure}
+
+% ==============================================================================
+\section{Implementation and Reproducibility}
+\label{sec:impl}
+
+HELIX is implemented as a React/TypeScript front end, a FastAPI (Python) API, and
+a Flask KB server that loads a SAPBERT FAISS index and builds the lexical index at
+start-up. The graph store is Neo4j; the LLM re-ranker uses a configurable
+provider. Connection and schema settings live in version-controlled configuration
+files, and the entire stack ships as containers (one service per container: KB,
+API, web, Neo4j) so the system can be reproduced with a single command; a local
+launcher is also provided. A separate utility converts UMLS \texttt{MRREL} and
+\texttt{MRCONSO} into Neo4j bulk-import CSVs, attaching English concept names to
+every node. The source, configuration schema, and evaluation harness are
+released.\footnote{\todo{repository URL (anonymised for review if required).}}
+
+% ==============================================================================
+\section{Evaluation}
+\label{sec:eval}
+
+We evaluate the automatic pipeline against an already-annotated gold dataset and
+report a single-annotator case study of graph-assisted review. \todo{Confirm the
+final dataset, splits, and all numbers below with \texttt{eval/score.py} before
+submission; the values shown are illustrative placeholders.}
+
+\subsection{Data and Metrics}
+We use \todo{dataset name + version, e.g.\ BioNNE-R English dev} with
+$\mathtt{N=}$\todo{N} mentions linked to UMLS. Gold is multi-valued (several
+acceptable CUIs joined with ``|''); a prediction is correct under \emph{any-match}
+if the top-1 identifier is in the gold set. We report top-1 accuracy
+(\textbf{Acc@1}) and \textbf{Recall@$k$} (the gold set overlaps the top-$k$
+candidates, $k=$\todo{k}), with breakdowns by mention length and entity type.
+
+\subsection{Retrieval and Re-ranking Ablation}
+Table~\ref{tab:main} isolates the contribution of each component. The hybrid
+configuration is expected to dominate the single-strand baselines, and grounded
+LLM re-ranking to add a further increment.
+
+\begin{table}[t]
+\caption{Main results (Acc@1 / Recall@$k$). \todo{replace \result{underlined}
+placeholders with real numbers from \texttt{eval/score.py}.}}
+\label{tab:main}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Configuration & Acc@1 & Recall@$k$ \\
+\midrule
+Lexical only        & \result{0.00} & \result{0.00} \\
+Dense only          & \result{0.00} & \result{0.00} \\
+Hybrid              & \result{0.00} & \result{0.00} \\
+Hybrid $+$ LLM rerank & \result{\textbf{0.00}} & \result{0.00} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Where Hybrid Retrieval Helps: Mention Length}
+Fig.~\ref{fig:len} breaks Acc@1 down by mention length. We expect the lexical and
+hybrid strands to hold a large advantage on short mentions ($\leq 4$ characters),
+where dense retrieval degrades, and the gap to narrow as mentions lengthen.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.85\textwidth,height=5.2cm,
+  ybar,bar width=7pt,
+  enlarge x limits=0.25,
+  ylabel={Acc@1},ymin=0,ymax=1,
+  symbolic x coords={short,medium,long},
+  xtick=data,
+  xticklabels={$\leq$4 chars,5--8 chars,$>$8 chars},
+  legend style={at={(0.5,-0.22)},anchor=north,legend columns=-1,font=\scriptsize},
+  tick label style={font=\scriptsize},label style={font=\scriptsize},
+]
+% TODO: replace all y-values with real numbers from eval/score.py (by_len).
+\addplot coordinates {(short,0.30) (medium,0.55) (long,0.72)};
+\addplot coordinates {(short,0.62) (medium,0.60) (long,0.55)};
+\addplot coordinates {(short,0.66) (medium,0.70) (long,0.78)};
+\legend{Dense,Lexical,Hybrid}
+\end{axis}
+\end{tikzpicture}
+\caption{Acc@1 by mention length (\textbf{illustrative placeholder data}
+--- \todo{replace with real values}). The hybrid strand is expected to recover
+the short-mention regime where dense retrieval fails.}
+\label{fig:len}
+\end{figure}
+
+\subsection{Per-Configuration Accuracy Overview}
+Fig.~\ref{fig:cfg} summarises Acc@1 per configuration for quick comparison.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.7\textwidth,height=4.8cm,
+  xbar,bar width=10pt,
+  xlabel={Acc@1},xmin=0,xmax=1,
+  symbolic y coords={Lexical,Dense,Hybrid,HybridLLM},
+  ytick=data,
+  yticklabels={Lexical,Dense,Hybrid,Hybrid+LLM},
+  nodes near coords,nodes near coords style={font=\scriptsize},
+  tick label style={font=\scriptsize},label style={font=\scriptsize},
+]
+% TODO: replace with real numbers (same as Table 2).
+\addplot coordinates {(0.61,Lexical) (0.66,Dense) (0.74,Hybrid) (0.78,HybridLLM)};
+\end{axis}
+\end{tikzpicture}
+\caption{Acc@1 per configuration (\textbf{illustrative placeholder data} ---
+\todo{replace}).}
+\label{fig:cfg}
+\end{figure}
+
+\subsection{LLM Model Trade-off}
+Table~\ref{tab:llm} compares reranker models on the accuracy/cost/latency axis to
+justify the default choice.
+
+\begin{table}[t]
+\caption{LLM re-ranker trade-off. \todo{fill from a sweep over models on a fixed
+subset; report cost per 1k mentions and mean latency.}}
+\label{tab:llm}
+\centering
+\begin{tabular}{lccc}
+\toprule
+Reranker model & Acc@1 & Cost / 1k mentions & Latency (ms) \\
+\midrule
+Small (default) & \result{0.00} & \result{\$0.00} & \result{000} \\
+Medium          & \result{0.00} & \result{\$0.00} & \result{000} \\
+Large           & \result{0.00} & \result{\$0.00} & \result{000} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Graph-Assisted Review: Case Study}
+Using HELIX's provenance log on a single-annotator session, we report:
+(i) the suggestion \emph{acceptance rate} (fraction of auto/LLM picks kept
+unchanged), (ii) the \emph{override rate}, and (iii) the number of document-level
+switches together with the resulting \emph{reduction in isolated picks}.
+\todo{Insert the numbers: e.g.\ ``across \result{D} documents and \result{M}
+mentions, \result{X}\% of suggestions were accepted; document-level review changed
+\result{S} selections and reduced isolated picks from \result{I0} to
+\result{I1}.''} We also give a qualitative walk-through of one document in which
+graph coherence corrected an initially isolated pick. \todo{add worked example.}
+
+% ==============================================================================
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+HELIX is deliberately positioned as \emph{assistive}: the LLM and graph components
+inform a human decision rather than replace it, and the document-level step is a
+human-driven analogue of collective disambiguation rather than automatic
+inference. This design keeps annotations auditable---every suggestion, override,
+and renegotiation is logged---which matters for downstream KG construction.
+
+Several limitations apply. Our study uses a single annotator, so we report
+suggestion-acceptance and coherence-reduction rather than inter-annotator
+agreement; a multi-annotator study is future work. The graph view depends on the
+richness of the underlying KB relations---on a graph dominated by cross-vocabulary
+mapping edges, coherence is weaker than on one with hierarchical relations, though
+HELIX allows relation-type filtering to focus the view. Finally, LLM re-ranking
+adds cost and latency and depends on an external service; HELIX mitigates this
+with prompt caching, on-disk memoisation, and graceful fallback, and remains fully
+functional with re-ranking disabled.
+
+% ==============================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented HELIX, an expert-in-the-loop biomedical entity-linking annotation
+tool that combines hybrid dense$+$lexical retrieval, grounded LLM re-ranking, and
+a two-level graph-aware review process---candidate-neighbourhood disambiguation
+and a document-level coherence-negotiation view. HELIX targets three concrete
+pain points in EL curation: short-mention retrieval failures, flat candidate
+presentation, and incoherent per-mention decisions. We release the system, its
+configuration, and an evaluation harness, and report an empirical study on a
+biomedical corpus. \todo{one-sentence headline result once numbers are final.}
+
+\begin{credits}
+\subsubsection{\ackname}
+\todo{funding / acknowledgements.}
+\subsubsection{\discintname}
+The authors have no competing interests to declare that are relevant to the
+content of this article. \todo{update if needed.}
+\end{credits}
+
+% ---- Bibliography ----
+\bibliographystyle{splncs04}
+\bibliography{references}
+
+\end{document}

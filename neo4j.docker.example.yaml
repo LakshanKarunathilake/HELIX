@@ -1,0 +1,17 @@
+# Neo4j connection used INSIDE Docker (mounted into the API container as
+# /app/neo4j.yaml). Copy to neo4j.docker.yaml.
+#
+# The uri must be reachable from the api container — use the compose service
+# name, not localhost.
+
+uri: bolt://neo4j:7687          # compose service; use host.docker.internal for host Neo4j
+user: neo4j
+password: please-change          # must match NEO4J_PASSWORD in .env
+database: umls                   # Enterprise only; use 'neo4j' on Community
+
+schema:
+  node_label: Concept
+  id_prop: cui
+  rel_type: RELATES_TO
+  rel_prop: rel
+  name_prop: name                # after rebuilding nodes with English names (graph/README.md)
