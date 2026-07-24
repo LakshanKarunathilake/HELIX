@@ -39,6 +39,8 @@ export const createSession = (body: {
   score_tie_threshold?: number
   entity_type_col?: string | null
   enable_llm_rerank?: boolean
+  llm_provider?: string
+  llm_base_url?: string | null
   llm_model?: string
   llm_top_n?: number
   llm_prompt?: string | null
@@ -80,11 +82,26 @@ export const getProgress = (name: string) =>
 export const getRow = (name: string, idx: number) =>
   req<RowData>(`/sessions/${name}/rows/${idx}`)
 
-export const saveRow = (name: string, idx: number, annotations: Record<string, string>) =>
+export const saveRow = (
+  name: string,
+  idx: number,
+  annotations: Record<string, string>,
+  llm_used?: string | null,
+) =>
   req<{ ok: boolean }>(`/sessions/${name}/rows/${idx}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ annotations }),
+    body: JSON.stringify({ annotations, llm_used }),
+  })
+
+export const saveRowsBatch = (
+  name: string,
+  updates: { idx: number; annotations: Record<string, string>; llm_used?: string }[],
+) =>
+  req<{ ok: boolean; written: number }>(`/sessions/${name}/rows/batch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ updates }),
   })
 
 // ── candidates ────────────────────────────────────────────────────────────────
@@ -130,6 +147,35 @@ export const getDocumentGraph = (name: string, cuis: string[]) =>
 export const getDocumentMentions = (name: string, idx: number) =>
   req<DocumentMentions>(`/sessions/${name}/documents/mentions?idx=${idx}`)
 
+export const listDocuments = (name: string) =>
+  req<{ documents: { doc_id: string; first_idx: number; mentions: number }[] }>(
+    `/sessions/${name}/documents`,
+  ).then(r => r.documents)
+
+export const optimizeAllDocuments = (name: string, skipAnnotated = true) =>
+  req<{
+    enabled: boolean
+    documents?: number
+    mentions_written?: number
+    edges_before?: number
+    edges_after?: number
+    error?: string
+  }>(`/sessions/${name}/graph/optimize-all?skip_annotated=${skipAnnotated}`, { method: 'POST' })
+
+export const optimizeDocument = (name: string, idx: number, kb_name: string) =>
+  req<{
+    selections: Record<string, string>
+    edges_before: number
+    edges_after: number
+    changed: number
+    enabled: boolean
+    error?: string
+  }>(`/sessions/${name}/graph/optimize`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ idx, kb_name }),
+  })
+
 // ── KB test ───────────────────────────────────────────────────────────────────
 
 export const testKB = (kb_config: KBConfig, label: string) =>
@@ -139,8 +185,43 @@ export const testKB = (kb_config: KBConfig, label: string) =>
     body: JSON.stringify({ kb_config, label }),
   })
 
-// ── export ────────────────────────────────────────────────────────────────────
+// ── export & per-step snapshots ────────────────────────────────────────────────
 
-export const exportCSV = (name: string) => {
-  window.open(`${BASE}/sessions/${name}/export`, '_blank')
+export const exportCSV = (name: string, stage?: string) => {
+  const q = stage ? `?stage=${encodeURIComponent(stage)}` : ''
+  window.open(`${BASE}/sessions/${name}/export${q}`, '_blank')
 }
+
+// ── performance metrics ────────────────────────────────────────────────────────
+
+export const getMetricsStatus = () => req<{ enabled: boolean }>('/metrics/status')
+
+export const toggleMetrics = (enabled: boolean) =>
+  req<{ enabled: boolean }>('/metrics/toggle', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  })
+
+export const getMetricsInsights = (name: string) =>
+  req<import('@/types').MetricsInsights>(`/sessions/${name}/metrics/insights`)
+
+export const resetMetrics = (name: string) =>
+  req<{ ok: boolean }>(`/sessions/${name}/metrics/reset`, { method: 'POST' })
+
+export const getGraphStats = (name: string) =>
+  req<import('@/types').GraphStats>(`/sessions/${name}/graph/stats`)
+
+export const resetGraphStats = (name: string) =>
+  req<{ ok: boolean }>(`/sessions/${name}/graph/stats/reset`, { method: 'POST' })
+
+export const exportMetrics = (name: string) =>
+  window.open(`${BASE}/sessions/${name}/metrics/export`, '_blank')
+
+export const snapshotStage = (name: string, stage: string) =>
+  req<{ ok: boolean; stage: string }>(`/sessions/${name}/snapshot?stage=${encodeURIComponent(stage)}`, {
+    method: 'POST',
+  })
+
+export const listSnapshots = (name: string) =>
+  req<{ stages: string[] }>(`/sessions/${name}/snapshots`).then(r => r.stages)

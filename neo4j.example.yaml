@@ -20,7 +20,8 @@ schema:
   id_prop: cui             # node property matching your candidate CUIs
   rel_type: RELATES_TO     # relationship type
   rel_prop: rel            # edge property holding the semantic relation (e.g. "mapped_from")
-  name_prop: concept       # node property for a human-readable name (falls back to the id)
+  name_prop: name          # human-readable name (English concept name; falls back to the id).
+                           # Use 'concept' only for an old graph built without names — see graph/README.md.
 
   # Optional — focus the graph on specific relation labels (values of `rel`).
   # Leave both empty/omitted for all relations. Use ONE of these, not both.

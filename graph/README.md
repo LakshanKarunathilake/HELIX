@@ -100,3 +100,67 @@ bin/neo4j-admin database import full umls \
 Streaming, set-deduplicated. MRREL (~88M lines) ≈ 2–5 min; MRCONSO name pass is
 restricted to CUIs that appear in relationships to keep memory modest. Use
 `sample:` in the config for a quick test build first.
+
+---
+
+## MeSH-only graph  (`build_mesh_graph.py`)
+
+Builds the same CSV format but restricted to the **MeSH** slice of UMLS: nodes are
+the CUIs that have an `SAB=MSH` atom (each keeps its MeSH id, e.g. `D012711`), and
+an edge is kept only when **both** endpoints are MeSH concepts. Edge labels use
+MRREL `RELA` when present, else the coarse `REL` mapped to readable labels
+(`broader`/`narrower`/…); `--rela-only` reproduces the RELA-only convention above.
+
+```bash
+python graph/build_mesh_graph.py \
+  --mrconso /path/UMLS/MRCONSO.RRF --mrrel /path/UMLS/MRREL.RRF   # → graph/out/mesh/ (default)
+```
+
+Output in **`graph/out/mesh/`**: `mesh_nodes.csv` (`concept:ID, name, mesh, cui, :LABEL`) +
+`mesh_relations.csv` + `mesh_graph_summary.json`.
+
+> **Output layout** — each graph lives in its own folder so they never clash:
+> the full UMLS graph in `graph/out/umls/` (`umls_processor.py`, default) and the MeSH
+> graph in `graph/out/mesh/` (`build_mesh_graph.py`, default).
+
+## Loading CSVs into a running server  (`load_neo4j.py`)
+
+The offline `neo4j-admin` path above needs `$NEO4J_HOME` and a stopped database.
+When you have a **running** Neo4j instead (e.g. Neo4j Desktop), `load_neo4j.py`
+loads any of these CSV pairs over Bolt — reusing the connection in `neo4j.yaml`
+(via `eltool.graph_client`) — and creates the id index for you:
+
+1. (Enterprise) `CREATE DATABASE <db>` and wait until online (`--recreate` to DROP first);
+2. a **uniqueness constraint** on the id property (`:Concept(cui)`), created *before* load
+   so node upserts and relationship endpoint lookups are indexed;
+3. loads nodes + relationships, either **server-side `LOAD CSV`** (pass `--import-dir`, faster:
+   the CSVs are copied there and read by the server) or **streamed over Bolt** (default, needs
+   no filesystem access);
+4. any secondary indexes you ask for (`--index mesh --index name`);
+5. verification (node/rel counts + indexes).
+
+```bash
+# MeSH CSVs → a NEW 'mesh' database (leaves 'umls' untouched)
+python graph/load_neo4j.py --database mesh --index mesh --index name \
+  --user neo4j --password <ADMIN_PASSWORD>          # defaults to graph/out/mesh/mesh_*.csv
+
+# faster: copy into the server's import dir and load with LOAD CSV
+python graph/load_neo4j.py --database mesh --index mesh --index name \
+  --import-dir "/path/to/dbms/import" --user neo4j --password <ADMIN_PASSWORD>
+
+# RE-IMPORT the full UMLS graph → the 'umls' database (--recreate DROPs + rebuilds it).
+# The uniqueness constraint/index on cui is created automatically.
+python graph/load_neo4j.py --database umls --recreate \
+  --nodes graph/out/umls/umls_nodes.csv --relationships graph/out/umls/umls_relations.csv \
+  --user neo4j --password <ADMIN_PASSWORD>
+```
+
+> Find the server's import directory from `--dry-run` (it prints
+> `server.directories.import` when your account can read settings), or in Neo4j Desktop:
+> the DBMS's **Open folder → Import**.
+
+> **Credentials:** the account in `neo4j.yaml` is typically **read-only** (it exists
+> for HELIX's graph *queries*). Creating a database and writing data needs an **admin**
+> account — pass `--user/--password` (or set `NEO4J_ADMIN_USER`/`NEO4J_ADMIN_PASSWORD`).
+> The script detects a read-only account up front and prints the exact command to re-run.
+> Use `--dry-run` to preview the plan without writing.

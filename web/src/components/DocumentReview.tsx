@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { X, AlertTriangle, CheckCircle2, Loader2, Ban } from 'lucide-react'
+import { X, AlertTriangle, CheckCircle2, Loader2, Ban, Zap } from 'lucide-react'
 import * as api from '@/api/client'
 import { CandidateCard } from './CandidateCard'
 import { GraphPanel } from './GraphPanel'
@@ -30,6 +30,8 @@ export function DocumentReview({ sessionName, rowIdx, kb, onClose, onChanged }: 
   const [loadingCands, setLoadingCands] = useState(false)
   const [loading, setLoading] = useState(true)
   const [showCandidates, setShowCandidates] = useState(false)   // overlay off by default
+  const [optimizing, setOptimizing] = useState(false)
+  const [optResult, setOptResult] = useState('')
 
   // ── load the document's mentions + current selections ────────────────────
   useEffect(() => {
@@ -117,9 +119,34 @@ export function DocumentReview({ sessionName, rowIdx, kb, onClose, onChanged }: 
 
   const switchTo = useCallback(async (idx: number, id: string) => {
     setSelected(prev => ({ ...prev, [idx]: id }))
-    await api.saveRow(sessionName, idx, { [kb.name]: id })
+    await api.saveRow(sessionName, idx, { [kb.name]: id }, '')  // manual/graph → not LLM
     onChanged?.()
   }, [sessionName, kb.name, onChanged])
+
+  // ── one-click: maximise graph connections across the document ─────────────
+  const autoMatch = useCallback(async () => {
+    setOptimizing(true)
+    setOptResult('')
+    try {
+      const r = await api.optimizeDocument(sessionName, rowIdx, kb.name)
+      if (r.error) { setOptResult(`Auto-match unavailable: ${r.error}`); return }
+      const changes = Object.entries(r.selections).filter(([i, cui]) => selected[+i] !== cui)
+      setSelected(prev => ({ ...prev, ...Object.fromEntries(Object.entries(r.selections).map(([i, c]) => [+i, c])) }))
+      // ONE atomic write — avoids the concurrent read-modify-write race that
+      // previously dropped rows and corrupted the progress count.
+      if (changes.length) {
+        await api.saveRowsBatch(sessionName, changes.map(([i, cui]) => ({
+          idx: +i, annotations: { [kb.name]: cui }, llm_used: '',
+        })))
+      }
+      onChanged?.()
+      setOptResult(`Connections ${r.edges_before} → ${r.edges_after} · ${r.changed} selection(s) updated`)
+    } catch (e: any) {
+      setOptResult(`Auto-match failed: ${e?.message ?? e}`)
+    } finally {
+      setOptimizing(false)
+    }
+  }, [sessionName, rowIdx, kb.name, selected, onChanged])
 
   const active = activeIdx != null ? mentions.find(m => m.idx === activeIdx) : null
   const activeCands = activeIdx != null ? cands[activeIdx] : undefined
@@ -145,7 +172,22 @@ export function DocumentReview({ sessionName, rowIdx, kb, onClose, onChanged }: 
               </span>
             )}
           </div>
-          <button onClick={onClose} className="ml-auto text-gray-400 hover:text-gray-700">
+          {optResult && (
+            <span className="text-xs text-brand-700 bg-brand-50 border border-brand-200 rounded-full px-2 py-0.5">
+              {optResult}
+            </span>
+          )}
+          <button
+            onClick={autoMatch}
+            disabled={optimizing || loading}
+            className="ml-auto btn-primary text-xs py-1.5 disabled:opacity-60"
+            title="Automatically pick candidates across the document to maximise graph connections"
+          >
+            {optimizing
+              ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Optimising…</>
+              : <><Zap className="w-3.5 h-3.5" /> Auto-match (maximise connections)</>}
+          </button>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-700">
             <X className="w-5 h-5" />
           </button>
         </div>

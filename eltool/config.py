@@ -82,6 +82,8 @@ class SessionConfig(BaseModel):
     entity_type_col: str | None = None  # info column whose value is matched against semantic_groups
     # LLM re-ranking (RAG disambiguation over the retrieved candidate set)
     enable_llm_rerank: bool = False
+    llm_provider: str = "anthropic"     # "anthropic" | "openai" (openai covers OpenAI/Gemini/local)
+    llm_base_url: str | None = None     # for openai-compatible endpoints (e.g. Gemini, Ollama)
     llm_model: str = "claude-haiku-4-5"
     llm_top_n: int = 10             # how many fused candidates to hand the LLM
     llm_prompt: str | None = None   # custom system prompt; None = built-in default

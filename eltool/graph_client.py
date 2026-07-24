@@ -26,6 +26,8 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -236,6 +238,20 @@ class Neo4jGraphClient:
         )
         return self._assemble(ids, among, neigh)
 
+    # ── names for a set of ids (so nodes show a human-readable label) ─────────
+    def _names_for(self, ids: list[str]) -> dict[str, str]:
+        """id -> human-readable name (from the schema's name_prop). Empty if none."""
+        ids = [str(i) for i in ids if i]
+        if not ids:
+            return {}
+        s = self.schema
+        L, P, N = s.node_label, s.id_prop, s.name_prop
+        rows = self._run(
+            f"MATCH (n:{L}) WHERE n.{P} IN $ids RETURN n.{P} AS id, n.{N} AS name",
+            ids=ids,
+        )
+        return {r["id"]: r["name"] for r in rows if r.get("name")}
+
     # ── document level: subgraph among accepted entities ─────────────────────
     def document_graph(self, cuis: list[str]) -> GraphResult:
         """Subgraph among the CUIs the human accepted across a document."""
@@ -252,6 +268,8 @@ class Neo4jGraphClient:
             ids=cuis, **rparams,
         )
         res = self._assemble(cuis, among, [])
+        # human-readable names for the accepted nodes (the `among` query only returns ids)
+        names = self._names_for(cuis)
         # connection count per accepted node → drives the "isolated pick" flag.
         degree: dict[str, int] = {c: 0 for c in cuis}
         for e in res.edges:
@@ -260,7 +278,108 @@ class Neo4jGraphClient:
         for n in res.nodes:
             n["degree"] = degree.get(n["id"], 0)
             n["isolated"] = degree.get(n["id"], 0) == 0
+            if names.get(n["id"]):
+                n["name"] = names[n["id"]]
         return res
+
+    # ── automatic collective disambiguation ─────────────────────────────────
+    def _edges_among(self, cuis: list[str]) -> list[tuple[str, str]]:
+        """Undirected edges (as ordered pairs) among the given CUIs."""
+        if not cuis:
+            return []
+        s = self.schema
+        L, P, R = s.node_label, s.id_prop, s.rel_type
+        rf, rparams = s.rel_filter("r")
+        rows = self._run(
+            f"MATCH (a:{L})-[r:{R}]-(b:{L}) "
+            f"WHERE a.{P} IN $ids AND b.{P} IN $ids AND a.{P} < b.{P}{rf} "
+            f"RETURN DISTINCT a.{P} AS source, b.{P} AS target",
+            ids=cuis, **rparams,
+        )
+        return [(r["source"], r["target"]) for r in rows]
+
+    def optimize_selection(
+        self,
+        mention_candidates: list[tuple[int, list[str]]],
+        fixed: dict[int, str] | None = None,
+        iterations: int = 10,
+    ) -> dict[str, Any]:
+        """
+        Pick one candidate per mention to maximise the number of graph edges among
+        the selected concepts (greedy hill-climbing / collective disambiguation).
+
+        mention_candidates: [(mention_idx, [candidate_cui, ...]), ...] to optimise.
+        fixed: mentions whose selection is pinned (already annotated); their CUIs
+               count towards coherence but are never changed.
+        Returns {selections: {idx: cui}} for the OPTIMISED mentions only, plus
+        {edges_before, edges_after, changed}.
+        """
+        fixed = dict(fixed or {})
+        mc = [(idx, [c for c in cands if c]) for idx, cands in mention_candidates]
+        mc = [(idx, cands) for idx, cands in mc if cands]
+        candmap = dict(mc)
+        order = [idx for idx, _ in mc]
+        universe = sorted({c for _, cands in mc for c in cands} | set(fixed.values()))
+        if not universe or not order:
+            return {"selections": {}, "edges_before": 0, "edges_after": 0, "changed": 0,
+                    "nodes_queried": 0, "edges_found": 0, "query_ms": 0.0, "iterations": 0}
+
+        # Neo4j edge query — the expensive part; measure it explicitly.
+        _t0 = time.perf_counter()
+        edge_pairs = self._edges_among(universe)
+        query_ms = (time.perf_counter() - _t0) * 1000.0
+
+        adj: dict[str, set[str]] = defaultdict(set)
+        for a, b in edge_pairs:
+            adj[a].add(b)
+            adj[b].add(a)
+
+        # full state = pinned mentions + optimisable ones (init from retrieval top-1)
+        sel: dict[int, str] = dict(fixed)
+        for idx in order:
+            sel[idx] = candmap[idx][0]
+        initial = dict(sel)
+
+        def internal_edges(values) -> int:
+            vals = list({v for v in values})
+            c = 0
+            for i in range(len(vals)):
+                ai = adj.get(vals[i], ())
+                for j in range(i + 1, len(vals)):
+                    if vals[j] in ai:
+                        c += 1
+            return c
+
+        iters = 0
+        for _ in range(iterations):
+            iters += 1
+            changed = False
+            for idx in order:                      # only optimisable mentions move
+                cands = candmap[idx]
+                others = {sel[j] for j in sel if j != idx}
+                best = max(
+                    cands,
+                    key=lambda c: (len(adj.get(c, set()) & others),
+                                   c == sel.get(idx),
+                                   -cands.index(c)),
+                )
+                if best != sel.get(idx):
+                    sel[idx] = best
+                    changed = True
+            if not changed:
+                break
+
+        return {
+            "selections": {str(idx): sel[idx] for idx in order},
+            "edges_before": internal_edges(initial.values()),
+            "edges_after": internal_edges(sel.values()),
+            "changed": sum(1 for idx in order if sel[idx] != initial.get(idx)),
+            # query cost / scale stats
+            "nodes_queried": len(universe),      # candidate CUIs sent to Neo4j
+            "edges_found": len(edge_pairs),      # edges Neo4j returned among them
+            "query_ms": round(query_ms, 2),      # Neo4j edge-query latency
+            "iterations": iters,                 # greedy hill-climb passes
+        }
 
     # ── shared assembly ──────────────────────────────────────────────────────
     def _assemble(self, ids: list[str], among, neigh) -> GraphResult:

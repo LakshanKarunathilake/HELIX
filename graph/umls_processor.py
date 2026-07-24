@@ -142,7 +142,7 @@ def run_from_config(cfg: dict) -> tuple[Path, Path]:
     proc = UMLSProcessor(
         mrrel_path=cfg["mrrel"],
         mrconso_path=cfg.get("mrconso"),
-        output_dir=cfg.get("output_dir", "graph/out"),
+        output_dir=cfg.get("output_dir", "graph/out/umls"),
     )
     return proc.process_all(
         sample_size=cfg.get("sample"),
@@ -157,7 +157,7 @@ def main() -> None:
     p.add_argument("--config", help="YAML config (graph/graph_config.yaml). Overrides the flags below.")
     p.add_argument("--mrrel", help="Path to MRREL.RRF")
     p.add_argument("--mrconso", help="Path to MRCONSO.RRF (omit to skip names)")
-    p.add_argument("--output", "-o", default="graph/out", help="Output directory")
+    p.add_argument("--output", "-o", default="graph/out/umls", help="Output directory")
     p.add_argument("--sample", "-s", type=int, help="Sample N relationships (testing)")
     p.add_argument("--prefix", default="umls", help="Output file prefix")
     p.add_argument("--language", default="ENG", help="Concept-name language (MRCONSO LAT)")

@@ -8,3 +8,5 @@ uvicorn[standard]>=0.29
 python-multipart>=0.0.9
 anthropic>=0.86
 neo4j>=5.14
+openai>=1.40
+psutil>=5.9

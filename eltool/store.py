@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 ANNOTATOR_COL = "annotator"
+LLM_COL = "llm_used"   # records which LLM (provider/model) produced an accepted annotation
 
 
 def detect_delimiter(path: Path) -> str:
@@ -29,6 +30,8 @@ def output_columns(input_cols: list[str], kb_names: list[str]) -> list[str]:
     cols = list(input_cols)
     if ANNOTATOR_COL not in cols:
         cols.append(ANNOTATOR_COL)
+    if LLM_COL not in cols:
+        cols.append(LLM_COL)
     for kb in kb_names:
         if kb not in cols:
             cols.append(kb)
@@ -67,6 +70,7 @@ def init_output(
 
     df = input_df.copy()
     df[ANNOTATOR_COL] = ""
+    df[LLM_COL] = ""
     for kb in kb_names:
         df[kb] = ""
     df = df[cols]
@@ -85,8 +89,11 @@ def write_row(
     row_idx: int,
     annotator: str,
     kb_values: dict[str, str],
+    llm_used: str | None = None,
 ) -> pd.DataFrame:
     df.at[row_idx, ANNOTATOR_COL] = annotator
+    if llm_used is not None:            # "" clears it (human override); None leaves it untouched
+        df.at[row_idx, LLM_COL] = llm_used
     for kb, val in kb_values.items():
         df.at[row_idx, kb] = val
     save_output(out_path, df)

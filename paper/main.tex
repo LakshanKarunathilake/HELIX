@@ -68,10 +68,11 @@ neighbourhood in a connected knowledge graph (Neo4j), so annotators disambiguate
 by graph context rather than surface text; at the \emph{document} level, the
 accepted entities are assembled into one subgraph, isolated picks are flagged for
 renegotiation, and identifiers can be rearranged until the document's entity set
-is globally coherent. We evaluate HELIX on a biomedical entity-linking corpus,
+is globally coherent. We evaluate HELIX on the BC5CDR-chemical corpus,
 reporting top-1 accuracy across lexical, dense, hybrid, and hybrid+LLM
-configurations with breakdowns by mention length and entity type, and a
-single-annotator case study of graph-assisted review. HELIX and a reproducible
+configurations with breakdowns by mention length and entity type, a
+single-annotator case study of graph-assisted review, and a profile of query cost
+and latency (including the Neo4j graph-query cost per document). HELIX and a reproducible
 setup are released to support scalable entity-linking annotation.
 
 \keywords{Biomedical Entity Linking \and Knowledge Graphs \and
@@ -383,12 +384,20 @@ final dataset, splits, and all numbers below with \texttt{eval/score.py} before
 submission; the values shown are illustrative placeholders.}
 
 \subsection{Data and Metrics}
-We use \todo{dataset name + version, e.g.\ BioNNE-R English dev} with
-$\mathtt{N=}$\todo{N} mentions linked to UMLS. Gold is multi-valued (several
-acceptable CUIs joined with ``|''); a prediction is correct under \emph{any-match}
-if the top-1 identifier is in the gold set. We report top-1 accuracy
-(\textbf{Acc@1}) and \textbf{Recall@$k$} (the gold set overlaps the top-$k$
-candidates, $k=$\todo{k}), with breakdowns by mention length and entity type.
+We evaluate on \textbf{BC5CDR-chemical}~\cite{bc5cdr}, a standard biomedical
+entity-linking benchmark of chemical mentions linked to MeSH, using the
+BioSyn/SAPBERT preprocessing. It provides train\,/\,dev\,/\,test splits of
+$4{,}891$\,/\,$5{,}029$\,/\,$5{,}015$ mentions; the dev split covers $612$
+distinct concepts, and $16\%$ of dev mentions are \emph{short}
+($\leq 4$ characters, e.g.\ ``oct''), the regime where dense retrieval degrades.
+Gold is multi-valued for composite mentions (component MeSH identifiers joined
+with ``|''); a prediction is correct under \emph{any-match} if the top-1
+identifier is in the gold set. We report top-1 accuracy (\textbf{Acc@1}) and
+\textbf{Recall@$k$} ($k{=}10$), with breakdowns by mention length and entity type,
+and additionally report Neo4j query cost and end-to-end latency
+(Sec.~\ref{sec:cost}). All configurations query the same SAPBERT index built from
+the BC5CDR chemical dictionary, so predicted identifiers are MeSH ids directly
+comparable to the gold.
 
 \subsection{Retrieval and Re-ranking Ablation}
 Table~\ref{tab:main} isolates the contribution of each component. The hybrid
@@ -396,18 +405,21 @@ configuration is expected to dominate the single-strand baselines, and grounded
 LLM re-ranking to add a further increment.
 
 \begin{table}[t]
-\caption{Main results (Acc@1 / Recall@$k$). \todo{replace \result{underlined}
-placeholders with real numbers from \texttt{eval/score.py}.}}
+\caption{Main results on BC5CDR-chemical (Acc@1 / Recall@10). \todo{replace
+\result{underlined} placeholders with real numbers from
+\texttt{eval/run\_bc5cdr.sh} on dev and test.}}
 \label{tab:main}
 \centering
-\begin{tabular}{lcc}
+\begin{tabular}{lcccc}
 \toprule
-Configuration & Acc@1 & Recall@$k$ \\
+ & \multicolumn{2}{c}{Dev} & \multicolumn{2}{c}{Test} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+Configuration & Acc@1 & R@10 & Acc@1 & R@10 \\
 \midrule
-Lexical only        & \result{0.00} & \result{0.00} \\
-Dense only          & \result{0.00} & \result{0.00} \\
-Hybrid              & \result{0.00} & \result{0.00} \\
-Hybrid $+$ LLM rerank & \result{\textbf{0.00}} & \result{0.00} \\
+Lexical only          & \result{0.00} & \result{0.00} & \result{0.00} & \result{0.00} \\
+Dense only            & \result{0.00} & \result{0.00} & \result{0.00} & \result{0.00} \\
+Hybrid                & \result{0.00} & \result{0.00} & \result{0.00} & \result{0.00} \\
+Hybrid $+$ LLM rerank & \result{\textbf{0.00}} & \result{0.00} & \result{\textbf{0.00}} & \result{0.00} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -499,6 +511,68 @@ mentions, \result{X}\% of suggestions were accepted; document-level review chang
 \result{S} selections and reduced isolated picks from \result{I0} to
 \result{I1}.''} We also give a qualitative walk-through of one document in which
 graph coherence corrected an initially isolated pick. \todo{add worked example.}
+
+% ------------------------------------------------------------------------------
+\subsection{Query Cost and Latency}
+\label{sec:cost}
+
+HELIX records the cost of every operation (a toggle-able latency/memory profiler)
+and, for the graph step, the Neo4j edge-query cost and the number of candidate
+nodes it tackles per document. Table~\ref{tab:latency} reports per-operation
+latency: dense retrieval and the LLM re-ranker dominate, while the lexical strand
+is nearly free, and the per-mention overhead of the whole pipeline stays
+interactive.
+
+\begin{table}[t]
+\caption{Per-operation latency (mean / p95, ms). \todo{finalise from the profiler
+export on the BC5CDR run; the shown values are indicative measurements.}}
+\label{tab:latency}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Operation & mean (ms) & p95 (ms) \\
+\midrule
+Lexical retrieval (BM25$+$$n$-gram) & \result{2}   & \result{4}   \\
+Dense retrieval (SAPBERT$+$FAISS)   & \result{40}  & \result{55}  \\
+Candidate request (end-to-end)      & \result{46}  & \result{62}  \\
+LLM re-ranking                      & \result{000} & \result{000} \\
+Graph optimise (Neo4j edge query, per doc) & \result{233} & \result{246} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The document-level graph match's dominant cost is the single Neo4j edge query over
+the union of a document's candidate identifiers. Fig.~\ref{fig:graphcost} plots
+this query latency against the number of candidate nodes tackled per document:
+across our runs the cost stays roughly flat ($\sim$230\,ms) even as the node set
+grows from $\sim$190 to $\sim$410, indicating the \texttt{IN}-list edge query does
+not scale linearly with the candidate universe over this range. \todo{regenerate
+the scatter from the full BC5CDR run via the Graph-stats export; add more points
+and, if useful, a fitted trend.}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.8\textwidth,height=5cm,
+  xlabel={candidate nodes tackled per document},
+  ylabel={Neo4j query (ms)},
+  xmin=0,ymin=0,ymax=320,
+  tick label style={font=\scriptsize},label style={font=\scriptsize},
+  only marks,mark size=1.6pt,
+]
+% TODO: replace with the full set from graph_stats.jsonl (Graph-stats -> Export).
+\addplot+[mark=*,color=violet] coordinates {
+  (187,233.8) (209,245.8) (280,231.0) (411,219.3) (90,120.0) (960,255.0)
+};
+\end{axis}
+\end{tikzpicture}
+\caption{Graph connection-maximisation cost: Neo4j edge-query latency vs.\ the
+number of candidate nodes queried per document (\textbf{indicative points} ---
+\todo{replace with the full run}). Cost is dominated by one edge query and stays
+roughly constant across document sizes.}
+\label{fig:graphcost}
+\end{figure}
 
 % ==============================================================================
 \section{Discussion and Limitations}

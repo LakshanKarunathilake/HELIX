@@ -11,7 +11,7 @@ mrrel: /path/to/UMLS/MRREL.RRF        # relationships (required)
 mrconso: /path/to/UMLS/MRCONSO.RRF    # concept names (omit to skip English names)
 
 # ── output ────────────────────────────────────────────────────────────────────
-output_dir: graph/out
+output_dir: graph/out/umls
 prefix: umls
 language: ENG          # concept-name language filter (MRCONSO LAT column)
 sample:                # optional: cap relationship count for a quick test build (blank = all)

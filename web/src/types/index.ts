@@ -28,6 +28,8 @@ export interface SessionConfig {
   score_tie_threshold?: number
   entity_type_col?: string | null
   enable_llm_rerank?: boolean
+  llm_provider?: string
+  llm_base_url?: string | null
   llm_model?: string
   llm_top_n?: number
   llm_prompt?: string | null
@@ -42,6 +44,7 @@ export interface LLMRerank {
   confidence: number
   ranking: string[]
   model: string
+  provider?: string
   cached?: boolean
   error?: string
 }
@@ -65,6 +68,45 @@ export interface GraphData {
   edges: GraphEdge[]
   enabled: boolean
   error?: string
+}
+
+export interface MetricsOp {
+  op: string
+  count: number
+  mean_ms: number
+  p50_ms: number
+  p95_ms: number
+  max_ms: number
+  total_s: number
+  share: number
+}
+
+export interface MetricsInsights {
+  enabled: boolean
+  samples: number
+  operations: MetricsOp[]
+  memory: { peak_mb: number; mean_mb: number; psutil: boolean }
+  throughput: { total_op_time_s: number; wall_time_s: number; mentions: number; mentions_per_s: number }
+}
+
+export interface GraphStatDoc {
+  doc: string
+  nodes: number
+  edges: number
+  query_ms: number
+  iterations: number
+  changed: number
+  mentions: number
+  edges_before: number
+  edges_after: number
+}
+
+export interface GraphStats {
+  count: number
+  totals: { nodes: number; edges: number; query_ms: number; iterations: number }
+  query_ms: { mean: number; p50: number; p95: number; max: number }
+  nodes: { mean: number; p50: number; p95: number; max: number }
+  docs: GraphStatDoc[]
 }
 
 export interface DocMention {

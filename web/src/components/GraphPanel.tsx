@@ -14,7 +14,9 @@ interface Props {
   isolatedIds?: Set<string>    // override which nodes count as isolated (else uses node.isolated)
 }
 
-interface Placed { id: string; name: string; x: number; y: number; cand: boolean; isolated?: boolean; r: number }
+interface Placed { id: string; name: string; x: number; y: number; cand: boolean; isolated?: boolean; degree?: number; r: number }
+
+const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s)
 
 /**
  * Radial graph that stays legible at any node count: node size and ring spacing
@@ -48,6 +50,7 @@ export function GraphPanel({ data, selectedId, onSelect, title = 'Graph neighbor
         const angle = n === 1 && r === 0 ? 0 : (2 * Math.PI * i) / Math.max(1, n) - Math.PI / 2
         out[node.id] = {
           id: node.id, name: node.name, cand: node.is_candidate, isolated: node.isolated,
+          degree: node.degree,
           x: cx + r * Math.cos(angle),
           y: cy + r * Math.sin(angle),
           r: nodeR,
@@ -154,22 +157,29 @@ export function GraphPanel({ data, selectedId, onSelect, title = 'Graph neighbor
             </g>
           )
         })}
-        {/* label only for the focused node (avoids the text pile-up) */}
+        {/* label only for the focused node (avoids the text pile-up) — the name, not the CUI */}
         {focus && placed[focus] && (
           <text x={placed[focus].x} y={placed[focus].y + placed[focus].r + labelFont + 2}
                 textAnchor="middle" className="fill-gray-800"
-                style={{ fontSize: labelFont, fontFamily: 'monospace', fontWeight: 600,
+                style={{ fontSize: labelFont, fontWeight: 600,
                          paintOrder: 'stroke', stroke: 'white', strokeWidth: 3 }}>
-            {placed[focus].id}
+            {truncate(placed[focus].name || placed[focus].id, 26)}
           </text>
         )}
       </svg>
-      {/* focused node detail + legend */}
-      <div className="mt-1 min-h-[16px]">
-        {focus && placed[focus] && placed[focus].name !== placed[focus].id ? (
-          <p className="text-[11px] text-gray-500 truncate">
-            <code className="font-mono text-gray-700">{placed[focus].id}</code> · {placed[focus].name}
-          </p>
+      {/* focused node info panel — name headline + the CUI (and link count) beneath */}
+      <div className="mt-1 min-h-[30px]">
+        {focus && placed[focus] ? (
+          <div className="text-[11px] leading-tight">
+            <p className="font-medium text-gray-700 truncate">{placed[focus].name || placed[focus].id}</p>
+            <p className="text-gray-500 flex items-center gap-1.5 flex-wrap">
+              <span>CUI <code className="font-mono text-gray-700">{placed[focus].id}</code></span>
+              {placed[focus].degree != null && (
+                <span className="text-gray-400">· {placed[focus].degree} {placed[focus].degree === 1 ? 'link' : 'links'}</span>
+              )}
+              {isIsolated(placed[focus]) && <span className="text-amber-600">· isolated</span>}
+            </p>
+          </div>
         ) : (
           <p className="text-[11px] text-gray-300">Hover a node to inspect · click to select</p>
         )}

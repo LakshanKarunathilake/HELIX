@@ -131,12 +131,18 @@ def print_report(res: dict) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="eval/eval_config.yaml")
+    ap.add_argument("--gold", help="override gold_file (e.g. per split)")
+    ap.add_argument("--out", help="override output path")
+    ap.add_argument("--label", help="optional run label printed in the header")
     args = ap.parse_args()
     cfg = yaml.safe_load(Path(args.config).read_text())
 
     cols = cfg["columns"]
     sep = cfg.get("gold_sep", "|")
-    gold_df = pd.read_csv(cfg["gold_file"], sep=cfg.get("delimiter", "\t"), dtype=str, keep_default_na=False)
+    gold_file = args.gold or cfg["gold_file"]
+    if args.label:
+        print(f"\n===== {args.label} =====")
+    gold_df = pd.read_csv(gold_file, sep=cfg.get("delimiter", "\t"), dtype=str, keep_default_na=False)
     rows = []
     for _, r in gold_df.iterrows():
         text = str(r[cols["text"]]).strip()
@@ -176,7 +182,7 @@ def main() -> None:
     res = run_eval(rows, query_fn, configs, top_k, reranker)
     print_report(res)
 
-    out = cfg.get("output")
+    out = args.out or cfg.get("output")
     if out:
         serial = {c: {k: (dict(v) if isinstance(v, defaultdict) else v) for k, v in R.items()} for c, R in res.items()}
         Path(out).parent.mkdir(parents=True, exist_ok=True)

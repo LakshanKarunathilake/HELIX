@@ -40,6 +40,29 @@ in one cell, pipe-joined:
 
 Map the column names in `eval_config.yaml → columns`.
 
+## BC5CDR-chemical (train / dev / test)
+
+BC5CDR ships in the BioSyn/SapBERT layout (`processed_<split>/*.concept`, gold is
+MeSH ids, composite mentions already pipe-joined). Convert and evaluate all splits:
+
+```bash
+# 1. one-time: build a SAPBERT FAISS index from the BC5CDR chemical dictionary
+#    (train_dictionary.txt) and point the KB server at it, so predicted ids are
+#    the same MeSH ids as the gold.
+# 2. configure:
+cp eval/eval_config.bc5cdr.example.yaml eval/eval_config.bc5cdr.yaml   # set kb.endpoint_url
+# 3. convert + score every split:
+./eval/run_bc5cdr.sh /path/to/bc5cdr-chemical            # or: ... dev
+```
+
+`convert_bc5cdr.py` writes `eval/out/bc5cdr-chemical.<split>.gold.tsv`; the runner
+scores each split and writes `eval/out/bc5cdr-chemical.<split>.results.json`. Use
+`--split dev` for a quick single-split run. `--raw` uses the un-normalised
+mentions instead of the processed (lower-cased) ones.
+
+> The gold CUIs are **MeSH** (`D…/C…`). The KB index must therefore be built from
+> the BC5CDR dictionary — evaluating against a UMLS index will not match.
+
 ## Notes
 - The pipeline is queried per config from the running KB server (`/dense`,
   `/lexical` are derived from `kb.endpoint_url`); no session is needed.

@@ -17,6 +17,11 @@ def output_csv_path(name: str) -> Path:
     return session_dir(name) / "annotated.csv"
 
 
+def output_snapshot_path(name: str, stage: str) -> Path:
+    """Per-step output snapshot, e.g. annotated.retrieval.csv / annotated.graph.csv."""
+    return session_dir(name) / f"annotated.{stage}.csv"
+
+
 def input_copy_path(name: str, original_name: str) -> Path:
     return session_dir(name) / f"input_{original_name}"
 

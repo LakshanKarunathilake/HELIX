@@ -10,6 +10,9 @@ import type { Candidate, KBConfig, ParsedFile, SessionConfig } from '@/types'
 import { DEFAULT_KB } from '@/types'
 import { CandidateCard } from '@/components/CandidateCard'
 import { AutoAnnotateModal } from '@/components/AutoAnnotateModal'
+import { MetricsModal } from '@/components/MetricsModal'
+import { GraphStatsModal } from '@/components/GraphStatsModal'
+import { Activity, Share2 } from 'lucide-react'
 
 export function Configure() {
   const { sessionName } = useParams<{ sessionName?: string }>()
@@ -28,6 +31,8 @@ export function Configure() {
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [showAutoModal, setShowAutoModal] = useState(false)
+  const [showMetrics, setShowMetrics] = useState(false)
+  const [showGraphStats, setShowGraphStats] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
   // context folder
   const [contextFolder, setContextFolder] = useState('')
@@ -39,6 +44,8 @@ export function Configure() {
   const [entityTypeCol, setEntityTypeCol] = useState('')
   // LLM re-ranking
   const [enableLlmRerank, setEnableLlmRerank] = useState(false)
+  const [llmProvider, setLlmProvider] = useState('anthropic')
+  const [llmBaseUrl, setLlmBaseUrl] = useState('')
   const [llmModel, setLlmModel] = useState('claude-haiku-4-5')
   const [llmTopN, setLlmTopN] = useState(10)
   const [llmPrompt, setLlmPrompt] = useState('')
@@ -81,6 +88,8 @@ export function Configure() {
     if (existingCfg.score_tie_threshold != null) setScoreTieThreshold(existingCfg.score_tie_threshold)
     if (existingCfg.entity_type_col) setEntityTypeCol(existingCfg.entity_type_col)
     if (existingCfg.enable_llm_rerank != null) setEnableLlmRerank(existingCfg.enable_llm_rerank)
+    if (existingCfg.llm_provider) setLlmProvider(existingCfg.llm_provider)
+    if (existingCfg.llm_base_url) setLlmBaseUrl(existingCfg.llm_base_url)
     if (existingCfg.llm_model) setLlmModel(existingCfg.llm_model)
     if (existingCfg.llm_top_n != null) setLlmTopN(existingCfg.llm_top_n)
     if (existingCfg.llm_prompt) setLlmPrompt(existingCfg.llm_prompt)
@@ -137,6 +146,8 @@ export function Configure() {
           score_tie_threshold: scoreTieThreshold,
           entity_type_col: entityTypeCol || null,
           enable_llm_rerank: enableLlmRerank,
+          llm_provider: llmProvider,
+          llm_base_url: llmBaseUrl.trim() || null,
           llm_model: llmModel,
           llm_top_n: llmTopN,
           llm_prompt: llmPrompt.trim() || null,
@@ -162,6 +173,8 @@ export function Configure() {
           score_tie_threshold: scoreTieThreshold,
           entity_type_col: entityTypeCol || null,
           enable_llm_rerank: enableLlmRerank,
+          llm_provider: llmProvider,
+          llm_base_url: llmBaseUrl.trim() || null,
           llm_model: llmModel,
           llm_top_n: llmTopN,
           llm_prompt: llmPrompt.trim() || null,
@@ -200,6 +213,8 @@ export function Configure() {
 
   return (
     <div className="max-w-3xl mx-auto px-6 py-10 space-y-8">
+      {showMetrics && <MetricsModal sessionName={sessionName!} onClose={() => setShowMetrics(false)} />}
+      {showGraphStats && <GraphStatsModal sessionName={sessionName!} onClose={() => setShowGraphStats(false)} />}
       {showAutoModal && existingCfg && (
         <AutoAnnotateModal
           sessionName={sessionName!}
@@ -308,23 +323,46 @@ export function Configure() {
             the API server. Falls back to retrieval ranking on any error.
           </p>
           <div className={`space-y-4 ${enableLlmRerank ? '' : 'opacity-40 pointer-events-none'}`}>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-3 gap-4">
               <div>
-                <label className="label">Model</label>
+                <label className="label">Provider</label>
                 <select
                   className="select"
-                  value={llmModel}
-                  onChange={e => setLlmModel(e.target.value)}
+                  value={llmProvider}
+                  onChange={e => {
+                    const p = e.target.value
+                    setLlmProvider(p)
+                    // sensible defaults when switching provider
+                    if (p === 'anthropic') { setLlmModel('claude-haiku-4-5'); setLlmBaseUrl('') }
+                    else { setLlmModel('gpt-4o-mini') }
+                  }}
                 >
-                  <option value="claude-haiku-4-5">Claude Haiku 4.5 (fast, cheap)</option>
-                  <option value="claude-sonnet-4-6">Claude Sonnet 4.6 (balanced)</option>
-                  <option value="claude-opus-4-8">Claude Opus 4.8 (most capable)</option>
+                  <option value="anthropic">Anthropic (Claude)</option>
+                  <option value="openai">OpenAI-compatible (OpenAI / Gemini / local)</option>
                 </select>
               </div>
               <div>
                 <label className="label">
-                  Candidates to LLM
-                  <span className="ml-1 text-gray-400 font-normal">top-N fed to the model</span>
+                  Model
+                  <span className="ml-1 text-gray-400 font-normal">any id the provider accepts</span>
+                </label>
+                <input
+                  className="input font-mono text-sm"
+                  list="llm-model-presets"
+                  value={llmModel}
+                  onChange={e => setLlmModel(e.target.value)}
+                  placeholder={llmProvider === 'anthropic' ? 'claude-haiku-4-5' : 'gpt-4o-mini'}
+                />
+                <datalist id="llm-model-presets">
+                  {llmProvider === 'anthropic'
+                    ? ['claude-haiku-4-5', 'claude-sonnet-4-6', 'claude-opus-4-8'].map(m => <option key={m} value={m} />)
+                    : ['gpt-4o-mini', 'gpt-4o', 'gemini-2.0-flash', 'gemini-2.5-pro'].map(m => <option key={m} value={m} />)}
+                </datalist>
+              </div>
+              <div>
+                <label className="label">
+                  Candidates
+                  <span className="ml-1 text-gray-400 font-normal">top-N</span>
                 </label>
                 <input
                   className="input"
@@ -334,6 +372,26 @@ export function Configure() {
                 />
               </div>
             </div>
+
+            {llmProvider === 'openai' && (
+              <div>
+                <label className="label">
+                  Base URL
+                  <span className="ml-1 text-gray-400 font-normal">blank = OpenAI; set for Gemini / local</span>
+                </label>
+                <input
+                  className="input font-mono text-sm"
+                  value={llmBaseUrl}
+                  onChange={e => setLlmBaseUrl(e.target.value)}
+                  placeholder="https://generativelanguage.googleapis.com/v1beta/openai/  (Gemini)"
+                />
+                <p className="text-xs text-gray-400 mt-1">
+                  Uses the OpenAI SDK. Key resolves from the per-session key below, else the
+                  server <code className="bg-gray-100 rounded px-1">OPENAI_API_KEY</code> /
+                  <code className="bg-gray-100 rounded px-1">GEMINI_API_KEY</code>.
+                </p>
+              </div>
+            )}
 
             <div>
               <div className="flex items-center justify-between">
@@ -366,9 +424,9 @@ export function Configure() {
 
             <div>
               <label className="label">
-                Anthropic API key
+                {llmProvider === 'anthropic' ? 'Anthropic' : 'Provider'} API key
                 <span className="ml-1 text-gray-400 font-normal">
-                  optional — overrides the server ANTHROPIC_API_KEY
+                  optional — overrides the server env key
                 </span>
               </label>
               <input
@@ -376,7 +434,8 @@ export function Configure() {
                 type="password"
                 autoComplete="off"
                 placeholder={llmApiKeySet ? '•••••••• (a key is stored — leave blank to keep it)'
-                                          : 'sk-ant-… (leave blank to use the server env var)'}
+                                          : (llmProvider === 'anthropic' ? 'sk-ant-… (leave blank to use the server env var)'
+                                                                         : 'sk-… / AIza… (leave blank to use the server env var)')}
                 value={llmApiKey}
                 onChange={e => setLlmApiKey(e.target.value)}
               />
@@ -590,11 +649,31 @@ export function Configure() {
               className="btn-secondary px-6 py-2.5"
               onClick={handleAutoAnnotate}
               disabled={deleting || saving}
-              title="Auto-select top KB candidate for all unannotated rows"
+              title="Two steps: retrieval auto-select, then graph match (maximise connections)"
             >
               <Zap className="w-4 h-4" />
               Auto-annotate all
             </button>
+            <button
+              className="btn-secondary px-6 py-2.5"
+              onClick={() => setShowMetrics(true)}
+              disabled={deleting || saving}
+              title="Enable latency + memory tracking and view performance insights"
+            >
+              <Activity className="w-4 h-4" />
+              Performance
+            </button>
+            {enableGraph && (
+              <button
+                className="btn-secondary px-6 py-2.5"
+                onClick={() => setShowGraphStats(true)}
+                disabled={deleting || saving}
+                title="Neo4j query cost and nodes tackled by graph connection-maximisation"
+              >
+                <Share2 className="w-4 h-4" />
+                Graph stats
+              </button>
+            )}
           </div>
         ) : <span />}
         <button className="btn-primary px-8 py-2.5" onClick={handleSave} disabled={saving}>

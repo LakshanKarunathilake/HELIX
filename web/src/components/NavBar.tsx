@@ -1,5 +1,6 @@
 import { Link, useLocation } from 'react-router-dom'
-import { Link2, Settings, PenLine } from 'lucide-react'
+import { Link2, Settings } from 'lucide-react'
+import { HelixLogo } from './HelixLogo'
 
 export function NavBar() {
   const { pathname } = useLocation()
@@ -11,9 +12,9 @@ export function NavBar() {
   return (
     <header className="sticky top-0 z-40 bg-white border-b border-gray-200 shadow-sm">
       <div className="max-w-7xl mx-auto px-6 h-14 flex items-center justify-between">
-        <Link to="/" className="flex items-center gap-2 font-bold text-brand-600 text-lg tracking-tight">
-          <PenLine className="w-5 h-5" />
-          ELTool
+        <Link to="/" className="flex items-center gap-2 font-extrabold text-lg tracking-tight">
+          <HelixLogo className="w-7 h-7" />
+          <span className="bg-gradient-to-r from-cyan-500 via-blue-600 to-fuchsia-500 bg-clip-text text-transparent">HELIX</span>
         </Link>
         <nav className="flex items-center gap-1">
           {nav.map(({ to, label, icon: Icon }) => (

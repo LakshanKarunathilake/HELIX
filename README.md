@@ -1,6 +1,8 @@
 <div align="center">
 
-# 🧬 HELIX
+<img src="assets/logo.png" alt="HELIX Logo" width="220"/>
+
+# HELIX
 
 **H**ybrid **E**ntity **L**inking with **I**nteractive e**X**pert-in-the-loop Annotation
 

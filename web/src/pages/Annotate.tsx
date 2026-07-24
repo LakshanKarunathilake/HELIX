@@ -21,6 +21,23 @@ const DEFAULT_AUTO_SELECT_SECS = 5
 const parseIds = (v?: string): string[] =>
   v && v !== 'NIL' ? v.split('|').map(s => s.trim()).filter(Boolean) : []
 
+// "provider/model" when the accepted selection includes the LLM's pick (for any KB),
+// else "" (the LLM did not produce the final annotation — e.g. a manual override).
+function computeLlmUsed(
+  selections: Record<string, string>,
+  candidates: Record<string, { llm: LLMRerank | null }>,
+  cfg?: SessionConfig,
+): string {
+  if (!cfg?.enable_llm_rerank) return ''
+  for (const kb of cfg.kbs) {
+    const llm = candidates[kb.name]?.llm
+    if (llm && !llm.error && llm.entity_id && parseIds(selections[kb.name]).includes(llm.entity_id)) {
+      return `${llm.provider ?? cfg.llm_provider ?? 'anthropic'}/${llm.model}`
+    }
+  }
+  return ''
+}
+
 export function Annotate() {
   const { sessionName } = useParams<{ sessionName: string }>()
   const navigate = useNavigate()
@@ -194,6 +211,8 @@ export function Annotate() {
   rowIdxRef.current = rowIdx
   const selectionsRef = useRef(selections)
   selectionsRef.current = selections
+  const candidatesRef = useRef(candidates)
+  candidatesRef.current = candidates
   const totalRef = useRef(total)
   totalRef.current = total
 
@@ -210,7 +229,7 @@ export function Annotate() {
       if (Object.keys(sels).length === 0) return
       setTimerActive(false)
       try {
-        await api.saveRow(sessionName, idx, sels)
+        await api.saveRow(sessionName, idx, sels, computeLlmUsed(sels, candidatesRef.current, cfg))
         qc.invalidateQueries({ queryKey: ['progress', sessionName] })
         qc.invalidateQueries({ queryKey: ['row', sessionName, idx] })
         if (idx < totalRef.current - 1) setRowIdx(idx + 1)
@@ -254,7 +273,7 @@ export function Annotate() {
 
   const saveRow = async () => {
     if (!sessionName) return
-    await api.saveRow(sessionName, rowIdx, selections)
+    await api.saveRow(sessionName, rowIdx, selections, computeLlmUsed(selections, candidates, cfg))
     qc.invalidateQueries({ queryKey: ['progress', sessionName] })
     qc.invalidateQueries({ queryKey: ['row', sessionName, rowIdx] })
   }

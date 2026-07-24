@@ -28,3 +28,10 @@ graph/out/
 # Local eval config + results
 eval/eval_config.yaml
 eval/results.json
+eval/eval_config.bc5cdr.yaml
+
+# Metrics runtime toggle state
+.helix_metrics_enabled
+
+# Converted gold + eval outputs
+eval/out/
