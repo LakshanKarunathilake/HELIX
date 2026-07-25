@@ -136,7 +136,7 @@ export function Annotate() {
       api.getCandidates(
         sessionName!, rowData.label, kb.name,
         kb.enable_dense ?? true,
-        kb.enable_lexical ?? true,
+        kb.enable_lexical ?? false,
         rowData.context_text ?? null,
       )
         .then(result => {

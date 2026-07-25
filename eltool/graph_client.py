@@ -300,45 +300,73 @@ class Neo4jGraphClient:
 
     def optimize_selection(
         self,
-        mention_candidates: list[tuple[int, list[str]]],
+        mention_candidates: list[tuple[int, list]],
         fixed: dict[int, str] | None = None,
-        iterations: int = 10,
+        pin_threshold: float = 0.90,
+        switch_margin: float = 0.10,
+        iterations: int = 2,
     ) -> dict[str, Any]:
         """
-        Pick one candidate per mention to maximise the number of graph edges among
-        the selected concepts (greedy hill-climbing / collective disambiguation).
+        Confidence-gated, confidence-ordered graph disambiguation.
 
-        mention_candidates: [(mention_idx, [candidate_cui, ...]), ...] to optimise.
-        fixed: mentions whose selection is pinned (already annotated); their CUIs
-               count towards coherence but are never changed.
-        Returns {selections: {idx: cui}} for the OPTIMISED mentions only, plus
-        {edges_before, edges_after, changed}.
+        The graph should break *ties*, not overrule confident retrieval. So we
+        (a) never move a mention whose top-1 retrieval score is high
+        (``pin_threshold``); (b) for the remaining ambiguous mentions, only ever
+        switch among candidates within ``switch_margin`` of that mention's own
+        top-1 score; and (c) resolve mentions in order of decreasing confidence,
+        so reliable concepts anchor the graph before weaker ones are attached.
+        This maximises document-level graph coherence without destroying good
+        top-1 picks (see the paper's Algorithm).
+
+        ``mention_candidates``: ``[(mention_idx, [(cui, score), ...]), ...]``,
+        ranked by score descending. Bare ``[cui, ...]`` lists are accepted too
+        (treated as zero-confidence, i.e. fully optimisable).
+        ``fixed``: mentions pinned to a CUI (already accepted by the human); they
+        anchor coherence but never move.
         """
         fixed = dict(fixed or {})
-        mc = [(idx, [c for c in cands if c]) for idx, cands in mention_candidates]
-        mc = [(idx, cands) for idx, cands in mc if cands]
+
+        # normalise candidates to [(cui, score)], drop empties
+        mc: list[tuple[int, list[tuple[str, float]]]] = []
+        for idx, cands in mention_candidates:
+            norm: list[tuple[str, float]] = []
+            for c in cands:
+                if isinstance(c, (tuple, list)):
+                    cid, sc = (c[0], float(c[1] or 0.0) if len(c) > 1 else 0.0)
+                else:
+                    cid, sc = c, 0.0
+                if cid:
+                    norm.append((cid, sc))
+            if norm:
+                mc.append((idx, norm))
         candmap = dict(mc)
         order = [idx for idx, _ in mc]
-        universe = sorted({c for _, cands in mc for c in cands} | set(fixed.values()))
+        universe = sorted({cid for _, cands in mc for cid, _ in cands} | set(fixed.values()))
+        empty = {"selections": {}, "edges_before": 0, "edges_after": 0, "changed": 0,
+                 "pinned": 0, "free": 0, "nodes_queried": 0, "edges_found": 0,
+                 "query_ms": 0.0, "iterations": 0}
         if not universe or not order:
-            return {"selections": {}, "edges_before": 0, "edges_after": 0, "changed": 0,
-                    "nodes_queried": 0, "edges_found": 0, "query_ms": 0.0, "iterations": 0}
+            return empty
 
         # Neo4j edge query — the expensive part; measure it explicitly.
         _t0 = time.perf_counter()
         edge_pairs = self._edges_among(universe)
         query_ms = (time.perf_counter() - _t0) * 1000.0
-
         adj: dict[str, set[str]] = defaultdict(set)
         for a, b in edge_pairs:
             adj[a].add(b)
             adj[b].add(a)
 
-        # full state = pinned mentions + optimisable ones (init from retrieval top-1)
+        # baseline = retrieval top-1 for every mention
         sel: dict[int, str] = dict(fixed)
         for idx in order:
-            sel[idx] = candmap[idx][0]
+            sel[idx] = candmap[idx][0][0]
         initial = dict(sel)
+
+        # confidence = top-1 score; PIN confident mentions, order the rest
+        conf = {idx: candmap[idx][0][1] for idx in order}
+        pinned = {idx for idx in order if conf[idx] >= pin_threshold}
+        free = sorted((i for i in order if i not in pinned), key=lambda i: conf[i], reverse=True)
 
         def internal_edges(values) -> int:
             vals = list({v for v in values})
@@ -351,18 +379,18 @@ class Neo4jGraphClient:
             return c
 
         iters = 0
-        for _ in range(iterations):
+        for _ in range(max(1, iterations)):
             iters += 1
             changed = False
-            for idx in order:                      # only optimisable mentions move
+            for idx in free:                                   # confidence order
                 cands = candmap[idx]
+                top_score = cands[0][1]
+                rank = {cid: k for k, (cid, _) in enumerate(cands)}
+                # only near-ties are eligible — never trade score for a graph link
+                near = [cid for cid, sc in cands if top_score - sc <= switch_margin]
                 others = {sel[j] for j in sel if j != idx}
-                best = max(
-                    cands,
-                    key=lambda c: (len(adj.get(c, set()) & others),
-                                   c == sel.get(idx),
-                                   -cands.index(c)),
-                )
+                best = max(near, key=lambda c: (len(adj.get(c, set()) & others),
+                                                c == sel.get(idx), -rank[c]))
                 if best != sel.get(idx):
                     sel[idx] = best
                     changed = True
@@ -374,11 +402,12 @@ class Neo4jGraphClient:
             "edges_before": internal_edges(initial.values()),
             "edges_after": internal_edges(sel.values()),
             "changed": sum(1 for idx in order if sel[idx] != initial.get(idx)),
-            # query cost / scale stats
+            "pinned": len(pinned),               # confident mentions never moved
+            "free": len(free),                   # ambiguous mentions considered
             "nodes_queried": len(universe),      # candidate CUIs sent to Neo4j
             "edges_found": len(edge_pairs),      # edges Neo4j returned among them
             "query_ms": round(query_ms, 2),      # Neo4j edge-query latency
-            "iterations": iters,                 # greedy hill-climb passes
+            "iterations": iters,
         }
 
     # ── shared assembly ──────────────────────────────────────────────────────

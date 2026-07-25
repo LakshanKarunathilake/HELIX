@@ -53,6 +53,14 @@ def length_bucket(text: str) -> str:
     return "≤4" if n <= 4 else "5-8" if n <= 8 else ">8"
 
 
+def _idset(raw: str, sep: str = "|") -> set[str]:
+    """A predicted/gold id may itself be composite (e.g. a dictionary SourceID
+    like '601367|D002544' pairing an OMIM id with a MeSH descriptor). Split on the
+    separator so matching is any-component — otherwise a composite prediction never
+    equals a single gold id and is wrongly scored as a miss."""
+    return {p.strip() for p in str(raw).split(sep) if p.strip()}
+
+
 def _pred_ids(cfg_name: str, dense, lexical, top_k, reranker, text, context):
     if cfg_name == "lexical":
         ranked = lexical
@@ -82,8 +90,8 @@ def run_eval(rows, query_fn, configs, top_k, reranker=None) -> dict:
         for cfg_name in configs:
             top_ids = _pred_ids(cfg_name, dense, lexical, top_k, reranker, r["text"], r.get("context"))
             top1 = top_ids[0] if top_ids else None
-            correct1 = 1 if (top1 is not None and top1 in gold) else 0
-            recallk = 1 if gold & set(top_ids) else 0
+            correct1 = 1 if (top1 is not None and (_idset(top1) & gold)) else 0
+            recallk = 1 if gold & set().union(*(_idset(t) for t in top_ids)) else 0
             R = res[cfg_name]
             R["total"] += 1
             R["acc1"] += correct1

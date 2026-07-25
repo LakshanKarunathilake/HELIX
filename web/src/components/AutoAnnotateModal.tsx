@@ -111,7 +111,7 @@ export function AutoAnnotateModal({ sessionName, cfg, onClose, onComplete }: Pro
       for (const kb of cfg.kbs) {
         if (newAnn[kb.name]?.trim()) continue
         try {
-          const r = await api.getCandidates(sessionName, row.label, kb.name, kb.enable_dense ?? true, kb.enable_lexical ?? true, row.context_text ?? null)
+          const r = await api.getCandidates(sessionName, row.label, kb.name, kb.enable_dense ?? true, kb.enable_lexical ?? false, row.context_text ?? null)
           const best = pickBest(r.dense ?? [], r.lexical ?? [], et, threshold)
           if (best) { newAnn[kb.name] = best.id; any = true }
         } catch { setS1(s => ({ ...s, errors: ++err })) }

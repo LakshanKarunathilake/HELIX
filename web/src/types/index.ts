@@ -181,5 +181,5 @@ export const DEFAULT_KB: KBConfig = {
   score_field: 'score',
   headers: '{}',
   enable_dense: true,
-  enable_lexical: true,
+  enable_lexical: false,
 }

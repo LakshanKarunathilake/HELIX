@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { X, AlertTriangle, CheckCircle2, Loader2, Ban, Zap } from 'lucide-react'
+import { X, AlertTriangle, CheckCircle2, Loader2, Ban, Zap, Undo2 } from 'lucide-react'
 import * as api from '@/api/client'
 import { CandidateCard } from './CandidateCard'
 import { GraphPanel } from './GraphPanel'
@@ -32,6 +32,7 @@ export function DocumentReview({ sessionName, rowIdx, kb, onClose, onChanged }: 
   const [showCandidates, setShowCandidates] = useState(false)   // overlay off by default
   const [optimizing, setOptimizing] = useState(false)
   const [optResult, setOptResult] = useState('')
+  const [undoState, setUndoState] = useState<Record<number, string> | null>(null)  // pre-auto-match selections
 
   // ── load the document's mentions + current selections ────────────────────
   useEffect(() => {
@@ -96,6 +97,28 @@ export function DocumentReview({ sessionName, rowIdx, kb, onClose, onChanged }: 
     return s
   }, [selectedCuis, selectedDegree])
 
+  // ── export helper: expand to ALL mentions' candidates + the graph among them ──
+  const expandCandidates = useCallback(async (): Promise<{ data: GraphData; suggestionIds?: Set<string> }> => {
+    const cache: Record<number, KBCands> = { ...cands }
+    await Promise.all(mentions.map(async m => {
+      if (cache[m.idx]) return
+      const r = await api.getCandidates(sessionName, m.label, kb.name, kb.enable_dense ?? true, kb.enable_lexical ?? false, null)
+      cache[m.idx] = { dense: r.dense, lexical: r.lexical }
+    }))
+    setCands(cache)
+    const candCuis = new Set<string>()
+    for (const m of mentions) {
+      const c = cache[m.idx]
+      if (!c) continue
+      for (const x of [...c.dense, ...c.lexical]) if (x.id && x.id !== 'NIL') candCuis.add(x.id)
+    }
+    const selSet = new Set(selectedCuis)
+    const suggestionIds = new Set([...candCuis].filter(id => !selSet.has(id)))
+    const allCuis = [...new Set([...selectedCuis, ...candCuis])]
+    const data = await api.getDocumentGraph(sessionName, allCuis)
+    return { data, suggestionIds }
+  }, [cands, mentions, sessionName, kb, selectedCuis])
+
   const statusOf = useCallback((idx: number): 'unset' | 'nil' | 'isolated' | 'ok' => {
     const id = selected[idx]
     if (!id) return 'unset'
@@ -112,13 +135,14 @@ export function DocumentReview({ sessionName, rowIdx, kb, onClose, onChanged }: 
     const m = mentions.find(x => x.idx === idx)
     if (!m) return
     setLoadingCands(true)
-    api.getCandidates(sessionName, m.label, kb.name, kb.enable_dense ?? true, kb.enable_lexical ?? true, null)
+    api.getCandidates(sessionName, m.label, kb.name, kb.enable_dense ?? true, kb.enable_lexical ?? false, null)
       .then(r => setCands(prev => ({ ...prev, [idx]: { dense: r.dense, lexical: r.lexical } })))
       .finally(() => setLoadingCands(false))
   }, [cands, mentions, sessionName, kb])
 
   const switchTo = useCallback(async (idx: number, id: string) => {
     setSelected(prev => ({ ...prev, [idx]: id }))
+    setUndoState(null)   // a manual edit invalidates the auto-match undo snapshot
     await api.saveRow(sessionName, idx, { [kb.name]: id }, '')  // manual/graph → not LLM
     onChanged?.()
   }, [sessionName, kb.name, onChanged])
@@ -131,6 +155,9 @@ export function DocumentReview({ sessionName, rowIdx, kb, onClose, onChanged }: 
       const r = await api.optimizeDocument(sessionName, rowIdx, kb.name)
       if (r.error) { setOptResult(`Auto-match unavailable: ${r.error}`); return }
       const changes = Object.entries(r.selections).filter(([i, cui]) => selected[+i] !== cui)
+      // snapshot the pre-match selection of every mention auto-match will change, so it can be undone
+      const prevSel: Record<number, string> = {}
+      for (const [i] of changes) prevSel[+i] = selected[+i] ?? ''
       setSelected(prev => ({ ...prev, ...Object.fromEntries(Object.entries(r.selections).map(([i, c]) => [+i, c])) }))
       // ONE atomic write — avoids the concurrent read-modify-write race that
       // previously dropped rows and corrupted the progress count.
@@ -140,6 +167,7 @@ export function DocumentReview({ sessionName, rowIdx, kb, onClose, onChanged }: 
         })))
       }
       onChanged?.()
+      setUndoState(changes.length ? prevSel : null)
       setOptResult(`Connections ${r.edges_before} → ${r.edges_after} · ${r.changed} selection(s) updated`)
     } catch (e: any) {
       setOptResult(`Auto-match failed: ${e?.message ?? e}`)
@@ -147,6 +175,23 @@ export function DocumentReview({ sessionName, rowIdx, kb, onClose, onChanged }: 
       setOptimizing(false)
     }
   }, [sessionName, rowIdx, kb.name, selected, onChanged])
+
+  // ── undo the last auto-match: restore the snapshotted pre-match selections ──
+  const undoAutoMatch = useCallback(async () => {
+    if (!undoState) return
+    const entries = Object.entries(undoState)
+    setSelected(prev => ({ ...prev, ...Object.fromEntries(entries.map(([i, c]) => [+i, c])) }))
+    try {
+      await api.saveRowsBatch(sessionName, entries.map(([i, cui]) => ({
+        idx: +i, annotations: { [kb.name]: cui }, llm_used: '',
+      })))
+      onChanged?.()
+      setUndoState(null)
+      setOptResult(`Auto-match undone · ${entries.length} selection(s) reverted`)
+    } catch (e: any) {
+      setOptResult(`Undo failed: ${e?.message ?? e}`)
+    }
+  }, [undoState, sessionName, kb.name, onChanged])
 
   const active = activeIdx != null ? mentions.find(m => m.idx === activeIdx) : null
   const activeCands = activeIdx != null ? cands[activeIdx] : undefined
@@ -177,16 +222,27 @@ export function DocumentReview({ sessionName, rowIdx, kb, onClose, onChanged }: 
               {optResult}
             </span>
           )}
-          <button
-            onClick={autoMatch}
-            disabled={optimizing || loading}
-            className="ml-auto btn-primary text-xs py-1.5 disabled:opacity-60"
-            title="Automatically pick candidates across the document to maximise graph connections"
-          >
-            {optimizing
-              ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Optimising…</>
-              : <><Zap className="w-3.5 h-3.5" /> Auto-match (maximise connections)</>}
-          </button>
+          <div className="ml-auto flex items-center gap-2">
+            {undoState && !optimizing && (
+              <button
+                onClick={undoAutoMatch}
+                className="btn-secondary text-xs py-1.5"
+                title="Undo the last auto-match and restore the previous selections"
+              >
+                <Undo2 className="w-3.5 h-3.5" /> Undo auto-match
+              </button>
+            )}
+            <button
+              onClick={autoMatch}
+              disabled={optimizing || loading}
+              className="btn-primary text-xs py-1.5 disabled:opacity-60"
+              title="Automatically pick candidates across the document to maximise graph connections"
+            >
+              {optimizing
+                ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Optimising…</>
+                : <><Zap className="w-3.5 h-3.5" /> Auto-match (maximise connections)</>}
+            </button>
+          </div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-700">
             <X className="w-5 h-5" />
           </button>
@@ -257,6 +313,8 @@ export function DocumentReview({ sessionName, rowIdx, kb, onClose, onChanged }: 
                   title="Document graph"
                   width={520}
                   height={360}
+                  downloadable
+                  onExpandCandidates={expandCandidates}
                 />
               )}
 

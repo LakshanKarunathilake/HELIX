@@ -16,6 +16,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Body
@@ -105,6 +107,8 @@ class CreateSessionRequest(BaseModel):
     llm_prompt: str | None = None
     llm_api_key: str | None = None
     enable_graph: bool = False
+    graph_pin_threshold: float = 0.90
+    graph_switch_margin: float = 0.10
 
 
 @app.post("/api/sessions")
@@ -149,6 +153,8 @@ def create_session(req: CreateSessionRequest):
             llm_prompt=req.llm_prompt,
             llm_api_key=req.llm_api_key,
             enable_graph=req.enable_graph,
+            graph_pin_threshold=req.graph_pin_threshold,
+            graph_switch_margin=req.graph_switch_margin,
         )
     except ValidationError as e:
         raise HTTPException(400, str(e))
@@ -207,12 +213,26 @@ def delete_session(name: str):
 @app.get("/api/sessions/{name}/progress")
 def get_progress(name: str):
     cfg = _load_cfg(name)
-    df, _ = load_input(Path(cfg.input_path), cfg.delimiter)
     kb_names = [k.name for k in cfg.kbs]
-    out_df = init_output(output_csv_path(name), df, kb_names, cfg.annotator)
-    total = len(df)
-    done = sum(1 for i in range(total) if all(str(out_df.at[i, kb]) for kb in kb_names))
-    return {"total": total, "done": done, "resume_idx": find_resume_index(out_df, kb_names)}
+    out_path = output_csv_path(name)
+    # Read-only + vectorised: never rewrite the output here (it fights with
+    # concurrent annotation writes and is O(n) per poll). Only initialise on
+    # first access when no output exists yet.
+    if out_path.exists():
+        out_df = pd.read_csv(out_path, dtype=str, keep_default_na=False)
+    else:
+        df, _ = load_input(Path(cfg.input_path), cfg.delimiter)
+        out_df = init_output(out_path, df, kb_names, cfg.annotator)
+    total = len(out_df)
+    if kb_names and total:
+        filled = pd.Series(True, index=out_df.index)
+        for kb in kb_names:
+            filled &= out_df[kb].astype(str).str.strip() != ""
+        done = int(filled.sum())
+        resume = total if bool(filled.all()) else int((~filled).to_numpy().argmax())
+    else:
+        done, resume = 0, 0
+    return {"total": total, "done": done, "resume_idx": resume}
 
 
 # ── rows ──────────────────────────────────────────────────────────────────────
@@ -638,10 +658,10 @@ def graph_optimize(name: str, req: GraphOptimizeRequest):
         if not label:
             continue
         fused = _retrieve_fused(kb_cfg, label)
-        mention_candidates.append((int(i), [c.id for c in fused[:top_n]]))
+        mention_candidates.append((int(i), [(c.id, c.score) for c in fused[:top_n]]))
 
     try:
-        result = _get_graph_client().optimize_selection(mention_candidates)
+        result = _get_graph_client().optimize_selection(mention_candidates, pin_threshold=cfg.graph_pin_threshold, switch_margin=cfg.graph_switch_margin)
         metrics.record_graph(
             name, doc=doc_id, mentions=len(mention_candidates),
             nodes=result.get("nodes_queried", 0), edges=result.get("edges_found", 0),
@@ -702,12 +722,12 @@ def graph_optimize_all(name: str, skip_annotated: bool = True):
                 if not label:
                     continue
                 fused = _retrieve_fused(kb_cfg, label)
-                mention_candidates.append((int(i), [c.id for c in fused[:top_n]]))
+                mention_candidates.append((int(i), [(c.id, c.score) for c in fused[:top_n]]))
 
             if not mention_candidates:
                 continue
             try:
-                res = gc.optimize_selection(mention_candidates, fixed=fixed)
+                res = gc.optimize_selection(mention_candidates, fixed=fixed, pin_threshold=cfg.graph_pin_threshold, switch_margin=cfg.graph_switch_margin)
             except GraphError as e:
                 return {"enabled": True, "error": str(e), "documents": docs_done}
             metrics.record_graph(

@@ -48,6 +48,8 @@ import argparse
 import logging
 import os
 import sys
+import threading
+from collections import OrderedDict
 from pathlib import Path
 
 from flask import Flask, jsonify, request
@@ -67,9 +69,48 @@ from lexical_search import LexicalSearcher             # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+# Silence Werkzeug's per-request access log ("POST /query/dense HTTP/1.1 200").
+# During bulk annotation this fires tens of thousands of times and its synchronous
+# I/O dominates throughput. Set KB_ACCESS_LOG=1 to restore it for debugging.
+if os.environ.get("KB_ACCESS_LOG", "0") != "1":
+    logging.getLogger("werkzeug").setLevel(logging.ERROR)
+
 app = Flask(__name__)
 searcher: SAPBERTIndexSearcher | None = None
 lexical:  LexicalSearcher | None = None
+
+# ── query-result cache ───────────────────────────────────────────────────────
+# The costly step is the SAPBERT embedding + FAISS (or BM25) search. Identical
+# text queries recur constantly — the same mention appears across a corpus, and
+# bulk auto-annotation re-asks for it every time — so we memoise results in a
+# bounded LRU. The index is immutable for a server run, so cached entries never
+# go stale (restart, or POST /cache/clear, to invalidate). One cache per strand,
+# keyed by (label, top_k). Size-bounded by KB_CACHE_MAX entries (0 disables).
+_CACHE_MAX = int(os.environ.get("KB_CACHE_MAX", "100000"))
+_dense_cache: "OrderedDict[tuple, list]" = OrderedDict()
+_lex_cache: "OrderedDict[tuple, list]" = OrderedDict()
+_cache_lock = threading.Lock()
+_cache_stats = {"dense_hit": 0, "dense_miss": 0, "lex_hit": 0, "lex_miss": 0}
+
+
+def _cached_search(cache: "OrderedDict", strand: str, search_fn, label: str, top_k: int) -> list:
+    """Serialized results for (label, top_k), memoised with a bounded LRU."""
+    if _CACHE_MAX <= 0:
+        return [_result_to_eltool(r) for r in search_fn(label, top_k)]
+    key = (label, top_k)
+    with _cache_lock:
+        hit = cache.get(key)
+        if hit is not None:
+            cache.move_to_end(key)
+            _cache_stats[strand + "_hit"] += 1
+            return hit
+        _cache_stats[strand + "_miss"] += 1
+    results = [_result_to_eltool(r) for r in search_fn(label, top_k)]
+    with _cache_lock:
+        cache[key] = results
+        while len(cache) > _CACHE_MAX:
+            cache.popitem(last=False)
+    return results
 LEX_THRESHOLD = 8  # used only in main() to log info; /query always uses FAISS
 
 _DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
@@ -137,11 +178,18 @@ def _result_to_eltool(result: dict) -> dict:
 
 # ── routes ───────────────────────────────────────────────────────────────────
 
+def _dense_fn(label, k):
+    return searcher.search(label, k=k, return_scores=True)
+
+
+def _lex_fn(label, k):
+    return lexical.search(label, k=k)
+
+
 @app.post("/query")
 def query():
     body  = request.get_json(force=True, silent=True) or {}
     label = str(body.get("label", "")).strip()
-    print("searching for:", label)
     top_k = int(body.get("top_k", 10))
 
     if not label:
@@ -150,8 +198,7 @@ def query():
         return jsonify({"error": "top_k must be 1–100"}), 400
 
     try:
-        raw = searcher.search(label, k=top_k, return_scores=True)
-        return jsonify({"results": [_result_to_eltool(r) for r in raw]})
+        return jsonify({"results": _cached_search(_dense_cache, "dense", _dense_fn, label, top_k)})
     except Exception as exc:  # noqa: BLE001
         logger.exception("Search failed")
         return jsonify({"error": str(exc)}), 500
@@ -170,8 +217,7 @@ def query_dense():
         return jsonify({"error": "top_k must be 1–100"}), 400
 
     try:
-        raw = searcher.search(label, k=top_k, return_scores=True)
-        return jsonify({"results": [_result_to_eltool(r) for r in raw]})
+        return jsonify({"results": _cached_search(_dense_cache, "dense", _dense_fn, label, top_k)})
     except Exception as exc:  # noqa: BLE001
         logger.exception("Dense search failed")
         return jsonify({"error": str(exc)}), 500
@@ -192,21 +238,32 @@ def query_lexical():
         return jsonify({"error": "lexical index not initialised"}), 503
 
     try:
-        raw = lexical.search(label, k=top_k)
-        return jsonify({"results": [_result_to_eltool(r) for r in raw]})
+        return jsonify({"results": _cached_search(_lex_cache, "lex", _lex_fn, label, top_k)})
     except Exception as exc:  # noqa: BLE001
         logger.exception("Lexical search failed")
         return jsonify({"error": str(exc)}), 500
+
+
+@app.post("/cache/clear")
+def cache_clear():
+    with _cache_lock:
+        _dense_cache.clear(); _lex_cache.clear()
+        for k in _cache_stats: _cache_stats[k] = 0
+    return jsonify({"ok": True})
 
 
 @app.get("/health")
 def health():
     if searcher is None or searcher.index is None:
         return jsonify({"status": "not_ready"}), 503
+    with _cache_lock:
+        cache = {**_cache_stats, "dense_entries": len(_dense_cache),
+                 "lex_entries": len(_lex_cache), "max_entries": _CACHE_MAX}
     return jsonify({
         "status": "ok",
         "index":   searcher.get_index_stats(),
         "lexical": lexical.get_stats() if lexical else None,
+        "cache":   cache,
     })
 
 

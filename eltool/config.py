@@ -28,7 +28,7 @@ class KBConfig(BaseModel):
     score_field: str = "score"
     headers: str = Field(default="{}", description="Optional JSON object of HTTP headers.")
     enable_dense: bool = True
-    enable_lexical: bool = True
+    enable_lexical: bool = False
 
     @field_validator("name")
     @classmethod
@@ -94,6 +94,11 @@ class SessionConfig(BaseModel):
     # Neo4j graph neighborhood. Connection + schema live in neo4j.yaml (see
     # neo4j.example.yaml); this flag just turns the feature on for the session.
     enable_graph: bool = False
+    # Graph disambiguation only breaks ties: mentions whose top-1 retrieval score
+    # is >= pin_threshold are never moved; among the rest, only candidates within
+    # switch_margin of that mention's own top-1 score are eligible.
+    graph_pin_threshold: float = 0.90
+    graph_switch_margin: float = 0.10
 
     @field_validator("session_name")
     @classmethod

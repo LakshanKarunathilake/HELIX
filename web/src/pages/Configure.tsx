@@ -807,7 +807,7 @@ function KBForm({
               <input
                 type="checkbox"
                 className="w-4 h-4 rounded accent-brand-500"
-                checked={kb.enable_lexical ?? true}
+                checked={kb.enable_lexical ?? false}
                 onChange={e => onChange({ enable_lexical: e.target.checked })}
               />
               <span className="text-sm text-gray-700">Lexical (BM25 + n-gram)</span>
