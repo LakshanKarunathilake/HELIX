@@ -50,29 +50,21 @@ Linking entity mentions to canonical knowledge-base entries is central to
 building structured biomedical resources, yet automated systems remain below the
 precision that downstream use requires, leaving expert curation the bottleneck.
 We present \emph{HELIX}, an open-source, configurable annotation tool that unites
-dense candidate retrieval with knowledge-graph-aware human review in a single
-expert-in-the-loop workflow over any FAISS-indexable knowledge base. Candidates are
-retrieved by a domain-adapted dense encoder over the knowledge base. HELIX's
-distinguishing contribution is a two-level, graph-aware annotation process that targets the
-\emph{Acc@$k$--Acc@1 gap} --- cases where the gold concept is retrieved but not
-ranked first --- using document-level graph coherence, while the expert can
-accept or challenge every decision: at the
-\emph{individual} level, each mention's candidates are shown with their
-neighbourhood in a connected knowledge graph (Neo4j), so annotators disambiguate
-by graph context rather than surface text; at the \emph{document} level, the
-accepted entities are assembled into one subgraph, isolated picks are flagged for
-renegotiation, and identifiers can be rearranged until the document's entity set
-is globally coherent. We evaluate HELIX on both tracks of BC5CDR (MeSH) and on
-MedMentions ST21pv (UMLS, $203{,}282$ mentions). BC5CDR figures are a favourable
-in-dictionary ceiling (up to $96\%$), while the open-vocabulary MedMentions/UMLS
-setting shows that dictionary \emph{coverage} dominates retrieval quality --- whole
-semantic types fall to near-zero when they are absent from the index. We also
-profile the Neo4j graph
-step's cost (nodes tackled, edges discovered, and per-document query latency), and
-report the automatic graph
-connection-maximisation as a negative result that motivates confidence-gated,
-interactive use, and release HELIX with a reproducible setup to support scalable
-entity-linking annotation.
+dense candidate retrieval with knowledge-graph-aware human review over any
+FAISS-indexable knowledge base. Review is two-level: each mention's candidates are
+shown with their neighborhood in a connected knowledge graph (Neo4j), and the
+document's accepted entities are then assembled into one subgraph in which isolated
+picks are flagged and renegotiated until the entity set is coherent. Evaluating on
+both BC5CDR tracks (MeSH) and MedMentions ST21pv (UMLS, $203{,}282$ mentions) yields
+two findings. First, dictionary \emph{coverage} dominates retrieval quality:
+re-indexing the same corpus swings Acc@1 by up to ${\sim}24$ points, and whole
+semantic types fall to near-zero when absent from the index. Second --- our main
+graph result, and a negative one --- naive connectivity maximization \emph{degrades}
+accuracy by up to $26$ points, favoring graph hubs and structural relations;
+confidence gating bounds this to within roughly one point of the dense baseline, but
+automatic gains stay small. The graph is therefore best exposed as evidence for
+expert review rather than used as an autonomous decision rule. We profile the Neo4j
+step's cost and release HELIX with a reproducible setup.
 
 \keywords{Biomedical Entity Linking \and Knowledge Graphs \and
 Human-in-the-Loop Annotation \and
@@ -85,7 +77,7 @@ Dense Retrieval \and Collective Disambiguation.}
 
 Entity linking (EL) maps textual mentions to canonical entries in a knowledge
 base (KB) such as the UMLS Metathesaurus~\cite{umls}, and is a prerequisite for
-constructing biomedical knowledge graphs, normalising clinical text, and
+constructing biomedical knowledge graphs, normalizing clinical text, and
 enabling structured search. Despite steady progress, fully automated biomedical
 EL still plateaus well below the precision required for curated resources: strong
 systems on recent shared tasks report top-1 accuracy in the range of roughly
@@ -103,10 +95,12 @@ concept, or two related concepts---are made independently and can silently
 conflict.
 
 We address these gaps with \emph{HELIX}, a configurable, open-source
-expert-in-the-loop annotation tool. HELIX combines (i) dense candidate retrieval
-over the knowledge base and (ii) a two-level, graph-aware review process backed by a
-Neo4j knowledge graph. At the \emph{individual} level, the annotator sees each
-mention's candidates together with their graph neighbourhood; at the
+expert-in-the-loop annotation tool. HELIX is \emph{hybrid} in the machine/expert
+sense used throughout this paper --- (i) automatic dense candidate retrieval plus
+(ii) a two-level, graph-aware \emph{human} review process backed by a Neo4j knowledge
+graph --- not a fusion of two retrieval strands (we evaluate dense retrieval alone,
+Sec.~\ref{sec:future}). At the \emph{individual} level, the annotator sees each
+mention's candidates together with their graph neighborhood; at the
 \emph{document} level, all accepted entities are drawn as one subgraph in which
 isolated picks are flagged and can be renegotiated until the document is globally
 coherent, turning independent per-mention choices into a human-driven collective
@@ -114,17 +108,22 @@ linking step.
 
 \medskip\noindent\textbf{Contributions.}
 \begin{enumerate}
-  \item A \emph{dense retrieval} back end (a domain-adapted SAPBERT$+$FAISS
-        encoder) that generates candidate concepts over any FAISS-indexable
-        knowledge base (Sec.~\ref{sec:retrieval}).
-  \item A \emph{two-level graph-aware annotation workflow} --- candidate-neighbourhood
-        disambiguation and a document-level coherence-negotiation view --- with a
-        \emph{confidence-gated} collective-linking algorithm that targets the
-        Acc@$k$--Acc@1 gap without disturbing confident picks, and lets the
-        expert challenge every decision (Sec.~\ref{sec:graph}).
-  \item An \emph{open, reproducible system}---multi-select annotation, provenance
-        logging, containerised deployment, and an evaluation harness---together
-        with an empirical study on a biomedical corpus (Sec.~\ref{sec:eval}).
+  \item A \emph{two-level, KG-aware annotation interface} --- candidate-neighborhood
+        disambiguation plus an editable document subgraph that flags isolated picks
+        --- over a dense retrieval layer (SAPBERT$+$FAISS) for any FAISS-indexable
+        KB (Secs.~\ref{sec:retrieval},~\ref{sec:graph}).
+  \item A \emph{confidence-constrained graph-assistance procedure} limiting candidate
+        substitution to low-confidence near-ties, so connectivity cannot override
+        confident predictions (Alg.~\ref{alg:graph}).
+  \item An \emph{empirical analysis} showing that ungated connectivity maximization
+        favors hubs and degrades accuracy, that confidence constraints substantially
+        reduce this failure, and that the residual automatic gain is small ---
+        motivating interactive rather than autonomous use
+        (Sec.~\ref{sec:graphresults}).
+  \item A \emph{controlled analysis of index coverage} across corpus-derived and
+        full-ontology MeSH/UMLS indexes (Sec.~\ref{sec:eval}).
+  \item An \emph{open, reproducible implementation} with provenance logging,
+        containerized deployment, and an evaluation harness (Sec.~\ref{sec:eval}).
 \end{enumerate}
 
 % ==============================================================================
@@ -157,7 +156,7 @@ A long line of work exploits KB structure for disambiguation, from topic-coheren
 over semantic graphs~\cite{collective2020} and Personalized-PageRank collective
 linking to entity-/relationship-embedding methods on knowledge
 graphs~\cite{kgdisamb2021}. These systems infer coherence \emph{automatically};
-HELIX instead \emph{surfaces} the graph neighbourhood to a human and makes the
+HELIX instead \emph{surfaces} the graph neighborhood to a human and makes the
 document-level coherence check an interactive, auditable step---a
 human-driven analogue of collective disambiguation.
 
@@ -170,15 +169,19 @@ learning. Evaluation and review tooling includes ELEVANT~\cite{elevant} for
 fine-grained EL error analysis and AnNER~\cite{anner} for annotation/review
 workflows in KG construction. Table~\ref{tab:tools} positions HELIX against these
 tools: to our knowledge HELIX is the first annotation tool to combine dense
-retrieval with a graph-neighbourhood/document-coherence review surface in one
+retrieval with a graph-neighborhood/document-coherence review surface in one
 workflow.
 
 \begin{table}[t]
 \caption{Feature comparison of HELIX with representative EL annotation tools.
 \checkmark~= supported, $\circ$~= partial/plugin, --~= none. Columns: knowledge-base
-\emph{link}ing, \emph{dense} retrieval, knowledge-graph \emph{neighbourhood} view,
+\emph{link}ing, \emph{dense} retrieval, knowledge-graph \emph{neighborhood} view,
 \emph{document}-level coherence review, \emph{auto}-suggestion, \emph{provenance}
-logging.}
+logging. Entries refer to \emph{native or documented} workflows, not functionality
+achievable through custom extension --- several of these tools are scriptable enough
+to approximate a missing column. ELEVANT~\cite{elevant} and AnNER~\cite{anner} are
+omitted: they target error analysis and review rather than the interactive linking
+loop compared here.}
 \label{tab:tools}
 \centering
 \setlength{\tabcolsep}{5pt}
@@ -210,7 +213,7 @@ each mention flows, keeping the human annotator in control at the review phases
 (1)~\emph{retrieves} candidate concepts for every mention from a knowledge base with
 a domain-adapted dense encoder; (2)~presents each mention to the annotator for
 \emph{individual review} in its document context, together with the ranked
-candidates and their neighbourhood in a knowledge graph; and (3)~assembles the
+candidates and their neighborhood in a knowledge graph; and (3)~assembles the
 accepted entities of a document for a \emph{coherence review}, where the annotator
 renegotiates picks that are inconsistent with the
 rest of the document. Every decision is persisted with its provenance. Each
@@ -272,7 +275,7 @@ knowledge graph.
 }
 \caption{HELIX annotation flow. Automated \emph{retrieval} proposes candidates from a
 knowledge base (blue); the annotator then performs \emph{individual review} (mention
-in context, candidates, and their graph neighbourhood) and \emph{coherence review} of
+in context, candidates, and their graph neighborhood) and \emph{coherence review} of
 the document subgraph, accepting, overriding, or renegotiating picks (orange). The
 human controls the review phases (solid); a knowledge base and optional graph supply
 candidates and relations (dashed).}
@@ -306,12 +309,12 @@ HELIX connects to a Neo4j knowledge graph whose nodes are concepts
 
 \paragraph{Individual level.}
 For a mention's candidate set $C$, HELIX queries how the candidates connect to one
-another and to their one-hop neighbours (Listing~\ref{lst:cypher}), and renders a
+another and to their one-hop neighbors (Listing~\ref{lst:cypher}), and renders a
 compact node-link graph in a floating, resizable panel. Candidates that inhabit
-different graph neighbourhoods are visibly distinct concepts, which makes
+different graph neighborhoods are visibly distinct concepts, which makes
 type-level disambiguation immediate.
 
-\begin{lstlisting}[caption={Candidate-neighbourhood query (edges among candidates
+\begin{lstlisting}[caption={Candidate-neighborhood query (edges among candidates
 plus capped one-hop neighbours).},label={lst:cypher},language=SQL]
 MATCH (a:Concept)-[r:RELATES_TO]-(b:Concept)
 WHERE a.cui IN $ids AND b.cui IN $ids AND a.cui < b.cui
@@ -331,11 +334,11 @@ disambiguation an interactive, auditable step rather than an opaque inference,
 echoing coherence-based collective linking~\cite{collective2020,kgdisamb2021}
 while keeping the human in control.
 
-\paragraph{Automatic connection maximisation.}
+\paragraph{Automatic connection maximization.}
 The document-level view can also be resolved automatically to seed the human
 review. The principle is that the graph should \emph{break ties, not overrule
 confident retrieval}---targeting only the recoverable Acc@$k$--Acc@1 gap
-(Sec.~\ref{sec:graphresults}). Since naive edge maximisation destroys good top-1
+(Sec.~\ref{sec:graphresults}). Since naive edge maximization destroys good top-1
 picks, HELIX uses a confidence-gated, confidence-ordered procedure
 (Algorithm~\ref{alg:graph}): mentions with a high top-1 score ($\ge\tau_p$) are
 \emph{pinned}; the rest are resolved in decreasing-confidence order, each switching
@@ -366,25 +369,22 @@ graph adjacency $A$; pin threshold $\tau_p$; switch margin $\delta$
 \subsection{Annotation Workflow and the Human in the Loop}
 \label{sec:workflow}
 
-For each mention the annotator sees the source document with the mention
-highlighted and a ranked candidate list (Fig.~\ref{fig:ui}); at the document level,
-the accepted concepts form one subgraph in which \emph{isolated} picks are flagged
-for renegotiation (Fig.~\ref{fig:docreview}). The division of labour is that the
-\emph{system} handles recall---finding, ranking, and relating candidates---while the
-\emph{human} supplies precision over a small, contextualised shortlist, inverting
-the effort profile of manual EL (where time is dominated by searching the KB).
-Concretely, the annotator (i)~\emph{verifies} rather than searches: a one-keystroke
-confirmation of a pre-selected top candidate (with entity-type-aware tie-breaking)
-and an interruptible auto-advance countdown that streams confident cases past and
-slows only for hard ones; (ii)~reads each mention \emph{in context}, resolving
+For each mention the annotator sees the source document with the mention highlighted
+and a ranked candidate list (Fig.~\ref{fig:ui}); at the document level the accepted
+concepts form one subgraph in which \emph{isolated} picks are flagged for
+renegotiation (Fig.~\ref{fig:docreview}). The system handles recall --- finding,
+ranking, and relating candidates --- while the human supplies precision over a small,
+contextualized shortlist, shifting the task from open-ended KB search toward bounded
+verification. The annotator therefore (i)~\emph{verifies} rather than searches, via
+one-keystroke confirmation of a type-aware pre-selected pick and an interruptible
+auto-advance countdown; (ii)~reads each mention \emph{in context}, resolving
 ambiguous abbreviations in place; and (iii)~disambiguates \emph{by structure} on the
-neighbourhood and document-subgraph views, the graph \emph{informing} rather than
-making the decision. Selections are multi-valued (pipe-joined, e.g.\
-\texttt{C0011849|C0011860}); explicit NIL, manual entry, and automatic provenance
-logging come for free (enabling the acceptance/override analysis in
-Sec.~\ref{sec:eval}); and bulk pre-annotation with pause/resume lets a human review
-machine suggestions in a single sweep---cutting the time and cognitive load of
-curation while preserving the annotator's authority over every decision.
+neighborhood and subgraph views, the graph \emph{informing} rather than making the
+decision. Selections are multi-valued (pipe-joined, e.g.\
+\texttt{C0011849|C0011860}), with explicit NIL, manual entry, provenance logging, and
+bulk pre-annotation with pause/resume. These mechanisms are \emph{designed} to reduce
+search effort and cognitive load; measuring that reduction needs the multi-annotator
+study we leave to future work (Sec.~\ref{sec:future}).
 
 \begin{figure}[t]
 \centering
@@ -411,7 +411,7 @@ re-computes coherence.}
 
 We evaluate the automatic pipeline against the already-annotated BC5CDR gold on
 both the chemical and disease tracks: dense-retrieval accuracy, the effect of
-dictionary index construction, the automatic graph connection-maximisation step
+dictionary index construction, the automatic graph connection-maximization step
 measured against gold, and a query-cost/latency profile. All numbers below are
 measured with \texttt{eval/score.py} (any-match).
 
@@ -449,10 +449,14 @@ BioNNE-R             & UMLS 2025AA   & -                  & document-level graph
 }
 \end{table}
 
-We report \textbf{Acc@1} and \textbf{Acc@$k$} ($k{=}10$, the retrieval ceiling),
-and for the graph step the nodes tackled, edges \emph{discovered}, and per-document
-query latency (Sec.~\ref{sec:cost}). A prediction is correct under \emph{any-match}:
-its identifier matches any of the mention's gold concepts.
+We report \textbf{Acc@1} --- the fraction of mentions whose \emph{top-ranked}
+candidate is correct --- and \textbf{Acc@$k$} ($k{=}10$), the fraction for which a
+correct candidate appears \emph{anywhere} in the top $k$ (the retrieval ceiling, not
+a top-$k$ accuracy); their difference is the \emph{opportunity set} the graph step
+can act on. For the graph step we also report nodes tackled, edges
+\emph{discovered}, and per-document latency (Sec.~\ref{sec:cost}). Scoring is
+\emph{any-match}: gold annotations may list several equivalent identifiers for one
+concept, and a prediction is correct if it matches any of them.
 
 \subsection{Retrieval Results}
 Our experiments evaluate dense retrieval (SAPBERT$+$FAISS with a MeSH adapter);
@@ -460,16 +464,20 @@ automating the annotator's selection with an LLM re-ranker is out of scope here 
 left to future work (Sec.~\ref{sec:future}).
 Table~\ref{tab:results} is our overall results table: dense retrieval (Acc@10 and
 Acc@1) together with Acc@1 after the graph gate across pin thresholds and the
-\emph{ungated} ablation. Retrieval is strong on BC5CDR (in-dictionary; up to
-$96\%$ full-corpus) and much lower on the open-vocabulary MedMentions/UMLS setting.
+\emph{ungated} ablation. Retrieval is strong on BC5CDR against a corpus-derived
+in-dictionary index (up to $95.4\%$ Acc@1) and much lower in the corpus-independent
+MedMentions/UMLS setting.
 
 \begin{table}[t]
 \caption{Overall results (\%, any-match). BC5CDR: full dev/train/test splits
-($500$ docs each); MedMentions ST21pv: $400$-doc sample.
-\emph{Acc@1}\,/\,\emph{Acc@10} = dense top-1\,/\,top-10; the $\tau_p$ columns give
+($500$ docs each); MedMentions ST21pv: $400$-doc sample (Sec.~\ref{sec:medmentions}).
+\emph{Acc@1}\,/\,\emph{Acc@10} = correct candidate ranked first\,/\,present anywhere
+in the top $10$; the $\tau_p$ columns give
 Acc@1 after the graph gate (Alg.~\ref{alg:graph}, $\delta{=}0.1$), \emph{Ungated}
-removes it. \emph{Index}: general/full = whole ontology (open-vocabulary),
-gold = corpus-derived (in-dictionary). The gate holds Acc@1 across the sweep; only
+removes it. \emph{Index}: \emph{full} = whole ontology, corpus-independent;
+\emph{in-dict.}\ = corpus-derived, containing every gold concept by construction and
+therefore a diagnostic upper bound rather than a realistic benchmark. Gated Acc@1
+stays within $-1.1/{+}0.8$ points of the dense baseline across the sweep; only
 ungated collapses it.}
 \label{tab:results}
 \centering
@@ -481,14 +489,14 @@ ungated collapses it.}
 \cmidrule(lr){6-8}
 Corpus & Index & Split & Acc@10 & Acc@1 & $0.95$ & $0.85$ & $0.70$ & Ungated \\
 \midrule
-MedMentions ST21pv & UMLS, general & --    & 54.5 & 34.8 & 34.6 & 34.8 & 34.8 & 33.5 \\
-MedMentions ST21pv & UMLS, gold    & --    & 98.7 & 69.9 & 69.9 & 69.9 & 69.9 & 50.4 \\
+MedMentions ST21pv & UMLS, full    & --    & 54.5 & 34.8 & 34.6 & 34.8 & 34.8 & 33.5 \\
+MedMentions ST21pv & UMLS, in-dict. & --   & 98.7 & 69.9 & 69.9 & 69.9 & 69.9 & 50.4 \\
 \midrule
 BC5CDR-chemical & MeSH, full & dev   & 85.3 & 82.7 & 83.5 & 83.1 & 83.0 & 70.8 \\
                 &            & train & 85.2 & 81.9 & 82.2 & 82.5 & 81.9 & 69.9 \\
                 &            & test  & 81.6 & 78.6 & 78.6 & 78.7 & 78.7 & 66.7 \\
 \addlinespace
-                & MeSH, gold & dev   & 93.3 & 93.3 & 93.3 & 93.3 & 93.3 & 75.8 \\
+                & MeSH, in-dict. & dev   & 93.3 & 93.3 & 93.3 & 93.3 & 93.3 & 75.8 \\
                 &            & train & 93.3 & 93.3 & 93.2 & 93.3 & 93.3 & 77.7 \\
                 &            & test  & 86.7 & 85.7 & 85.6 & 85.7 & 85.7 & 70.6 \\
 \midrule
@@ -496,7 +504,7 @@ BC5CDR-disease  & MeSH, full & dev   & 80.7 & 72.6 & 71.5 & 72.1 & 72.6 & 57.3 \
                 &            & train & 80.9 & 71.7 & 71.4 & 71.9 & 71.7 & 56.4 \\
                 &            & test  & 81.9 & 72.6 & 72.2 & 72.8 & 72.5 & 59.0 \\
 \addlinespace
-                & MeSH, gold & dev   & 96.3 & 95.4 & 95.5 & 95.3 & 95.4 & 69.5 \\
+                & MeSH, in-dict. & dev   & 96.3 & 95.4 & 95.5 & 95.3 & 95.4 & 69.5 \\
                 &            & train & 95.9 & 95.4 & 95.4 & 95.4 & 95.4 & 70.0 \\
                 &            & test  & 90.7 & 87.5 & 86.5 & 87.1 & 87.4 & 64.9 \\
 \bottomrule
@@ -506,65 +514,69 @@ BC5CDR-disease  & MeSH, full & dev   & 80.7 & 72.6 & 71.5 & 72.1 & 72.6 & 57.3 \
 \paragraph{An in-dictionary ceiling.}
 These BC5CDR figures should be read with care. The BioSyn dictionary is
 \emph{derived from the corpus}, so the index is guaranteed to contain every gold
-concept; the numbers are therefore a favourable \emph{in-dictionary} ceiling rather
-than open-vocabulary accuracy, and part of the score reflects dictionary coverage
+concept; the numbers are therefore a favorable \emph{in-dictionary} ceiling rather
+than corpus-independent accuracy, and part of the score reflects dictionary coverage
 rather than encoder quality. Re-indexing the same corpus against the \emph{full}
-MeSH ontology ($1$M concepts) makes this concrete: with the same encoder, Acc@1
-falls from $93.3/95.4$ (chemical/disease gold, dev) to $82.7/72.6$
-(Table~\ref{tab:results}). The realistic open-vocabulary regime is thus the
-full-ontology setting --- most sharply our MedMentions/UMLS results
-(Sec.~\ref{sec:medmentions}), where accuracy is far lower and coverage is the
-binding constraint. The lesson: for dictionary EL, \emph{what is in the index} is a
-first-order factor that must be reported alongside the retriever.
+MeSH ontology (${\sim}1$M indexed concept-name entries, i.e.\ aliases, over a far
+smaller set of unique MeSH identifiers) makes this concrete: with the same encoder,
+Acc@1 falls from $93.3/95.4$ (chemical/disease in-dictionary, dev) to $82.7/72.6$
+(Table~\ref{tab:results}). The realistic regime is thus the full-ontology setting ---
+most sharply our MedMentions/UMLS results (Sec.~\ref{sec:medmentions}). For
+dictionary EL, \emph{what is in the index} is a first-order factor that must be
+reported alongside the retriever.
 
-\subsection{Generalisation to UMLS: MedMentions ST21pv}
+\subsection{Generalization to UMLS: MedMentions ST21pv}
 \label{sec:medmentions}
 To test HELIX beyond MeSH, we link all $203{,}282$ MedMentions ST21pv mentions against
-a general UMLS index. Overall dense Acc@1 is $34.5\%$ (Acc@10 $54.8\%$), far below
+a full UMLS index. Overall dense Acc@1 is $34.5\%$ (Acc@10 $54.8\%$), far below
 BC5CDR, because the ceiling is set by \emph{index coverage}: whole ST21pv semantic
-types (e.g.\ Eukaryote, Population Group, Bacterium) are absent from the general index
+types (e.g.\ Eukaryote, Population Group, Bacterium) are absent from the full index
 and score near zero. Rebuilding the index around the ST21pv \emph{target} concepts
-confirms this directly (Table~\ref{tab:results}): with the same encoder and mentions,
+confirms this directly: with the same encoder and mentions,
 Acc@10 rises $54.8\rightarrow98.7\%$ and Acc@1 $34.5\rightarrow69.9\%$, and the
-previously-absent types recover to $56$--$86\%$. The encoder is not the bottleneck;
-retrieval quality is gated first by \emph{what is in the index}.
+previously-absent types recover to $56$--$86\%$. Index coverage is therefore the
+\emph{first} bottleneck in the full-index setting; once coverage is restored, a
+sizeable ranking error remains ($69.9\%$ Acc@1 against a $98.7\%$ ceiling), so the
+encoder and its ranking are still a substantial second bottleneck.
+
+\paragraph{Populations.} Both settings above are scored over the \emph{full} corpus
+($203{,}282$ mentions); the graph sweep is costly per document, so the MedMentions
+rows of Table~\ref{tab:results} use a random $400$-document sample instead (hence
+$34.8$ vs $34.5$ Acc@1 and $54.5$ vs $54.8$ Acc@10). BC5CDR rows use the complete
+splits ($500$ docs each); latency (Sec.~\ref{sec:cost}) is profiled on dev samples.
 
 \subsection{Graph-Assisted Review}
 \label{sec:graphresults}
-The graph step does not improve retrieval; it targets the \emph{Acc@$k$--Acc@1
-gap} (gold retrieved but not ranked first), which is substantial on hard corpora
-($20.3$ points on MedMentions) and near-zero where retrieval is confident.
-The graph columns of Table~\ref{tab:results} sweep the gate's pin threshold $\tau_p$
-across all three corpora. Two findings emerge. First, \emph{the gate is safe}: across
-the entire range $\tau_p\in[0.70,0.95]$ Acc@1 holds at the retrieval baseline on every
-corpus, because confident picks are pinned and only near-ties can move --- the graph
-never degrades a well-retrieved document. Second, \emph{the gate is essential}:
-removing it (\emph{ungated}) collapses Acc@1 by $17.5$ points on BC5CDR-chemical
-($93.3\rightarrow75.8$, dev), $25.9$ on BC5CDR-disease ($95.4\rightarrow69.5$), and $1.3$ on
-MedMentions, as unconstrained edge maximisation overrides confident top-1 picks in
-favour of hub concepts (on the MeSH graph $\sim$56\% of edges are structural, e.g.\
-\texttt{sibling}). Automatic gains are small here --- BC5CDR's in-dictionary gap is
-tiny and MedMentions is coverage-bound --- so the gate's role is protective; the
-feature's primary value is \emph{interactive}: the graph maximises document-level
-knowledge for a human who accepts or overrides on the same view.
+The graph step does not improve retrieval; it restricts reassignment to uncertain
+cases within the \emph{Acc@$k$--Acc@1 opportunity set} (gold retrieved but not ranked
+first), substantial on hard corpora ($20.3$ points on MedMentions) and near-zero
+where retrieval is confident. Sweeping $\tau_p$ (Table~\ref{tab:results}) gives two
+findings, the second far larger. \emph{The gate is safe but not corrective}: across
+$\tau_p\in[0.70,0.95]$ gated Acc@1 stays within $-1.1$ to $+0.8$ points of the dense
+baseline on every corpus and split --- damage is bounded because only near-ties move,
+but bounded is not zero, and the opportunity set is not materially recovered either.
+\emph{The gate is essential}: ungated, Acc@1 collapses by $17.5$ points on
+BC5CDR-chemical ($93.3\rightarrow75.8$, dev), $25.9$ on BC5CDR-disease
+($95.4\rightarrow69.5$), and $1.3$ on MedMentions, as unconstrained edge maximization
+overrides confident picks in favour of hubs ($\sim$56\% of MeSH edges are structural,
+e.g.\ \texttt{sibling}). Gating therefore \emph{prevents a harmful heuristic from
+doing harm} rather than making coherence improve linking; its role is protective, and
+the feature's value is \emph{interactive} --- surfacing relational evidence for a
+human who accepts or overrides. How much of the flat aggregate hides offsetting
+corrections and corruptions needs per-mention transition counts
+(Sec.~\ref{sec:future}).
 
 \paragraph{Worked example (BioNNE-R): the graph reveals knowledge, but degree is not
 correctness.}
-Re-binding a mention changes the relations that connect it to the rest of the
-document (Fig.~\ref{fig:docsub}). Often the \emph{correct} reading is the
-better-connected one: for a ``skin'' mention, the general anatomical concept
-\emph{Skin} lights up a rich neighbourhood (\texttt{finding\_site\_of}/%
-\texttt{has\_finding\_site}, \texttt{has\_location}/\texttt{location\_of},
-\texttt{specimen\_source\_topography}) while the narrower \emph{Skin, Human} attaches
-almost nothing (a--b) --- the graph surfaces document structure the flat cards hide
-and points to the coherent choice. But connectivity is \emph{not} a proxy for
-correctness: for an ``oxidation'' mention, \emph{Oxidation-Reduction} reveals
-\emph{more} edges (\texttt{biological\_process\_involves\_gene\_product}, \texttt{isa},
-\ldots) than the plainer \emph{Oxidation} (c--d), yet the more-connected concept is
-the wrong annotation here. Hub-like concepts out-link specific ones, so the choice
-must be read from the \emph{relations and context}, not degree alone --- the
-qualitative face of the ungated ablation (Table~\ref{tab:results}) and why HELIX gates
-on confidence and leaves the call to the annotator.
+Re-binding a mention changes the relations connecting it to the document
+(Fig.~\ref{fig:docsub}). Often the \emph{correct} reading is better connected: for
+``skin'', the general \emph{Skin} lights up a rich neighborhood
+(\texttt{finding\_site\_of}, \texttt{has\_location}) while the narrower \emph{Skin,
+Human} attaches almost nothing (a--b). But connectivity is \emph{not} a proxy for
+correctness: for ``oxidation'', \emph{Oxidation-Reduction} reveals \emph{more} edges
+than the plainer \emph{Oxidation} (c--d), yet is wrong here. Hubs out-link specific
+concepts, so the choice must be read from \emph{relations and context}, not degree
+--- why HELIX gates on confidence and leaves the call to the annotator.
 
 \begin{figure}[t]
 \centering
@@ -649,33 +661,38 @@ and renegotiation is logged---which matters for downstream KG construction.
 Several limitations apply. First, our evaluation exercises dense retrieval and the
 graph step; automating the annotator's selection with an LLM is left to future work
 (see below). Second, our BC5CDR figures are a corpus-derived \emph{in-dictionary}
-ceiling rather than open-vocabulary accuracy (the BioSyn dictionary is derived from
-the corpus, so it contains every gold concept); the realistic open-vocabulary regime
-is the MedMentions/UMLS setting, where accuracy is far lower and dictionary coverage
-is the binding constraint. Third, \emph{ungated} edge
-maximisation over-corrects (Table~\ref{tab:results}); HELIX's confidence-gated
-algorithm (Algorithm~\ref{alg:graph}) prevents this by construction --- pinning
-confident picks and re-ranking only near-ties --- and its large-scale evaluation
-against gold is ongoing. The graph's primary value is \emph{interactive}:
-maximising document-level knowledge for a human who can accept or override every
-decision. Finally, our study uses a single annotator, so we do not report
-inter-annotator agreement.
+ceiling rather than corpus-independent accuracy (the BioSyn dictionary is derived from
+the corpus, so it contains every gold concept); the realistic regime is the
+MedMentions/UMLS setting, where coverage is the binding constraint. Third, the graph
+step's automatic benefit is small: \emph{ungated} edge maximization over-corrects
+badly, and while the confidence-gated algorithm bounds that damage, it does not
+materially recover the opportunity set (Table~\ref{tab:results}). We evaluated
+Algorithm~\ref{alg:graph} against gold on the full BC5CDR splits and a $400$-document
+MedMentions sample; additional corpora, relation-specific variants, and per-mention
+transition analysis remain future work. Finally, our evaluation scores automatic
+output against pre-existing gold annotations and the qualitative examples were
+reviewed by a single author; we run no multi-annotator study, so we report no
+inter-annotator agreement, acceptance/override rates, or workload measurements.
 
 \subsection{Future Work}
 \label{sec:future}
 Several directions follow directly. (1)~\textbf{Automating the annotator's selection
 (LLM).} The natural next step is to automate the decision the human now makes: a
 grounded, retrieval-augmented LLM re-ranker that---constrained to the retrieved
-candidate set (and optionally the graph neighbourhood) via a strict enumerated
+candidate set (and optionally the graph neighborhood) via a strict enumerated
 schema---proposes the selection for the annotator to confirm or override. Studying
 its accuracy/cost/latency trade-off, and how much of the human's effort it can
 safely absorb, is future work.
-(2)~\textbf{Confidence-gated graph, at scale.} Algorithm~\ref{alg:graph} is
-implemented; evaluating it against gold across more corpora, tuning $\tau_p$ and
-$\delta$, and restricting the graph to semantic (non-structural) relations is
-ongoing. (3)~\textbf{Open-vocabulary retrieval.} Moving beyond corpus-derived
-dictionaries to full-ontology indexes (as in our MedMentions/UMLS setting), where
-coverage is the binding constraint.
+(2)~\textbf{A better graph objective.} Algorithm~\ref{alg:graph} maximizes a raw
+neighbor count, which is exactly why it favors hubs when ungated. Three follow-ups:
+weighting relations by type and normalizing by degree, so connectivity is evidence
+rather than popularity; restricting the graph to semantic (non-structural) relations,
+which our $\sim$56\% structural-edge figure predicts should reduce the ungated
+collapse; and reporting per-mention transition counts
+(correct$\rightarrow$wrong vs.\ wrong$\rightarrow$correct) with confidence intervals,
+to establish how much churn the flat gated aggregate conceals.
+(3)~\textbf{Corpus-independent retrieval.} Moving beyond corpus-derived
+dictionaries to full-ontology indexes, where coverage is the binding constraint.
 (4)~\textbf{User study.} A multi-annotator study reporting inter-annotator
 agreement, acceptance/override rates, and NASA-TLX workload. We do not pursue
 lexical/hybrid retrieval further: in our tests an auxiliary BM25\,$+$\,$n$-gram
@@ -688,18 +705,20 @@ already handles short mentions), so we retain dense retrieval alone.
 
 We presented HELIX, an expert-in-the-loop biomedical entity-linking annotation
 tool that combines dense retrieval with a two-level graph-aware review
-process---candidate-neighbourhood disambiguation and a document-level
+process---candidate-neighborhood disambiguation and a document-level
 coherence-negotiation view. HELIX targets two concrete
 pain points in EL curation: flat candidate presentation and incoherent
-per-mention decisions. On BC5CDR, dense retrieval
-reaches up to $96\%$ Acc@1; on the far larger MedMentions ST21pv (UMLS) it reaches
-$34.5\%$, and across both corpora we show that dictionary index
-\emph{construction and coverage} dominate retrieval quality (a $20$-point swing on
-BC5CDR; whole semantic types near-zero on MedMentions when absent from the index).
-We further show the graph step is inexpensive ($9.4$\,ms mean per document) but
-must be confidence-gated to help rather than over-correct. We release the system,
-its configuration, and an evaluation harness
-to support scalable entity-linking annotation.
+per-mention decisions. Dense retrieval reaches up to $95.4\%$ Acc@1 on BC5CDR against
+a corpus-derived in-dictionary index and $34.5\%$ on MedMentions ST21pv (UMLS), and
+across both corpora index \emph{construction and coverage} dominate retrieval quality
+(a swing of up to ${\sim}24$ points; whole semantic types near-zero when absent from
+the index). Our main graph finding is negative: unconstrained connectivity
+maximization degrades accuracy sharply by favoring hubs and structural relations,
+and confidence gating bounds that damage without automatically recovering much of the
+Acc@$k$--Acc@1 gap. The step stays inexpensive (${\approx}5$\,ms per document on
+BC5CDR to $18$\,ms on MedMentions), making it viable as \emph{interactive} evidence
+for an expert rather than an autonomous decision rule. We release the system, its
+configuration, and an evaluation harness.
 
 % ---- Bibliography ----
 \bibliographystyle{splncs04}
