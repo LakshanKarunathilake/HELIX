@@ -99,6 +99,11 @@ export function Annotate() {
   const [activeTab, setActiveTab] = useState(0)
   const [showDocReview, setShowDocReview] = useState(false)
   const prevRowIdx = useRef<number>(-1)
+  // ── pilot study (Sec. 4.6) ─────────────────────────────────────────────
+  // Wall-clock on the current row, and whether the id was typed by hand.
+  // Both are reported raw; the server classifies and stamps the condition.
+  const rowStartRef = useRef<number>(performance.now())
+  const manualEntryRef = useRef(false)
 
   // Reset when row changes
   useEffect(() => {
@@ -112,6 +117,8 @@ export function Annotate() {
     setUserInteracted(false)
     setManualIds({})
     setWarning('')
+    rowStartRef.current = performance.now()   // pilot study: time on this row
+    manualEntryRef.current = false
   }, [rowIdx])
 
   // Populate selections from saved annotations when row data arrives
@@ -188,6 +195,7 @@ export function Annotate() {
   // Auto-select once per row, after candidates arrive
   useEffect(() => {
     if (userInteracted || !cfg) return
+    if (cfg.enable_auto_select === false) return   // C1: no suggestion at all
     let changed = false
     const newSel = { ...selections }
     const threshold = cfg.score_tie_threshold ?? 0.02
@@ -216,6 +224,27 @@ export function Annotate() {
   const totalRef = useRef(total)
   totalRef.current = total
 
+  // Pilot-study signals for one save. `top1_id` is the dense rank-1 candidate,
+  // matching the Acc@1 definition used throughout the paper, so a `user_override`
+  // is exactly a mention the annotator moved off retrieval's first choice.
+  const provenanceFor = useCallback((
+    sels: Record<string, string>,
+    cands: Record<string, KBCandidates>,
+    interacted: boolean,
+  ): api.RowProvenance => {
+    const kb = cfg?.kbs[0]?.name
+    const dense = kb ? (cands[kb]?.dense ?? []) : []
+    const chosen = parseIds(kb ? sels[kb] : '')[0] ?? ''
+    const rank = dense.findIndex(c => c.id === chosen)
+    return {
+      elapsed_ms: Math.round(performance.now() - rowStartRef.current),
+      selected_rank: rank >= 0 ? rank + 1 : null,
+      top1_id: dense[0]?.id ?? '',
+      user_interacted: interacted,
+      manual_entry: manualEntryRef.current,
+    }
+  }, [cfg])
+
   // Auto-advance: when the countdown fires (and the user hasn't interacted),
   // save the auto-selected annotations and move to the next row.
   // A single setTimeout keyed on `timerActive` — no double-fire, no stale closure.
@@ -229,7 +258,8 @@ export function Annotate() {
       if (Object.keys(sels).length === 0) return
       setTimerActive(false)
       try {
-        await api.saveRow(sessionName, idx, sels, computeLlmUsed(sels, candidatesRef.current, cfg))
+        await api.saveRow(sessionName, idx, sels, computeLlmUsed(sels, candidatesRef.current, cfg),
+          provenanceFor(sels, candidatesRef.current, false))   // countdown expired untouched
         qc.invalidateQueries({ queryKey: ['progress', sessionName] })
         qc.invalidateQueries({ queryKey: ['row', sessionName, idx] })
         if (idx < totalRef.current - 1) setRowIdx(idx + 1)
@@ -273,7 +303,8 @@ export function Annotate() {
 
   const saveRow = async () => {
     if (!sessionName) return
-    await api.saveRow(sessionName, rowIdx, selections, computeLlmUsed(selections, candidates, cfg))
+    await api.saveRow(sessionName, rowIdx, selections, computeLlmUsed(selections, candidates, cfg),
+      provenanceFor(selections, candidates, userInteracted))
     qc.invalidateQueries({ queryKey: ['progress', sessionName] })
     qc.invalidateQueries({ queryKey: ['row', sessionName, rowIdx] })
   }
@@ -605,6 +636,7 @@ export function Annotate() {
                     onChange={e => setManualIds(prev => ({ ...prev, [kb.name]: e.target.value }))}
                     onKeyDown={e => {
                       if (e.key === 'Enter' && manualIds[kb.name]?.trim()) {
+                        manualEntryRef.current = true
                         select(kb.name, manualIds[kb.name].trim())
                         setManualIds(prev => ({ ...prev, [kb.name]: '' }))
                       }
@@ -615,6 +647,7 @@ export function Annotate() {
                     disabled={!manualIds[kb.name]?.trim()}
                     onClick={() => {
                       if (manualIds[kb.name]?.trim()) {
+                        manualEntryRef.current = true
                         select(kb.name, manualIds[kb.name].trim())
                         setManualIds(prev => ({ ...prev, [kb.name]: '' }))
                       }

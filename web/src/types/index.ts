@@ -25,6 +25,7 @@ export interface SessionConfig {
   doc_id_col?: string | null
   span_col?: string | null
   auto_select_secs?: number
+  enable_auto_select?: boolean
   score_tie_threshold?: number
   entity_type_col?: string | null
   enable_llm_rerank?: boolean

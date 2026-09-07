@@ -99,6 +99,14 @@ class SessionConfig(BaseModel):
     # switch_margin of that mention's own top-1 score are eligible.
     graph_pin_threshold: float = 0.90
     graph_switch_margin: float = 0.10
+    # Pilot study (Sec. 4.6). Naming a condition (e.g. "C1"/"C2"/"C3") turns on
+    # per-decision provenance logging for this session and stamps every row with
+    # the arm it belongs to. Empty = ordinary session, original column layout.
+    study_condition: str = ""
+    # C1 (manual) shows the ranked candidates with nothing pre-picked, so the
+    # annotator searches rather than verifies. auto_select_secs only governs the
+    # countdown, which is why this needs to be its own flag.
+    enable_auto_select: bool = True
 
     @field_validator("session_name")
     @classmethod

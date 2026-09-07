@@ -28,6 +28,7 @@ from pydantic import BaseModel, ValidationError
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from eltool.config import KBConfig, SessionConfig
+from eltool.provenance import classify_method
 from eltool.graph_client import GraphError, Neo4jGraphClient, load_neo4j_settings
 from eltool.kb_client import KBClient
 from eltool.llm_reranker import LLMRerankError, LLMReranker
@@ -335,6 +336,33 @@ def save_rows_batch(name: str, req: BatchAnnotateRequest):
 class AnnotateRequest(BaseModel):
     annotations: dict[str, str]
     llm_used: str | None = None      # e.g. "openai/gpt-4o" when the LLM pick was accepted
+    # Pilot-study signals. The UI reports what it observed; the method label is
+    # derived server-side (eltool.provenance) and the condition comes from the
+    # session config, so neither can be mislabelled by the client.
+    elapsed_ms: int | None = None       # time on the row, ms
+    selected_rank: int | None = None    # 1-based rank of the committed candidate
+    top1_id: str | None = None          # what retrieval ranked first
+    user_interacted: bool = False       # annotator touched the UI before commit
+    manual_entry: bool = False          # id typed by hand rather than picked
+
+
+def _provenance_for(cfg, req: AnnotateRequest) -> dict[str, str] | None:
+    """Build the provenance row for a study session (None for ordinary ones)."""
+    if not cfg.study_condition:
+        return None
+    selected = "|".join(req.annotations[k] for k in sorted(req.annotations))
+    return {
+        "_method": classify_method(
+            selected=selected,
+            top1_id=req.top1_id or "",
+            user_interacted=req.user_interacted,
+            manual_entry=req.manual_entry,
+        ),
+        "_elapsed_ms": "" if req.elapsed_ms is None else str(req.elapsed_ms),
+        "_selected_rank": "" if req.selected_rank is None else str(req.selected_rank),
+        "_top1_id": req.top1_id or "",
+        "_condition": cfg.study_condition,
+    }
 
 
 @app.post("/api/sessions/{name}/rows/{idx}")
@@ -342,9 +370,12 @@ def save_row(name: str, idx: int, req: AnnotateRequest):
     cfg = _load_cfg(name)
     df, _ = load_input(Path(cfg.input_path), cfg.delimiter)
     out_path = output_csv_path(name)
+    provenance = _provenance_for(cfg, req)
     with _WRITE_LOCK:   # atomic read-modify-write
-        out_df = init_output(out_path, df, [k.name for k in cfg.kbs], cfg.annotator)
-        write_row(out_path, out_df, idx, cfg.annotator, req.annotations, llm_used=req.llm_used)
+        out_df = init_output(out_path, df, [k.name for k in cfg.kbs], cfg.annotator,
+                             provenance=bool(cfg.study_condition))
+        write_row(out_path, out_df, idx, cfg.annotator, req.annotations,
+                  llm_used=req.llm_used, provenance=provenance)
     return {"ok": True}
 
 

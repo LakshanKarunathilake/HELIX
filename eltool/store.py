@@ -8,6 +8,10 @@ import pandas as pd
 ANNOTATOR_COL = "annotator"
 LLM_COL = "llm_used"   # records which LLM (provider/model) produced an accepted annotation
 
+# Per-decision provenance for the pilot study. Opt-in per session: sessions
+# annotated before the study keep their original column layout untouched.
+PROVENANCE_COLS = ["_method", "_elapsed_ms", "_selected_rank", "_top1_id", "_condition"]
+
 
 def detect_delimiter(path: Path) -> str:
     sample = Path(path).read_text(errors="replace")[:4096]
@@ -26,7 +30,11 @@ def load_input(path: Path, delimiter: str | None = None) -> tuple[pd.DataFrame, 
     return df, delim
 
 
-def output_columns(input_cols: list[str], kb_names: list[str]) -> list[str]:
+def output_columns(
+    input_cols: list[str],
+    kb_names: list[str],
+    provenance: bool = False,
+) -> list[str]:
     cols = list(input_cols)
     if ANNOTATOR_COL not in cols:
         cols.append(ANNOTATOR_COL)
@@ -35,6 +43,10 @@ def output_columns(input_cols: list[str], kb_names: list[str]) -> list[str]:
     for kb in kb_names:
         if kb not in cols:
             cols.append(kb)
+    if provenance:
+        for c in PROVENANCE_COLS:
+            if c not in cols:
+                cols.append(c)
     return cols
 
 
@@ -43,10 +55,11 @@ def init_output(
     input_df: pd.DataFrame,
     kb_names: list[str],
     annotator: str,
+    provenance: bool = False,
 ) -> pd.DataFrame:
     """Create the output dataframe (or load existing). Output is reconciled
     against the current input columns + KB names."""
-    cols = output_columns(list(input_df.columns), kb_names)
+    cols = output_columns(list(input_df.columns), kb_names, provenance=provenance)
 
     if Path(out_path).exists():
         existing = pd.read_csv(out_path, dtype=str, keep_default_na=False)
@@ -73,6 +86,9 @@ def init_output(
     df[LLM_COL] = ""
     for kb in kb_names:
         df[kb] = ""
+    if provenance:
+        for c in PROVENANCE_COLS:
+            df[c] = ""
     df = df[cols]
     save_output(out_path, df)
     return df
@@ -90,12 +106,16 @@ def write_row(
     annotator: str,
     kb_values: dict[str, str],
     llm_used: str | None = None,
+    provenance: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     df.at[row_idx, ANNOTATOR_COL] = annotator
     if llm_used is not None:            # "" clears it (human override); None leaves it untouched
         df.at[row_idx, LLM_COL] = llm_used
     for kb, val in kb_values.items():
         df.at[row_idx, kb] = val
+    for col, val in (provenance or {}).items():
+        if col in df.columns:           # ignore unknown keys; absent when provenance is off
+            df.at[row_idx, col] = val
     save_output(out_path, df)
     return df
 

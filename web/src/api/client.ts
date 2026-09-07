@@ -36,6 +36,7 @@ export const createSession = (body: {
   doc_id_col?: string | null
   span_col?: string | null
   auto_select_secs?: number
+  enable_auto_select?: boolean
   score_tie_threshold?: number
   entity_type_col?: string | null
   enable_llm_rerank?: boolean
@@ -82,16 +83,28 @@ export const getProgress = (name: string) =>
 export const getRow = (name: string, idx: number) =>
   req<RowData>(`/sessions/${name}/rows/${idx}`)
 
+// Raw signals for the pilot study. The server derives the method label and
+// stamps the condition, so nothing here can mislabel an arm; ignored entirely
+// for sessions with no study_condition set.
+export type RowProvenance = {
+  elapsed_ms?: number
+  selected_rank?: number | null
+  top1_id?: string
+  user_interacted?: boolean
+  manual_entry?: boolean
+}
+
 export const saveRow = (
   name: string,
   idx: number,
   annotations: Record<string, string>,
   llm_used?: string | null,
+  provenance?: RowProvenance,
 ) =>
   req<{ ok: boolean }>(`/sessions/${name}/rows/${idx}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ annotations, llm_used }),
+    body: JSON.stringify({ annotations, llm_used, ...provenance }),
   })
 
 export const saveRowsBatch = (
