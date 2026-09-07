@@ -198,7 +198,6 @@ HELIX/
 ├── graph/                   # UMLS → Neo4j builder (with English concept names)
 ├── eval/                    # evaluation harness (Acc@1 / Recall@k ablation)
 ├── docker/                  # Dockerfiles + nginx + compose docs
-├── paper/                   # LaTeX paper (Springer LNCS)
 ├── run.sh                   # launch KB + API + web together
 ├── docker-compose.yml · environment.yml
 ├── requirements.txt · requirements-api.txt · requirements-kb.txt
@@ -248,7 +247,7 @@ cd web && npm run dev
 
 ## Citation
 
-If you use HELIX, please cite the paper (see [`paper/`](paper/)):
+If you use HELIX, please cite the paper:
 
 ```bibtex
 @inproceedings{helix2026,

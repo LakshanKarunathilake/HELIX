@@ -74,3 +74,6 @@ graphify-out/cache/semantic/pd5fd89c46bb5/5603292c16e3d4ec58c44e662bd6f3855b24c7
 graphify-out/cache/semantic/pd5fd89c46bb5/b3db2e0fc34d6660a54092ba10b65b6f6851b458b08c02a28381834add138374.json
 graphify-out/cache/semantic/pd5fd89c46bb5/cdb60d38415b53045324d648f086f50b5cd97a083603b4b48461df8b6b6834cf.json
 graphify-out/cache/semantic/pd5fd89c46bb5/eca75867c8cc4a1eecddd56bb6bba2dffa88374f1a8f738bc58afdfbc2d45226.json
+
+# LaTeX paper sources — kept local only (avoids self-match in plagiarism checks)
+paper/
