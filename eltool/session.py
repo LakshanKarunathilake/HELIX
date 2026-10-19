@@ -22,6 +22,11 @@ def output_snapshot_path(name: str, stage: str) -> Path:
     return session_dir(name) / f"annotated.{stage}.csv"
 
 
+def reflection_path(name: str) -> Path:
+    """End-of-session reflection (hint ranking + comment), one per session."""
+    return session_dir(name) / "reflection.json"
+
+
 def input_copy_path(name: str, original_name: str) -> Path:
     return session_dir(name) / f"input_{original_name}"
 

@@ -1,12 +1,14 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { CheckCircle2, ChevronDown, ChevronUp, BookOpen, Info } from 'lucide-react'
-import type { Candidate } from '@/types'
+import type { Candidate, PanelName } from '@/types'
 
 interface Props {
   candidate: Candidate
   rank: number
   selected: boolean
   onSelect: (id: string) => void
+  /** Feedback sessions log which panels were opened on the row. */
+  onPanelOpen?: (panel: PanelName) => void
 }
 
 function scoreColor(score: number | null) {
@@ -57,8 +59,16 @@ function SemanticTypePill({ raw }: { raw: string }) {
   )
 }
 
-function DefinitionTooltip({ definition }: { definition: string }) {
+// A hover shorter than this is the pointer passing over, not a read.
+const DEFINITION_DWELL_MS = 500
+
+function DefinitionTooltip({ definition, onView }: { definition: string; onView?: () => void }) {
   const [open, setOpen] = useState(false)
+  useEffect(() => {
+    if (!open || !onView) return
+    const t = setTimeout(onView, DEFINITION_DWELL_MS)
+    return () => clearTimeout(t)
+  }, [open])
   const preview = definition.length > 200 ? definition.slice(0, 200) + '…' : definition
 
   return (
@@ -86,7 +96,7 @@ function DefinitionTooltip({ definition }: { definition: string }) {
   )
 }
 
-export function CandidateCard({ candidate, rank, selected, onSelect }: Props) {
+export function CandidateCard({ candidate, rank, selected, onSelect, onPanelOpen }: Props) {
   const [showAliases, setShowAliases] = useState(false)
 
   const others = (candidate.aliases ?? []).filter(a => a !== candidate.label)
@@ -144,7 +154,9 @@ export function CandidateCard({ candidate, rank, selected, onSelect }: Props) {
             <div className="mt-2 flex flex-wrap items-center gap-1.5">
               {semGroups.map(g => <SemanticGroupBadge key={g} code={g} />)}
               {showSemTypes && semTypes.map(t => <SemanticTypePill key={t} raw={t} />)}
-              {hasDefinition && <DefinitionTooltip definition={candidate.definition} />}
+              {hasDefinition && (
+                <DefinitionTooltip definition={candidate.definition} onView={() => onPanelOpen?.('definition')} />
+              )}
             </div>
           )}
         </div>
@@ -162,7 +174,10 @@ export function CandidateCard({ candidate, rank, selected, onSelect }: Props) {
       {others.length > 0 && (
         <div className="mt-3 pt-3 border-t border-gray-100" onClick={e => e.stopPropagation()}>
           <button
-            onClick={() => setShowAliases(v => !v)}
+            onClick={() => {
+              if (!showAliases) onPanelOpen?.('synonyms')
+              setShowAliases(v => !v)
+            }}
             className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-brand-600 transition-colors"
           >
             <BookOpen className="w-3.5 h-3.5" />

@@ -8,6 +8,8 @@ interface Props {
   selectedId?: string
   onSelect?: (id: string) => void
   title?: string
+  /** Fires on expand/collapse; a panel left open stays visible on the next row. */
+  onOpenChange?: (open: boolean) => void
 }
 
 const MIN_W = 280
@@ -32,7 +34,7 @@ function loadSize(): { w: number; h: number } {
  * card; the card can be dragged bigger/smaller via a grip on its top-left corner
  * (it's anchored bottom-right, so it grows up-and-left, staying on screen).
  */
-export function FloatingGraphPanel({ data, selectedId, onSelect, title = 'Candidate graph' }: Props) {
+export function FloatingGraphPanel({ data, selectedId, onSelect, title = 'Candidate graph', onOpenChange }: Props) {
   const [open, setOpen] = useState(false)
   const [size, setSize] = useState(loadSize)
   const drag = useRef<{ x: number; y: number; w: number; h: number } | null>(null)
@@ -92,13 +94,13 @@ export function FloatingGraphPanel({ data, selectedId, onSelect, title = 'Candid
               title={title}
               width={size.w - CARD_PAD}
               height={size.h}
-              onCollapse={() => setOpen(false)}
+              onCollapse={() => { setOpen(false); onOpenChange?.(false) }}
             />
           </div>
         </div>
       ) : (
         <button
-          onClick={() => setOpen(true)}
+          onClick={() => { setOpen(true); onOpenChange?.(true) }}
           className="flex items-center gap-2 bg-white shadow-lg ring-1 ring-black/5 hover:ring-violet-300 rounded-full pl-3 pr-4 py-2 text-sm font-medium text-violet-700 transition"
           title="Show candidate graph"
         >

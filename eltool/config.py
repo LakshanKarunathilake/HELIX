@@ -107,6 +107,16 @@ class SessionConfig(BaseModel):
     # annotator searches rather than verifies. auto_select_secs only governs the
     # countdown, which is why this needs to be its own flag.
     enable_auto_select: bool = True
+    # Annotation Guide Sec. 8. After every saved decision the annotator records
+    # the main hint and a confidence level; the UI panels opened on the row are
+    # logged passively, and a reflection is collected per session. Adds the
+    # `_panels`, `_hint` and `_confidence` columns.
+    collect_feedback: bool = False
+    # DEBUG ONLY. Shows the gold answer in the annotator so retrieval failures can
+    # be inspected. Any row saved while this is on is stamped `_debug_gold_shown`
+    # and excluded from the study's accuracy numbers — turning the flag back off
+    # does NOT clean those rows. Never leave on for a real annotation pass.
+    debug_show_gold: bool = False
 
     @field_validator("session_name")
     @classmethod

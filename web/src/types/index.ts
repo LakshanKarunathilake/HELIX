@@ -26,6 +26,9 @@ export interface SessionConfig {
   span_col?: string | null
   auto_select_secs?: number
   enable_auto_select?: boolean
+  study_condition?: string
+  collect_feedback?: boolean
+  debug_show_gold?: boolean
   score_tie_threshold?: number
   entity_type_col?: string | null
   enable_llm_rerank?: boolean
@@ -152,6 +155,50 @@ export interface RowData {
   context_text?: string | null
   entity_span?: string | null
   doc_progress?: DocProgress | null
+  /** DEBUG ONLY — present when the session sets debug_show_gold. */
+  debug_gold?: string | null
+  /** DEBUG ONLY — per gold component: is it in the index, and what is it? */
+  debug_gold_info?: GoldReport[]
+  /** Hint + confidence already recorded for this row; null = not yet. */
+  feedback?: RowFeedback | null
+}
+
+// ── per-decision feedback (Annotation Guide Sec. 8) ───────────────────────────
+
+export interface RowFeedback {
+  hint: string
+  confidence: string
+}
+
+export interface FeedbackOption {
+  code: string
+  label: string
+}
+
+export interface FeedbackOptions {
+  hints: FeedbackOption[]
+  confidence: FeedbackOption[]
+}
+
+/** UI panels whose opening is logged passively in `_panels`. */
+export type PanelName = 'definition' | 'synonyms' | 'graph' | 'lookup' | 'document_review'
+
+export interface Reflection {
+  ranking: string[]
+  comment: string
+  submitted_at?: string
+}
+
+export interface GoldReport {
+  id: string
+  /** true = indexed, false = absent, null = the lookup itself failed */
+  found: boolean | null
+  label?: string
+  semantic_groups?: string
+  semantic_types?: string
+  definition?: string
+  n_aliases?: number
+  error?: string
 }
 
 

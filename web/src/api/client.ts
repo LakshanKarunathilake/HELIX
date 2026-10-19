@@ -1,4 +1,4 @@
-import type { Candidate, DocumentMentions, GraphData, KBConfig, LLMRerank, ParsedFile, Progress, RowData, SessionConfig } from '@/types'
+import type { Candidate, DocumentMentions, FeedbackOptions, GraphData, KBConfig, LLMRerank, PanelName, ParsedFile, Progress, Reflection, RowData, SessionConfig } from '@/types'
 
 const BASE = '/api'
 
@@ -47,6 +47,8 @@ export const createSession = (body: {
   llm_prompt?: string | null
   llm_api_key?: string | null
   enable_graph?: boolean
+  collect_feedback?: boolean
+  debug_show_gold?: boolean
 }) =>
   req<{ session_name: string }>('/sessions', {
     method: 'POST',
@@ -92,6 +94,7 @@ export type RowProvenance = {
   top1_id?: string
   user_interacted?: boolean
   manual_entry?: boolean
+  panels?: PanelName[]      // feedback sessions only; frozen on first save
 }
 
 export const saveRow = (
@@ -105,6 +108,28 @@ export const saveRow = (
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ annotations, llm_used, ...provenance }),
+  })
+
+// ── per-decision feedback (Annotation Guide Sec. 8) ───────────────────────────
+
+export const getFeedbackOptions = () =>
+  req<FeedbackOptions>('/feedback/options')
+
+export const saveFeedback = (name: string, idx: number, hint: string, confidence: string) =>
+  req<{ ok: boolean }>(`/sessions/${name}/rows/${idx}/feedback`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hint, confidence }),
+  })
+
+export const getReflection = (name: string) =>
+  req<Reflection | null>(`/sessions/${name}/reflection`)
+
+export const saveReflection = (name: string, ranking: string[], comment: string) =>
+  req<Reflection>(`/sessions/${name}/reflection`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ranking, comment }),
   })
 
 export const saveRowsBatch = (
@@ -135,6 +160,18 @@ export const getCandidates = (
       body: JSON.stringify({ label, kb_name, enable_dense, enable_lexical, context }),
     },
   ).then(r => ({ dense: r.dense_candidates, lexical: r.lexical_candidates, llm: r.llm }))
+
+// ── entity lookup (manual id entry) ───────────────────────────────────────────
+
+export type EntityLookup =
+  | { found: true; id: string; label: string; aliases: string[]
+      semantic_groups: string; semantic_types: string; definition: string }
+  | { found: false; id: string; message: string }
+
+export const lookupEntity = (name: string, kb: string, id: string) =>
+  req<EntityLookup>(
+    `/sessions/${name}/kb/${encodeURIComponent(kb)}/entity/${encodeURIComponent(id)}`,
+  )
 
 // ── LLM ───────────────────────────────────────────────────────────────────────
 

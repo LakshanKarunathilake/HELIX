@@ -96,3 +96,27 @@ def test_non_study_session_keeps_its_original_columns(client, tmp_path):
     assert list(saved.columns) == [
         "entity_text", "document_id", "annotator", "llm_used", "UMLS",
     ]
+
+
+def test_rows_annotated_with_gold_visible_are_stamped(client, tmp_path):
+    """Debug mode contaminates a row. The stamp is what makes that survivable
+    after the flag has been forgotten."""
+    _make_session(tmp_path, "debug-sess", study_condition="C2", debug_show_gold=True)
+
+    client.post("/api/sessions/debug-sess/rows/0",
+                json={"annotations": {"UMLS": "C1"}, "top1_id": "C1"})
+
+    saved = pd.read_csv(tmp_path / "debug-sess" / "annotated.csv", dtype=str,
+                        keep_default_na=False)
+    assert saved.at[0, "_debug_gold_shown"] == "1"
+
+
+def test_normal_rows_are_marked_clean(client, tmp_path):
+    _make_session(tmp_path, "clean-sess", study_condition="C2")
+
+    client.post("/api/sessions/clean-sess/rows/0",
+                json={"annotations": {"UMLS": "C1"}, "top1_id": "C1"})
+
+    saved = pd.read_csv(tmp_path / "clean-sess" / "annotated.csv", dtype=str,
+                        keep_default_na=False)
+    assert saved.at[0, "_debug_gold_shown"] == "0"
