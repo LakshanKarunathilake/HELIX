@@ -48,6 +48,8 @@ export const createSession = (body: {
   llm_api_key?: string | null
   llm_cache_only?: boolean
   enable_graph?: boolean
+  review_mode?: boolean
+  review_spotcheck_rate?: number
   collect_feedback?: boolean
   debug_show_gold?: boolean
 }) =>

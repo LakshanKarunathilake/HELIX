@@ -14,7 +14,7 @@ import { DocumentReview } from '@/components/DocumentReview'
 import { FeedbackPrompt } from '@/components/FeedbackPrompt'
 import { ReflectionModal } from '@/components/ReflectionModal'
 import { Network } from 'lucide-react'
-import type { Candidate, GraphData, LLMRerank, PanelName, RowFeedback, SessionConfig } from '@/types'
+import type { Candidate, GraphData, LLMRerank, PanelName, ReviewInfo, RowFeedback, SessionConfig } from '@/types'
 
 const DEFAULT_AUTO_SELECT_SECS = 5
 
@@ -90,12 +90,32 @@ export function Annotate() {
     // refetches (e.g. after a save), so manual Prev navigation to row 0 is safe.
     if (initialJumpDone.current || !progress) return
     initialJumpDone.current = true
-    setRowIdx(Math.min(progress.resume_idx, progress.total - 1))
+    // A finished review queue resumes on its last row, not on an auto row.
+    const q = progress.queue
+    if (q?.length && progress.resume_idx >= progress.total) setRowIdx(q[q.length - 1])
+    else setRowIdx(Math.min(progress.resume_idx, progress.total - 1))
   }, [progress])
 
   const total = progress?.total ?? 0
   const done  = progress?.done  ?? 0
   const pct   = total > 0 ? (done / total) * 100 : 0
+  // ── review queue (mode C) ──────────────────────────────────────────────
+  // The AI pre-annotated every row; the human only visits `queue` (review +
+  // spot-check rows, input order). Absent for every other kind of session.
+  const queue = progress?.queue ?? null
+  const reviewSession = queue !== null
+  const queuePos = queue ? queue.indexOf(rowIdx) : -1
+  const acceptedByAI = queue ? total - queue.length : 0
+  // Where Next / Prev go from `idx`: the adjacent row, or the adjacent queue row.
+  const nextTarget = (idx: number): number | 'finish' => {
+    if (!queue) return idx >= total - 1 ? 'finish' : idx + 1
+    return queue.find(q => q > idx) ?? 'finish'
+  }
+  const prevTarget = (idx: number): number | null => {
+    if (!queue) return idx > 0 ? idx - 1 : null
+    for (let k = queue.length - 1; k >= 0; k--) if (queue[k] < idx) return queue[k]
+    return null
+  }
   const pctLabel = total > 0
     ? pct < 1 ? `${done} annotated · <1%` : `${done} annotated · ${Math.round(pct)}%`
     : '0 annotated'
@@ -164,6 +184,9 @@ export function Annotate() {
       setSelections(rowData.annotations)
       setSavedAnnotations(rowData.annotations)
       setUserInteracted(true)
+    } else if (rowData.review?.route === 'review' && rowData.review.llm_id && cfg.kbs[0]) {
+      // Review row: the AI's pick is pre-selected ("NIL" pre-selects NIL).
+      setSelections({ [cfg.kbs[0].name]: rowData.review.llm_id })
     }
   }, [rowData?.idx])
 
@@ -231,6 +254,7 @@ export function Annotate() {
   useEffect(() => {
     if (userInteracted || !cfg) return
     if (cfg.enable_auto_select === false) return   // C1: no suggestion at all
+    if (reviewSession || cfg.review_mode) return    // mode C: no countdown, no auto-select
     let changed = false
     const newSel = { ...selections }
     const threshold = cfg.score_tie_threshold ?? 0.02
@@ -411,8 +435,9 @@ export function Annotate() {
 
   const saveRow = async () => {
     if (!sessionName) return
+    // In the review queue every save is an explicit Next press, never a countdown.
     await api.saveRow(sessionName, rowIdx, selections, computeLlmUsed(selections, candidates, cfg),
-      provenanceFor(selections, candidates, userInteracted))
+      provenanceFor(selections, candidates, userInteracted || reviewSession))
     qc.invalidateQueries({ queryKey: ['progress', sessionName] })
     qc.invalidateQueries({ queryKey: ['row', sessionName, rowIdx] })
   }
@@ -425,15 +450,16 @@ export function Annotate() {
     }
     setTimerActive(false)   // a pending countdown must not save this row again
     await saveRow()
-    afterSave(rowIdx, rowIdx >= total - 1 ? 'finish' : rowIdx + 1)
+    afterSave(rowIdx, nextTarget(rowIdx))
   }
 
   const goPrev = async () => {
-    if (rowIdx <= 0) return
-    if (!allFilled) { setRowIdx(r => r - 1); return }
+    const target = prevTarget(rowIdx)
+    if (target === null) return
+    if (!allFilled) { setRowIdx(target); return }
     setTimerActive(false)
     await saveRow()
-    afterSave(rowIdx, rowIdx - 1)
+    afterSave(rowIdx, target)
   }
 
   // keyboard shortcuts
@@ -481,6 +507,24 @@ export function Annotate() {
                   <div className="h-4 w-24 bg-gray-200 rounded animate-pulse" />
                   <div className="h-4 w-32 bg-gray-200 rounded animate-pulse" />
                   <div className="h-5 w-20 bg-gray-100 rounded animate-pulse" />
+                </>
+              ) : reviewSession ? (
+                <>
+                  <span className="text-xs font-semibold text-violet-700 bg-violet-50 border border-violet-200 rounded-full px-2.5 py-0.5">
+                    Review queue
+                  </span>
+                  <span className="text-sm font-semibold text-gray-900">
+                    {queuePos >= 0 ? queuePos + 1 : '–'} of {queue!.length} to check
+                  </span>
+                  <span className="text-sm text-gray-500">
+                    Row {rowIdx + 1} <span className="text-gray-400">/ {total}</span>
+                  </span>
+                  <span className="text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2.5 py-0.5">
+                    {acceptedByAI} accepted by AI
+                  </span>
+                  <span className="text-xs text-gray-400 bg-gray-100 rounded px-2 py-0.5">
+                    {cfg!.annotator}
+                  </span>
                 </>
               ) : (
                 <>
@@ -748,7 +792,7 @@ export function Annotate() {
             )}
 
             {/* countdown timer — single instance, outside KB loop */}
-            {cfg && (
+            {cfg && !reviewSession && (
             <CountdownTimer
               key={rowIdx}
               seconds={cfg.auto_select_secs ?? DEFAULT_AUTO_SELECT_SECS}
@@ -801,8 +845,18 @@ export function Annotate() {
                   </div>
                 </div>
 
-                {/* LLM re-rank pick */}
-                {candidates[kb.name]?.llm && (() => {
+                {/* review queue: the AI's pre-annotation (review rows only —
+                    a spot-check row shows nothing AI-related) */}
+                {i === 0 && rowData?.idx === rowIdx && rowData.review?.route === 'review' && (
+                  <ReviewBanner
+                    review={rowData.review}
+                    saved={Object.values(savedAnnotations).some(v => v)}
+                  />
+                )}
+
+                {/* LLM re-rank pick — never in the review queue, where it would
+                    leak the AI's answer onto spot-check rows */}
+                {!reviewSession && candidates[kb.name]?.llm && (() => {
                   const r = candidates[kb.name]!
                   const pick = [...(r.dense ?? []), ...(r.lexical ?? [])]
                     .find(c => c.id === r.llm!.entity_id)
@@ -835,7 +889,10 @@ export function Annotate() {
                   const denseCands = result?.dense ?? []
                   const lexicalCands = result?.lexical ?? []
                   const showBoth = denseCands.length > 0 && lexicalCands.length > 0
-                  const aiPickId = result?.llm && !result.llm.error ? result.llm.entity_id : null
+                  const reviewPick = i === 0 && rowData?.idx === rowIdx && rowData.review?.route === 'review'
+                    ? rowData.review.llm_id : null
+                  const aiPickId = reviewSession ? reviewPick
+                    : result?.llm && !result.llm.error ? result.llm.entity_id : null
                   const renderList = (list: Candidate[], listLabel: string, labelClass: string) => (
                     <div>
                       {showBoth && (
@@ -967,17 +1024,17 @@ export function Annotate() {
           )}
 
           <div className="flex items-center gap-2 flex-shrink-0">
-            <button className="btn-secondary" onClick={goPrev} disabled={rowIdx <= 0}>
-              <ChevronLeft className="w-4 h-4" /> Prev
+            <button className="btn-secondary" onClick={goPrev} disabled={prevTarget(rowIdx) === null}>
+              <ChevronLeft className="w-4 h-4" /> {reviewSession ? 'Prev in queue' : 'Prev'}
             </button>
             <button className="btn-secondary" onClick={goNext} disabled={!allFilled}>
               <Save className="w-4 h-4" /> Save
             </button>
             <button className="btn-primary" onClick={goNext}>
-              {rowIdx >= total - 1 ? (
+              {nextTarget(rowIdx) === 'finish' ? (
                 <><PartyPopper className="w-4 h-4" /> Finish</>
               ) : (
-                <>Next <ChevronRight className="w-4 h-4" /></>
+                <>{reviewSession ? 'Next in queue' : 'Next'} <ChevronRight className="w-4 h-4" /></>
               )}
             </button>
           </div>
@@ -1085,6 +1142,41 @@ function LLMPickBanner({ llm, label, precomputed }: { llm: LLMRerank; label?: st
       {llm.rationale && <p className="text-xs text-violet-700 leading-snug">{llm.rationale}</p>}
       <p className="text-[10px] text-violet-400">
         {llm.model}{llm.cached ? (precomputed ? ' · DGX (local) · precomputed' : ' · cached') : ''}
+      </p>
+    </div>
+  )
+}
+
+// ── ReviewBanner ──────────────────────────────────────────────────────────────
+
+const LEVEL_LABEL: Record<string, string> = {
+  sure: 'sure', fairly_sure: 'fairly sure', unsure: 'unsure',
+}
+
+function ReviewBanner({ review, saved }: {
+  review: Extract<ReviewInfo, { route: 'review' }>
+  saved: boolean
+}) {
+  const sure = review.level === 'sure'
+  return (
+    <div className="bg-violet-50 border border-violet-200 rounded-lg px-3 py-2.5 space-y-1" data-testid="review-banner">
+      <div className="flex items-center gap-2 text-sm text-violet-800 font-medium">
+        <Sparkles className="w-4 h-4 flex-shrink-0" />
+        AI suggested <code className="font-mono text-xs bg-violet-100 rounded px-1">{review.llm_id}</code>
+        {review.label && <span className="truncate text-violet-900">{review.label}</span>}
+        {review.level && (
+          <span className={`ml-auto text-xs font-semibold rounded-full px-2 py-0.5 border ${
+            sure ? 'text-violet-700 bg-violet-100 border-violet-200'
+                 : 'text-amber-700 bg-amber-50 border-amber-300'
+          }`}>
+            {LEVEL_LABEL[review.level] ?? review.level}
+          </span>
+        )}
+      </div>
+      {review.rationale && <p className="text-xs text-violet-700 leading-snug">{review.rationale}</p>}
+      <p className="text-xs text-violet-600">
+        {review.reasons.length > 0 && <>Sent for review: {review.reasons.join(' and ')}. </>}
+        {!saved && <>Pre-selected — press Next to confirm, or pick another.</>}
       </p>
     </div>
   )

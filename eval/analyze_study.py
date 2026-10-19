@@ -17,6 +17,7 @@ kept out of the sessions, and reports per condition:
 Usage:
     python eval/analyze_study.py                     # all study2-* sessions
     python eval/analyze_study.py --prefix study2 --json out.json
+    python eval/analyze_study.py --review-prefix review   # + mode C summary
 """
 
 from __future__ import annotations
@@ -196,6 +197,55 @@ def compare_human_ai(human: pd.DataFrame, ai: pd.DataFrame, kb_col: str) -> dict
     return out
 
 
+def summarise_review(df: pd.DataFrame, kb_col: str) -> dict:
+    """Mode C (review queue) summary over review-session rows merged with gold.
+
+    Auto rows are the LLM's answers accepted without a human, so their Acc@1
+    vs gold is the auto-accept quality. Spot-check rows reached the human
+    WITHOUT the AI's answer, so agreement with ``_llm_id`` there is an
+    unprimed estimate of the same thing. Percentages are 0-100; rows not yet
+    answered by a human are ignored for accuracy and time.
+    """
+    route = df["_route"].astype(str).str.strip()
+    answered = df[kb_col].astype(str).str.strip() != ""
+    human_saved = answered & (df["_method"].astype(str).str.strip() != "llm_auto")
+
+    auto = df[(route == "auto") & answered]
+    review = df[(route == "review") & human_saved]
+    spot = df[(route == "spotcheck") & human_saved]
+    queue = df[route.isin(["review", "spotcheck"]) & human_saved]
+
+    def pct(hits: list[bool]) -> float | None:
+        return 100.0 * sum(hits) / len(hits) if hits else None
+
+    secs = pd.to_numeric(queue["_elapsed_ms"], errors="coerce").dropna() / 1000.0
+    median = float(secs.median()) if len(secs) else None
+    n_auto = int((route == "auto").sum())
+    return {
+        "n_auto": n_auto,
+        "n_review": int((route == "review").sum()),
+        "n_spotcheck": int((route == "spotcheck").sum()),
+        "auto_acc1": pct([_hit(p, g) for p, g in zip(auto[kb_col], auto["gold_cui"])]),
+        "spotcheck_agreement": pct([_hit(p, a) for p, a in zip(spot[kb_col], spot["_llm_id"])]),
+        "review_acc1": pct([_hit(p, g) for p, g in zip(review[kb_col], review["gold_cui"])]),
+        "human_median_secs": median,
+        "human_minutes": float(secs.sum() / 60),
+        "est_minutes_saved": n_auto * median / 60 if median is not None else None,
+    }
+
+
+def _print_review(s: dict) -> None:
+    f = lambda v, unit="%": "n/a" if v is None else f"{v:.1f}{unit}"  # noqa: E731
+    print("\nReview queue (mode C)")
+    print(f"  routes: {s['n_auto']} auto, {s['n_review']} review, {s['n_spotcheck']} spot-check")
+    print(f"  auto-accepted Acc@1 (vs gold)      {f(s['auto_acc1'])}")
+    print(f"  spot-check agreement with the AI   {f(s['spotcheck_agreement'])}")
+    print(f"  reviewed rows Acc@1 (vs gold)      {f(s['review_acc1'])}")
+    print(f"  human time {f(s['human_minutes'], ' min')}; "
+          f"est. saved {f(s['est_minutes_saved'], ' min')} "
+          f"(auto rows x median {f(s['human_median_secs'], ' s')})")
+
+
 def load(prefix: str) -> tuple[pd.DataFrame, str]:
     gold = pd.read_csv(GOLD_FILE, dtype=str, keep_default_na=False)
     frames, kb_col = [], None
@@ -244,6 +294,8 @@ def main() -> None:
     ap.add_argument("--json", help="also write the summary here")
     ap.add_argument("--ai-prefix", help="AI session prefix to compare with humans, "
                     "e.g. ai-openai-gpt-oss-120b-study2")
+    ap.add_argument("--review-prefix", help="review-mode (mode C) session prefix to "
+                    "summarise: auto-accept quality, spot-check agreement, time saved")
     args = ap.parse_args()
 
     df, kb_col = load(args.prefix)
@@ -293,6 +345,12 @@ def main() -> None:
         cmp = compare_human_ai(df, ai_df, kb_col)
         _print_comparison(cmp)
         res = {**res, "human_vs_ai": cmp}
+
+    if args.review_prefix:
+        rev_df, rev_kb = load(args.review_prefix)
+        rev = summarise_review(rev_df, rev_kb)
+        _print_review(rev)
+        res = {**res, "review": rev}
 
     if args.json:
         Path(args.json).write_text(json.dumps(res, indent=2))

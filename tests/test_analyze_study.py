@@ -12,7 +12,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from eval.analyze_study import cohen_kappa, compare_human_ai, summarise
+from eval.analyze_study import cohen_kappa, compare_human_ai, summarise, summarise_review
 
 
 def row(uid, cond, gold, pred, top1, method="user_confirm", ms="5000", rank="1"):
@@ -210,3 +210,49 @@ def test_ai_rows_still_failing_are_excluded_and_counted():
     assert s["n"] == 2
     assert s["ai_missing"] == 2
     assert s["human_only_right"] == 0
+
+
+# --- Mode C: review queue ---------------------------------------------------
+
+def rrow(uid, route, gold, pred, llm_id, method="user_confirm", ms="10000"):
+    """A review-session row. Auto rows were written by the LLM, not a human."""
+    if route == "auto":
+        method, ms = "llm_auto", ""
+    return {"mention_uid": uid, "_route": route, "gold_cui": gold, "umls": pred,
+            "_llm_id": llm_id, "_method": method, "_elapsed_ms": ms}
+
+
+def _review_df():
+    return pd.DataFrame([
+        rrow("m1", "auto", "G1", "G1", "G1"),                      # auto right
+        rrow("m2", "auto", "G2", "G9", "G9"),                      # auto wrong
+        rrow("m3", "auto", "G3", "G3", "G3"),                      # auto right
+        rrow("m4", "auto", "G4", "G4", "G4"),                      # auto right
+        rrow("m5", "review", "G5", "G5", "G8", ms="20000"),        # human fixed it
+        rrow("m6", "review", "G6", "G0", "G0", ms="40000"),        # human kept a wrong pick
+        rrow("m7", "spotcheck", "G7", "G7", "G7", ms="10000"),     # agrees with the AI
+        rrow("m8", "spotcheck", "G8", "G8", "G5", ms="30000"),     # disagrees
+        rrow("m9", "review", "G9", "", "G9", method="", ms=""),    # not yet reviewed
+    ])
+
+
+def test_review_summary_counts_routes():
+    s = summarise_review(_review_df(), "umls")
+
+    assert (s["n_auto"], s["n_review"], s["n_spotcheck"]) == (4, 3, 2)
+    assert s["review_acc1"] == pytest.approx(50.0)           # m5 right, m6 wrong; m9 pending
+    assert s["spotcheck_agreement"] == pytest.approx(50.0)   # m7 agrees, m8 does not
+
+
+def test_auto_accuracy_uses_gold():
+    s = summarise_review(_review_df(), "umls")
+
+    assert s["auto_acc1"] == pytest.approx(75.0)
+
+
+def test_minutes_saved_uses_median_human_time():
+    s = summarise_review(_review_df(), "umls")
+
+    # Human-saved queue rows took 20, 40, 10, 30 s -> median 25 s, total 100 s.
+    assert s["human_minutes"] == pytest.approx(100 / 60)
+    assert s["est_minutes_saved"] == pytest.approx(4 * 25 / 60)
