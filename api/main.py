@@ -464,6 +464,10 @@ def _records_llm(cfg) -> bool:
     return bool(cfg.study_condition and cfg.enable_llm_rerank)
 
 
+_AI_WRITTEN_COLS = ("_llm_id", "_llm_confidence", "_llm_level", "_llm_label",
+                    "_top1_id", "_rationale", "_route")
+
+
 def _provenance_for(cfg, req: AnnotateRequest) -> dict[str, str] | None:
     """Build the provenance row for a study session (None for ordinary ones)."""
     if not cfg.study_condition:
@@ -499,6 +503,13 @@ def save_row(name: str, idx: int, req: AnnotateRequest):
         out_df = init_output(out_path, df, [k.name for k in cfg.kbs], cfg.annotator,
                              provenance=bool(cfg.study_condition),
                              feedback=cfg.collect_feedback, llm=_records_llm(cfg))
+        if cfg.review_mode and provenance:
+            # Mode C: the pre-annotation pass wrote these; the human's first save
+            # must not replace them with the client's (usually empty) values.
+            for col in _AI_WRITTEN_COLS:
+                if col in provenance and col in out_df.columns \
+                        and str(out_df.at[idx, col] or "").strip():
+                    del provenance[col]
         write_row(out_path, out_df, idx, cfg.annotator, req.annotations,
                   llm_used=req.llm_used, provenance=provenance, panels=panels)
     return {"ok": True}

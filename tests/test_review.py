@@ -198,3 +198,23 @@ def test_non_review_session_has_no_queue(client, sessions):
     name = _make(sessions, review=False)
     assert "queue" not in client.get(f"/api/sessions/{name}/progress").json()
     assert client.get(f"/api/sessions/{name}/rows/0").json()["review"] is None
+
+
+def test_human_save_keeps_ai_columns_on_queue_rows(client, sessions):
+    name = _make(sessions, rate=1.0)
+    cfgp = sessions / name / "session.json"
+    cfg = json.loads(cfgp.read_text())
+    cfg["enable_llm_rerank"] = True
+    cfgp.write_text(json.dumps(cfg))
+    preannotate(name, FakeAnn({1: ("C2", "unsure")}), FakeAPI())
+    before = _out(sessions)
+    for i in (0, 1):    # 0 = spotcheck, 1 = review
+        r = client.post(f"/api/sessions/{name}/rows/{i}",
+                        json={"annotations": {"UMLS": "C1"}, "top1_id": "ZZ",
+                              "llm_id": "", "user_interacted": True})
+        assert r.status_code == 200
+    out = _out(sessions)
+    for i in (0, 1):
+        for col in ("_llm_id", "_llm_confidence", "_llm_level", "_top1_id"):
+            assert out.at[i, col] == before.at[i, col] != ""
+        assert out.at[i, "_method"] != ""
