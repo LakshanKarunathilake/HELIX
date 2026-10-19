@@ -246,3 +246,48 @@ def test_prewarm_cli_exits_nonzero_when_rows_fail(client, tmp_path, monkeypatch,
     _make_session(tmp_path, "s-c4", **C4)
     monkeypatch.setattr(P, "HelixAPI", lambda base: ClientHelix(client))
     assert P.main(["--prefix", "s-"]) == 1
+
+
+# --- final-review fixes ------------------------------------------------------
+
+def _post_cands(client, name, dense=True, lexical=True):
+    return client.post(f"/api/sessions/{name}/candidates", json={
+        "label": "lung", "kb_name": "UMLS", "enable_dense": dense,
+        "enable_lexical": lexical, "context": None}).json()
+
+
+def test_candidates_report_retrieval_errors(client, tmp_path, monkeypatch):
+    _make_session(tmp_path, "s-plain")
+    _kb_failing(monkeypatch, set())
+    assert _post_cands(client, "s-plain")["retrieval_errors"] == {"dense": None, "lexical": None}
+    _kb_failing(monkeypatch, {"dense"})
+    body = _post_cands(client, "s-plain")
+    assert body["dense_candidates"] == [] and len(body["lexical_candidates"]) == 2
+    assert "dense down" in body["retrieval_errors"]["dense"]
+    assert body["retrieval_errors"]["lexical"] is None
+    # a disabled retrieval is never an error, even if its endpoint would fail
+    _kb_failing(monkeypatch, {"lexical"})
+    assert _post_cands(client, "s-plain", lexical=False)["retrieval_errors"] == \
+        {"dense": None, "lexical": None}
+
+
+def test_prewarm_api_key_file_overrides_session_key(client, tmp_path, monkeypatch, fake_kb, fake_llm):
+    import eval.prewarm_llm as P
+
+    _make_session(tmp_path, "s-c4", **C4, llm_api_key="from-session")
+    keyf = tmp_path / "key.txt"
+    keyf.write_text("from-file\n")
+    seen = []
+    real = P._get_reranker
+
+    def spy(model, top_n, prompt, api_key, **kw):
+        seen.append(api_key)
+        return real(model, top_n, prompt, api_key, **kw)
+
+    monkeypatch.setattr(P, "_get_reranker", spy)
+    monkeypatch.setattr(P, "HelixAPI", lambda base: ClientHelix(client))
+    assert P.main(["--prefix", "s-", "--api-key-file", str(keyf)]) == 0
+    assert seen == ["from-file"]
+    seen.clear()
+    assert P.main(["--prefix", "s-"]) == 0
+    assert seen == ["from-session"]

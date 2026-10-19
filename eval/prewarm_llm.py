@@ -8,16 +8,17 @@ asks the session's LLM for its pick with the cache enabled, so the live
 /candidates endpoint later finds every answer on disk.
 
 Needs HELIX running (for retrieval) and the LLM reachable. Prompts for nothing;
-each session's own llm_* settings are used (API key from the session config,
-else the provider's env var, as the reranker does).
+each session's own llm_* settings are used (API key from --api-key-file, else
+the session config, else the provider's env var, as the reranker does).
 
 Run it ON THE HELIX HOST with the same HELIX_LLM_CACHE_DIR as the server
 (default ~/.cache/helix_llm_rerank): the cache is a local directory, and the
 server only ever reads the one it was started with.
 
 Retrieval failures are not cached. The /candidates endpoint turns a KB error
-into an empty list, so a row whose enabled dense or lexical list comes back
-empty is counted ``failed`` and left uncached — caching a fused list built from
+into an empty list (reporting it in ``retrieval_errors``), so a row with a
+retrieval error, or whose enabled dense or lexical list comes back empty, is
+counted ``failed`` and left uncached — caching a fused list built from
 half the retrieval would give a key the live endpoint never produces. Exit
 status is 1 when any row failed; rerun to retry (cached rows are skipped).
 
@@ -67,6 +68,10 @@ class RetrievalGap(Exception):
 
 
 def _check_retrieval(resp: dict, kb) -> None:
+    errs = {k: v for k, v in (resp.get("retrieval_errors") or {}).items() if v}
+    if errs:
+        raise RetrievalGap("retrieval failed: "
+                           + "; ".join(f"{k}: {v}" for k, v in sorted(errs.items())))
     dense = resp.get("dense_candidates") or []
     lexical = resp.get("lexical_candidates") or []
     if not dense and not lexical:
@@ -77,13 +82,14 @@ def _check_retrieval(resp: dict, kb) -> None:
         raise RetrievalGap("lexical list empty while dense returned results")
 
 
-def prewarm_session(session: str, api: HelixAPI) -> Counter:
+def prewarm_session(session: str, api: HelixAPI, api_key: str | None = None) -> Counter:
+    """``api_key`` (from --api-key-file) overrides the session's llm_api_key."""
     cfg = _session_config(session, api)
     stats: Counter = Counter({"cached": 0, "computed": 0, "failed": 0})
     if not cfg.enable_llm_rerank:
         return stats
     reranker = _get_reranker(
-        cfg.llm_model, cfg.llm_top_n, cfg.llm_prompt, cfg.llm_api_key,
+        cfg.llm_model, cfg.llm_top_n, cfg.llm_prompt, api_key or cfg.llm_api_key,
         provider=cfg.llm_provider, base_url=cfg.llm_base_url, cache_only=False,
     )
     total = api.row(session, 0)["total"]
@@ -108,8 +114,11 @@ def main(argv: list[str] | None = None) -> int:
         epilog="Run on the HELIX host with the same HELIX_LLM_CACHE_DIR as the server.")
     ap.add_argument("--prefix", required=True, help="session folder prefix, e.g. study3")
     ap.add_argument("--helix", default="http://127.0.0.1:8000")
+    ap.add_argument("--api-key-file", default=None,
+                    help="LLM API key file; overrides each session's llm_api_key")
     a = ap.parse_args(argv)
 
+    key = Path(a.api_key_file).expanduser().read_text().strip() if a.api_key_file else None
     api = HelixAPI(a.helix)
     root = session_mod.SESSIONS_DIR
     sessions = sorted(p.name for p in root.glob(a.prefix + "*")
@@ -119,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
         cfg = json.loads((root / name / "session.json").read_text())
         if not cfg.get("enable_llm_rerank"):
             continue
-        stats = prewarm_session(name, api)
+        stats = prewarm_session(name, api, api_key=key)
         failed += stats["failed"]
         print(f"{name:24s} {dict(stats)}")
     if failed:

@@ -258,15 +258,17 @@ def test_minutes_saved_uses_median_human_time():
     assert s["est_minutes_saved"] == pytest.approx(4 * 25 / 60)
 
 
-def test_auto_rows_a_human_resaved_do_not_count_as_auto():
+def test_auto_accuracy_comes_from_the_preserved_ai_answer():
     df = _review_df()
-    # m1 was auto-accepted (right); a human later re-saved it via Jump-to (wrong).
+    # m1 was auto-accepted (right). Even if its KB cell were ever edited (the
+    # API now refuses human saves on auto rows), the AI's own answer in _llm_id
+    # is what auto-accept quality measures.
     df.loc[df["mention_uid"] == "m1", ["umls", "_method", "_elapsed_ms"]] = ["G0", "user_override", "5000"]
 
     s = summarise_review(df, "umls")
 
     assert s["n_auto"] == 4                           # routing is unchanged
-    assert s["auto_acc1"] == pytest.approx(200 / 3)   # m2 wrong, m3, m4 right; m1 excluded
+    assert s["auto_acc1"] == pytest.approx(75.0)      # m1, m3, m4 right; m2 wrong
 
 
 def test_review_summary_tolerates_missing_optional_columns():
@@ -278,3 +280,22 @@ def test_review_summary_tolerates_missing_optional_columns():
     assert s["spotcheck_agreement"] == pytest.approx(0.0)
     assert s["human_minutes"] == pytest.approx(0.0)
     assert s["est_minutes_saved"] is None
+
+
+def test_load_fills_columns_missing_from_some_sessions(tmp_path, monkeypatch):
+    import eval.analyze_study as A
+    for name, extra in (("p-1", {"_hint": "name_match"}), ("p-2", {})):
+        sdir = tmp_path / "sessions" / name
+        sdir.mkdir(parents=True)
+        (sdir / "session.json").write_text('{"kbs": [{"name": "umls"}]}')
+        pd.DataFrame([{"mention_uid": name, "umls": "C1", **extra}]).to_csv(
+            sdir / "annotated.csv", index=False)
+    gold = tmp_path / "gold.csv"
+    pd.DataFrame({"mention_uid": ["p-1", "p-2"], "gold_cui": ["C1", "C1"]}).to_csv(gold, index=False)
+    monkeypatch.setattr(A, "ROOT", tmp_path)
+    monkeypatch.setattr(A, "GOLD_FILE", gold)
+
+    df, kb = A.load("p")
+
+    assert kb == "umls"
+    assert list(df["_hint"]) == ["name_match", ""]

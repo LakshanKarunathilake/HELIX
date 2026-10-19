@@ -166,6 +166,8 @@ export interface RowData {
   feedback?: RowFeedback | null
   /** Review-mode sessions: what the queue may show for this row; null = not a queue row. */
   review?: ReviewInfo | null
+  /** Review-mode sessions: the AI accepted this row on its own — read-only, never saved. */
+  ai_accepted?: boolean
 }
 
 /** A `review` row shows the AI's pick; a `spotcheck` row deliberately shows nothing. */

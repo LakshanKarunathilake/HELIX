@@ -129,6 +129,12 @@ export function Annotate() {
     enabled: !!sessionName && total > 0 && !queueEmpty,
   })
 
+  // Mode C auto row (reached via Jump to): the AI's answer stands and the
+  // server refuses saves, so it is shown read-only and Next/Prev never save it.
+  const aiLocked = reviewSession && rowData?.idx === rowIdx && !!rowData.ai_accepted
+  const aiLockedRef = useRef(false)
+  aiLockedRef.current = aiLocked
+
   type KBCandidates = { dense: Candidate[]; lexical: Candidate[]; llm: LLMRerank | null }
 
   // ── per-row state (resets on row change) ───────────────────────────────
@@ -380,6 +386,7 @@ export function Annotate() {
   // Toggle a candidate in/out of the (possibly multi-valued) selection for a KB.
   // NIL replaces everything; picking a real id clears a prior NIL.
   const select = useCallback((kb: string, id: string) => {
+    if (aiLockedRef.current) return
     setSelections(prev => {
       if (id === 'NIL') return { ...prev, [kb]: 'NIL' }
       const cur = parseIds(prev[kb])
@@ -430,6 +437,7 @@ export function Annotate() {
   }
 
   const clearSel = (kb: string) => {
+    if (aiLocked) return
     setSelections(prev => { const n = { ...prev }; delete n[kb]; return n })
     setUserInteracted(true)
     setTimerActive(false)
@@ -445,6 +453,12 @@ export function Annotate() {
   }
 
   const goNext = async () => {
+    if (aiLocked) {           // read-only: move along the queue, never save
+      const t = nextTarget(rowIdx)
+      if (t === 'finish') setWarning('No more rows to check after this one.')
+      else setRowIdx(t)
+      return
+    }
     if (!allFilled) {
       const pending = kbNames.filter(kb => !selections[kb])
       setWarning(`Select an option for: ${pending.join(', ')}`)
@@ -462,7 +476,7 @@ export function Annotate() {
     // back must not record it as the human's confirmation.
     const untouched = reviewSession && !userInteracted
       && !Object.values(savedAnnotations).some(v => v)
-    if (!allFilled || untouched) { setRowIdx(target); return }
+    if (!allFilled || untouched || aiLocked) { setRowIdx(target); return }
     setTimerActive(false)
     await saveRow()
     afterSave(rowIdx, target)
@@ -815,9 +829,20 @@ export function Annotate() {
             />
             )}
 
+            {aiLocked && (
+              <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-lg px-3 py-2 text-sm"
+                   data-testid="ai-accepted-note">
+                <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
+                Accepted by the AI — not part of your review queue.
+              </div>
+            )}
+
             {/* KB panel */}
             {cfg && cfg.kbs.map((kb, i) => (
-              <div key={kb.name} className={cfg.kbs.length > 1 && i !== activeTab ? 'hidden' : 'space-y-3'}>
+              <div key={kb.name}
+                   className={cfg.kbs.length > 1 && i !== activeTab ? 'hidden'
+                     : aiLocked ? 'space-y-3 pointer-events-none opacity-60' : 'space-y-3'}
+                   aria-disabled={aiLocked || undefined}>
                 {/* selection status + actions */}
                 <div className="flex items-center gap-3">
                   {parseIds(selections[kb.name]).length > 0 ? (
@@ -1041,7 +1066,7 @@ export function Annotate() {
             <button className="btn-secondary" onClick={goPrev} disabled={prevTarget(rowIdx) === null}>
               <ChevronLeft className="w-4 h-4" /> {reviewSession ? 'Prev in queue' : 'Prev'}
             </button>
-            <button className="btn-secondary" onClick={goNext} disabled={!allFilled}>
+            <button className="btn-secondary" onClick={goNext} disabled={!allFilled || aiLocked}>
               <Save className="w-4 h-4" /> Save
             </button>
             <button className="btn-primary" onClick={goNext}>

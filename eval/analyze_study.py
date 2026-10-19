@@ -216,9 +216,11 @@ def summarise_review(df: pd.DataFrame, kb_col: str) -> dict:
     answered = col(kb_col) != ""
     human_saved = answered & (method != "llm_auto")
 
-    # An auto row a human later re-saved (e.g. via Jump to) carries the human's
-    # answer, not the AI's, so it no longer measures auto-accept quality.
-    auto = df[(route == "auto") & answered & (method == "llm_auto")]
+    # Auto-accept quality is scored on the AI's own answer (_llm_id, written by
+    # pre-annotation and never overwritten), so it holds even if the row's KB
+    # cell was ever edited. The API refuses human saves on auto rows.
+    llm_id = col("_llm_id")
+    auto = df[(route == "auto") & (llm_id != "")]
     review = df[(route == "review") & human_saved]
     spot = df[(route == "spotcheck") & human_saved]
     queue = df[route.isin(["review", "spotcheck"]) & human_saved]
@@ -233,7 +235,7 @@ def summarise_review(df: pd.DataFrame, kb_col: str) -> dict:
         "n_auto": n_auto,
         "n_review": int((route == "review").sum()),
         "n_spotcheck": int((route == "spotcheck").sum()),
-        "auto_acc1": pct([_hit(p, g) for p, g in zip(auto[kb_col], auto["gold_cui"])]),
+        "auto_acc1": pct([_hit(p, g) for p, g in zip(llm_id[auto.index], auto["gold_cui"])]),
         "spotcheck_agreement": pct([_hit(p, a) for p, a in zip(spot[kb_col], col("_llm_id")[spot.index])]),
         "review_acc1": pct([_hit(p, g) for p, g in zip(review[kb_col], review["gold_cui"])]),
         "human_median_secs": median,
@@ -266,7 +268,8 @@ def load(prefix: str) -> tuple[pd.DataFrame, str]:
         frames.append(pd.read_csv(out, dtype=str, keep_default_na=False))
     if not frames:
         raise SystemExit(f"no annotated sessions matching '{prefix}-*' yet")
-    df = pd.concat(frames, ignore_index=True)
+    # Sessions differ in optional columns; absent cells read as "" not NaN.
+    df = pd.concat(frames, ignore_index=True).fillna("")
     missing = set(df[UID_COL]) - set(gold[UID_COL])
     if missing:
         raise SystemExit(f"{len(missing)} mentions have no gold entry — stale gold file?")

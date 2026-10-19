@@ -107,3 +107,10 @@ def test_bad_reflection_rejected(ann, decisions, monkeypatch):
                         lambda self, u, s, t="x": {"ranking": ["guess"], "comment": ""})
     with pytest.raises(LLMRerankError):
         ann.reflect(decisions)
+
+
+def test_reflection_schema_pins_ranking_length(ann, decisions):
+    ann.reflect(decisions)
+    rk = seen["schema"]["properties"]["ranking"]
+    assert len(AI_HINT_CODES) == 8
+    assert rk["minItems"] == rk["maxItems"] == len(AI_HINT_CODES)

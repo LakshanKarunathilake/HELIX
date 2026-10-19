@@ -208,3 +208,114 @@ def test_http_error_is_recorded_and_run_continues(sessions):
     assert out.at[0, "UMLS"] == "" and out.at[1, "_method"] == "llm"
     R.run_session(SRC, FakeAnn(), FakeAPI())
     assert _saved(sessions, "ai-m-" + SRC).at[0, "_llm_error"] == ""
+
+
+# --- final-review fixes ------------------------------------------------------
+
+class KBDown(FakeAPI):
+    """/candidates swallowed a KB error: empty lists + retrieval_errors set."""
+    def candidates(self, session, label, kb, context):
+        if label == "lung":
+            return {"dense_candidates": [], "lexical_candidates": [],
+                    "retrieval_errors": {"dense": "kb unreachable", "lexical": None}}
+        return super().candidates(session, label, kb, context)
+
+
+def test_kb_error_is_a_row_error_not_nil_and_is_retried(sessions):
+    _make_source(sessions)
+    name = "ai-m-" + SRC
+    ann = FakeAnn()
+    stats = R.run_session(SRC, ann, KBDown())
+    out = _saved(sessions, name)
+    assert stats["error"] == 1 and stats["llm_no_candidates"] == 0
+    assert "kb unreachable" in out.at[0, "_llm_error"]
+    assert out.at[0, "UMLS"] == "" and out.at[0, "_method"] == ""
+    assert not reflection_path(name).exists()
+    R.run_session(SRC, ann, FakeAPI())
+    out = _saved(sessions, name)
+    assert out.at[0, "UMLS"] == "C1" and out.at[0, "_llm_error"] == ""
+
+
+def test_no_errors_and_no_candidates_is_still_nil(sessions):
+    _make_source(sessions)
+
+    class Empty(FakeAPI):
+        def candidates(self, session, label, kb, context):
+            return {"dense_candidates": [], "lexical_candidates": [],
+                    "retrieval_errors": {"dense": None, "lexical": None}}
+
+    R.run_session(SRC, FakeAnn(), Empty())
+    out = _saved(sessions, "ai-m-" + SRC)
+    assert out.at[0, "UMLS"] == "NIL" and out.at[0, "_method"] == "llm_no_candidates"
+
+
+@pytest.mark.parametrize("graph_resp,enable_graph", [
+    ({"nodes": [], "edges": [], "enabled": True, "error": "neo4j down"}, True),
+    ({"nodes": [], "edges": [], "enabled": False}, True),
+])
+def test_graph_failure_on_c3_is_a_row_error(sessions, graph_resp, enable_graph):
+    name = _make_source(sessions, "src-c3", "C3")
+    cfgp = sessions / name / "session.json"
+    cfg = json.loads(cfgp.read_text())
+    cfg["enable_graph"] = enable_graph
+    cfgp.write_text(json.dumps(cfg))
+
+    class GraphDown(FakeAPI):
+        def graph(self, session, ids):
+            return dict(graph_resp)
+
+    ann = FakeAnn()
+    stats = R.run_session(name, ann, GraphDown())
+    out = _saved(sessions, "ai-m-" + name)
+    assert stats["error"] == 2 and ann.calls == 0
+    assert out.at[0, "UMLS"] == "" and "graph" in out.at[0, "_llm_error"]
+
+
+class ReflectBoom(FakeAnn):
+    def reflect(self, decisions):
+        raise LLMRerankError("bad ranking")
+
+
+def test_reflection_failure_warns_and_run_continues(sessions, capsys):
+    _make_source(sessions)
+    name = "ai-m-" + SRC
+    stats = R.run_session(SRC, ReflectBoom(), FakeAPI())
+    assert stats["llm"] == 2
+    assert not reflection_path(name).exists()
+    assert name in capsys.readouterr().out
+    R.run_session(SRC, FakeAnn(), FakeAPI())          # a later run retries
+    assert reflection_path(name).exists()
+
+
+def test_cli_continues_to_next_session_after_reflection_failure(sessions, monkeypatch):
+    _make_source(sessions, "study2-1-c2")
+    _make_source(sessions, "study2-2-c2")
+    monkeypatch.setattr(R, "LLMAnnotator", lambda **kw: ReflectBoom())
+    monkeypatch.setattr(R, "HelixAPI", lambda base: FakeAPI())
+    assert R.main(["--prefix", "study2", "--model", "m"]) == 0
+    for src in ("study2-1-c2", "study2-2-c2"):
+        out = _saved(sessions, "ai-m-" + src)
+        assert list(out["UMLS"]) == ["C1", "C1"]
+        assert not reflection_path("ai-m-" + src).exists()
+
+
+def test_no_model_decisions_means_no_reflection(sessions):
+    _make_source(sessions)
+    name = "ai-m-" + SRC
+
+    class Never(FakeAnn):
+        def reflect(self, decisions):
+            raise AssertionError("must not reflect without decisions")
+
+    R.run_session(SRC, Never(), FakeAPI(dense=(), lexical=()))
+    assert not reflection_path(name).exists()
+
+
+def test_ai_twin_never_shows_gold(sessions):
+    _make_source(sessions)
+    cfgp = sessions / SRC / "session.json"
+    cfg = json.loads(cfgp.read_text())
+    cfg["debug_show_gold"] = True
+    cfgp.write_text(json.dumps(cfg))
+    n = R.make_ai_session(SRC, "m")
+    assert json.loads((sessions / n / "session.json").read_text())["debug_show_gold"] is False

@@ -83,6 +83,17 @@ UID_COL = "mention_uid"
 GOLD_FILE = ROOT / "eval" / "out" / "study_gold.csv"
 
 
+def write_gold(new: pd.DataFrame) -> None:
+    """Merge this run's gold into GOLD_FILE (new rows win on mention_uid), so
+    gold for sessions built by earlier runs (other prefixes, dev) is kept."""
+    GOLD_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if GOLD_FILE.exists():
+        old = pd.read_csv(GOLD_FILE, dtype=str, keep_default_na=False)
+        old = old[~old[UID_COL].isin(set(new[UID_COL]))]
+        new = pd.concat([old, new], ignore_index=True).fillna("")
+    new.to_csv(GOLD_FILE, index=False)
+
+
 def split_gold(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Separate the annotator's view from the answers.
 
@@ -315,8 +326,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.dry_run:
         print("\n(dry run — nothing written)")
     else:
-        GOLD_FILE.parent.mkdir(parents=True, exist_ok=True)
-        gold_all[gold_all[UID_COL].isin(used_uids)].to_csv(GOLD_FILE, index=False)
+        write_gold(gold_all[gold_all[UID_COL].isin(used_uids)])
         total = sum(len(session_all[session_all["document_id"].isin(b)]) for b in blocks)
         print(f"\n{args.blocks} sessions written · {total} mentions total")
         print(f"gold (kept OUT of sessions): {GOLD_FILE}")

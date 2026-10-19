@@ -64,11 +64,15 @@ def review_payload(out_df: pd.DataFrame, idx: int) -> dict | None:
 
 def preannotate(session: str, annotator, api, seed: int = DEFAULT_SEED) -> Counter:
     # Imported lazily: eval/ is only on sys.path when run from the CLI or tests.
-    from run_ai_annotator import _filled, _merged_candidates, decision_columns
+    from run_ai_annotator import (RetrievalError, _merged_candidates, check_retrieval,
+                                  decision_columns)
 
     cfg = SessionConfig(**json.loads(session_mod.session_config_path(session).read_text()))
+    if not cfg.review_mode:
+        raise ValueError(f"session '{session}' does not have review_mode on — "
+                         "pre-annotation only runs on review-mode sessions")
     kb = cfg.kbs[0].name
-    cond = cfg.study_condition or ""
+    cond = cfg.study_condition or "REVIEW"      # as the API stamps human saves
     out_path = session_mod.output_csv_path(session)
     inp, _ = load_input(Path(cfg.input_path), cfg.delimiter)
     df = init_output(out_path, inp, [k.name for k in cfg.kbs], cfg.annotator,
@@ -90,12 +94,13 @@ def preannotate(session: str, annotator, api, seed: int = DEFAULT_SEED) -> Count
             row = api.row(session, i)
             context = row.get("context_text") or None
             resp = api.candidates(session, row["label"], kb, context)
+            check_retrieval(resp)
             cands, dense_ids = _merged_candidates(resp)
             d = None
             if cands:
                 d = annotator.annotate(row["label"], context, cands,
                                        suggested_id=dense_ids[0] if dense_ids else None)
-        except (LLMRerankError, requests.RequestException) as e:
+        except (LLMRerankError, RetrievalError, requests.RequestException) as e:
             df.at[i, "_llm_error"] = str(e)
             save_output(out_path, df)
             stats["error"] += 1

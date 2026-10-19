@@ -405,6 +405,8 @@ def get_row(name: str, idx: int):
         "debug_gold_info": debug_gold_info,
         "feedback": feedback,
         "review": review_payload(out_df, idx) if cfg.review_mode else None,
+        # Mode C auto rows: shown read-only, never saved by the human.
+        "ai_accepted": _ai_accepted(cfg, out_df, idx),
     }
 
 
@@ -431,7 +433,7 @@ def save_rows_batch(name: str, req: BatchAnnotateRequest):
     with _WRITE_LOCK, metrics.timer("write.batch", name, rows=len(req.updates)):
         out_df = init_output(out_path, df, [k.name for k in cfg.kbs], cfg.annotator)
         for u in req.updates:
-            if u.idx < 0 or u.idx >= n:
+            if u.idx < 0 or u.idx >= n or _ai_accepted(cfg, out_df, u.idx):
                 continue
             out_df.at[u.idx, ANNOTATOR_COL] = cfg.annotator
             if u.llm_used is not None:
@@ -468,6 +470,17 @@ def _records_provenance(cfg) -> bool:
     """Study sessions and review-mode (mode C) sessions log per-row provenance;
     review sessions need human time and method to measure the queue."""
     return bool(cfg.study_condition or cfg.review_mode)
+
+
+def _ai_accepted(cfg, out_df: pd.DataFrame, idx: int) -> bool:
+    """Mode C: the AI accepted this row on its own; it is not the human's to edit."""
+    if not cfg.review_mode or ROUTE_COL not in out_df.columns or "_method" not in out_df.columns:
+        return False
+    return (str(out_df.at[idx, ROUTE_COL] or "") == "auto"
+            and str(out_df.at[idx, "_method"] or "") == "llm_auto")
+
+
+AI_ACCEPTED_MSG = "This row was accepted by the AI and is not in the review queue"
 
 
 _AI_WRITTEN_COLS = ("_llm_id", "_llm_confidence", "_llm_level", "_llm_label",
@@ -509,6 +522,8 @@ def save_row(name: str, idx: int, req: AnnotateRequest):
         out_df = init_output(out_path, df, [k.name for k in cfg.kbs], cfg.annotator,
                              provenance=_records_provenance(cfg),
                              feedback=cfg.collect_feedback, llm=_records_llm(cfg))
+        if _ai_accepted(cfg, out_df, idx):
+            raise HTTPException(409, AI_ACCEPTED_MSG)
         if cfg.review_mode and provenance:
             # Mode C: the pre-annotation pass wrote these; the human's first save
             # must not replace them with the client's (usually empty) values.
@@ -799,6 +814,9 @@ def get_candidates(name: str, req: CandidateRequest):
     if not kb_cfg:
         raise HTTPException(404, f"KB '{req.kb_name}' not found")
     dense_cands, lexical_cands = [], []
+    # Swallowed retrieval failures, so callers (AI runners) can tell "KB down"
+    # from "nothing retrieved". None = disabled or succeeded.
+    retrieval_errors: dict[str, str | None] = {"dense": None, "lexical": None}
 
     if req.enable_dense:
         try:
@@ -807,6 +825,7 @@ def get_candidates(name: str, req: CandidateRequest):
                 dense_cands = KBClient(dense_cfg).query(req.label)
         except Exception as e:
             logger.warning("Dense search failed for KB '%s': %s", req.kb_name, e)
+            retrieval_errors["dense"] = str(e) or type(e).__name__
 
     if req.enable_lexical:
         try:
@@ -815,6 +834,7 @@ def get_candidates(name: str, req: CandidateRequest):
                 lexical_cands = KBClient(lex_cfg).query(req.label)
         except Exception as e:
             msg = str(e)
+            retrieval_errors["lexical"] = msg or type(e).__name__
             if "503" in msg or "lexical index not initialised" in msg.lower():
                 logger.warning(
                     "Lexical search is disabled on the KB server for KB '%s' — "
@@ -848,6 +868,7 @@ def get_candidates(name: str, req: CandidateRequest):
         "dense_candidates":   _serialize_candidates(dense_cands),
         "lexical_candidates": _serialize_candidates(lexical_cands),
         "llm": llm,
+        "retrieval_errors": retrieval_errors,
     }
 
 

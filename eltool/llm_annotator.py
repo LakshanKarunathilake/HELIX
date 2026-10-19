@@ -117,7 +117,10 @@ class LLMAnnotator(LLMReranker):
         schema = {
             "type": "object",
             "properties": {
+                # min/maxItems: guided decoders (vLLM) often ignore uniqueItems,
+                # so at least pin the length; the permutation check below stays.
                 "ranking": {"type": "array", "uniqueItems": True,
+                            "minItems": len(AI_HINT_CODES), "maxItems": len(AI_HINT_CODES),
                             "items": {"type": "string", "enum": AI_HINT_CODES},
                             "description": "All hint codes, most useful first."},
                 "comment": {"type": "string"},

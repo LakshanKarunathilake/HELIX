@@ -61,6 +61,7 @@ def make_ai_session(source: str, model: str) -> str:
         "collect_feedback": True,
         "enable_llm_rerank": False,
         "study_condition": src_cfg.get("study_condition") or "DEV",
+        "debug_show_gold": False,      # the AI never sees gold
     })
     src_cfg.pop("llm_api_key", None)
     cfg_path.write_text(json.dumps(src_cfg, indent=2))
@@ -86,6 +87,26 @@ def decision_columns(d: AnnotationDecision | None, dense_ids: list[str],
         "_llm_confidence": f"{d.confidence:.3f}" if d else "",
         "_rationale": d.rationale if d else "",
     }
+
+
+class RetrievalError(Exception):
+    """Retrieval (KB or graph) failed for a row: retry it, never record an answer."""
+
+
+def check_retrieval(resp: dict) -> None:
+    """Raise when an enabled retrieval raised behind /candidates' empty lists."""
+    errs = {k: v for k, v in (resp.get("retrieval_errors") or {}).items() if v}
+    if errs:
+        raise RetrievalError("retrieval failed: "
+                             + "; ".join(f"{k}: {v}" for k, v in sorted(errs.items())))
+
+
+def check_graph(resp: dict, enable_graph: bool) -> None:
+    """Raise when the graph view a C3 annotator would see is unavailable."""
+    if resp.get("error"):
+        raise RetrievalError(f"graph failed: {resp['error']}")
+    if enable_graph and not resp.get("enabled", False):
+        raise RetrievalError("graph failed: graph disabled on the server")
 
 
 def _merged_candidates(resp: dict) -> tuple[list[dict], list[str]]:
@@ -130,6 +151,7 @@ def run_session(source: str, annotator: LLMAnnotator, api: HelixAPI,
             row = api.row(source, i)
             context = row.get("context_text") or None
             resp = api.candidates(source, row["label"], kb, context)
+            check_retrieval(resp)
             cands, dense_ids = _merged_candidates(resp)
             d = None
             if cands:
@@ -137,10 +159,12 @@ def run_session(source: str, annotator: LLMAnnotator, api: HelixAPI,
                 evidence = ""
                 if cond == "C3":
                     ids = [c["id"] for c in cands]
-                    evidence = render_graph_evidence(api.graph(source, ids), ids)
+                    graph = api.graph(source, ids)
+                    check_graph(graph, cfg.enable_graph)
+                    evidence = render_graph_evidence(graph, ids)
                 d = annotator.annotate(row["label"], context, cands,
                                        suggested_id=suggested, graph_evidence=evidence)
-        except (LLMRerankError, requests.RequestException) as e:
+        except (LLMRerankError, RetrievalError, requests.RequestException) as e:
             df.at[i, "_llm_error"] = str(e)
             save_output(out_path, df)
             stats["error"] += 1
@@ -170,7 +194,13 @@ def _maybe_reflect(name: str, cfg: SessionConfig, df, kb: str, annotator) -> boo
                            "", annotator.model, annotator.provider, 0, False)
         for i in range(len(df)) if df.at[i, "_method"] == "llm"
     ]
-    ref = annotator.reflect(decisions)
+    if not decisions:          # every row was llm_no_candidates: nothing to reflect on
+        return False
+    try:
+        ref = annotator.reflect(decisions)
+    except LLMRerankError as e:
+        print(f"warning: reflection failed for {name} ({e}) — a later run retries it")
+        return False
     record = {
         "session_name": name,
         "annotator": cfg.annotator,

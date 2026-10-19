@@ -33,7 +33,11 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
     key = Path(a.api_key_file).expanduser().read_text().strip() if a.api_key_file else None
     annotator = LLMAnnotator(model=a.model, provider=a.provider, base_url=a.base_url, api_key=key)
-    stats = preannotate(a.session, annotator, HelixAPI(a.helix), seed=a.seed)
+    try:
+        stats = preannotate(a.session, annotator, HelixAPI(a.helix), seed=a.seed)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     print(f"{a.session}  {dict(stats)}")
     if stats.get("error"):
         print(f"{stats['error']} rows failed — rerun to retry them")

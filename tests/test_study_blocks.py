@@ -151,3 +151,25 @@ def test_c4_without_model_and_endpoint_is_rejected(extra, capsys):
         main(["--dry-run", "--conditions", "C1,C2,C3,C4", *extra])
     assert e.value.code == 2
     assert "C4 needs --llm-model and --llm-base-url" in capsys.readouterr().err
+
+
+def test_gold_file_is_merged_not_overwritten(tmp_path, monkeypatch):
+    import eval.build_study_sessions as B
+    gold = tmp_path / "out" / "study_gold.csv"
+    gold.parent.mkdir()
+    pd.DataFrame({"mention_uid": ["a", "b"], "gold_cui": ["C1", "C2"]}).to_csv(gold, index=False)
+    monkeypatch.setattr(B, "GOLD_FILE", gold)
+
+    B.write_gold(pd.DataFrame({"mention_uid": ["b", "c"], "gold_cui": ["C9", "C3"]}))
+
+    got = pd.read_csv(gold, dtype=str, keep_default_na=False)
+    assert dict(zip(got["mention_uid"], got["gold_cui"])) == {"a": "C1", "b": "C9", "c": "C3"}
+    assert len(got) == 3
+
+
+def test_gold_file_written_fresh_when_absent(tmp_path, monkeypatch):
+    import eval.build_study_sessions as B
+    gold = tmp_path / "new" / "study_gold.csv"
+    monkeypatch.setattr(B, "GOLD_FILE", gold)
+    B.write_gold(pd.DataFrame({"mention_uid": ["a"], "gold_cui": ["C1"]}))
+    assert pd.read_csv(gold, dtype=str)["mention_uid"].tolist() == ["a"]

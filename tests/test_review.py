@@ -234,3 +234,95 @@ def test_human_save_in_review_session_without_study_condition_records_provenance
     assert out.at[1, "_route"] == "review" and out.at[1, "_llm_id"] == "C2"
     assert out.at[1, "_llm_level"] == "unsure" and out.at[1, "_top1_id"] == "C1"
     assert out.at[0, "_method"] == "llm_auto"
+
+
+# --- final-review fixes ------------------------------------------------------
+
+def test_human_save_on_an_auto_row_is_refused_and_row_unchanged(client, sessions):
+    name = _make(sessions)
+    preannotate(name, FakeAnn(), FakeAPI())          # every row auto (rate 0)
+    before = _out(sessions)
+    r = client.post(f"/api/sessions/{name}/rows/0",
+                    json={"annotations": {"UMLS": "C2"}, "top1_id": "C1",
+                          "user_interacted": True, "elapsed_ms": 900})
+    assert r.status_code == 409
+    assert "not in the review queue" in r.json()["detail"]
+    after = _out(sessions)
+    assert after.loc[0].to_dict() == before.loc[0].to_dict()
+    assert after.at[0, "UMLS"] == "C1" and after.at[0, "annotator"] == "llm:m"
+    assert after.at[0, "_method"] == "llm_auto" and after.at[0, "_revisions"] == "0"
+
+
+def test_batch_save_skips_auto_rows_in_review_sessions(client, sessions):
+    name = _make(sessions, rate=0.0)
+    preannotate(name, FakeAnn({1: ("C2", "unsure")}), FakeAPI())
+    r = client.post(f"/api/sessions/{name}/rows/batch",
+                    json={"updates": [{"idx": 0, "annotations": {"UMLS": "C9"}},
+                                      {"idx": 1, "annotations": {"UMLS": "C9"}}]})
+    assert r.status_code == 200
+    out = _out(sessions)
+    assert out.at[0, "UMLS"] == "C1" and out.at[0, "annotator"] == "llm:m"
+    assert out.at[1, "UMLS"] == "C9"
+
+
+def test_row_payload_flags_ai_accepted_rows(client, sessions):
+    name = _make(sessions, rate=0.0)
+    preannotate(name, FakeAnn({1: ("C2", "unsure")}), FakeAPI())
+    assert client.get(f"/api/sessions/{name}/rows/0").json()["ai_accepted"] is True
+    assert client.get(f"/api/sessions/{name}/rows/1").json()["ai_accepted"] is False
+    plain = _make(sessions, name="plain", review=False)
+    assert client.get(f"/api/sessions/{plain}/rows/0").json()["ai_accepted"] is False
+
+
+def test_auto_acc1_end_to_end_survives_a_refused_resave(client, sessions):
+    from eval.analyze_study import summarise_review
+    name = _make(sessions)
+    preannotate(name, FakeAnn(), FakeAPI())
+    assert client.post(f"/api/sessions/{name}/rows/0",
+                       json={"annotations": {"UMLS": "C2"}}).status_code == 409
+    out = _out(sessions)
+    out["gold_cui"] = "C1"
+    s = summarise_review(out, "UMLS")
+    assert s["n_auto"] == N and s["auto_acc1"] == pytest.approx(100.0)
+
+
+def test_kb_error_in_preannotate_is_a_row_error_not_a_nil_review(sessions):
+    name = _make(sessions)
+
+    class Down(FakeAPI):
+        def candidates(self, session, label, kb, context):
+            if label == "m0":
+                return {"dense_candidates": [], "lexical_candidates": [],
+                        "retrieval_errors": {"dense": "kb down", "lexical": None}}
+            return super().candidates(session, label, kb, context)
+
+    ann = FakeAnn()
+    stats = preannotate(name, ann, Down())
+    out = _out(sessions)
+    assert stats["error"] == 1
+    assert "kb down" in out.at[0, "_llm_error"]
+    assert out.at[0, "_route"] == "" and out.at[0, "_llm_id"] == "" and out.at[0, "UMLS"] == ""
+    preannotate(name, ann, FakeAPI())                # retried on rerun
+    out = _out(sessions)
+    assert out.at[0, "_route"] == "auto" and out.at[0, "_llm_error"] == ""
+
+
+def test_auto_rows_condition_defaults_to_review(sessions):
+    name = _make(sessions, cond="")
+    preannotate(name, FakeAnn(), FakeAPI())
+    assert _out(sessions).at[0, "_condition"] == "REVIEW"
+
+
+def test_preannotate_refuses_a_session_without_review_mode(sessions):
+    name = _make(sessions, review=False)
+    with pytest.raises(ValueError, match="review_mode"):
+        preannotate(name, FakeAnn(), FakeAPI())
+    assert not (sessions / name / "annotated.csv").exists()
+
+
+def test_preannotate_cli_exits_nonzero_without_review_mode(sessions, monkeypatch, capsys):
+    import preannotate as P
+    name = _make(sessions, review=False)
+    monkeypatch.setattr(P, "HelixAPI", lambda base: FakeAPI())
+    assert P.main(["--session", name, "--model", "m"]) != 0
+    assert "review_mode" in capsys.readouterr().err
