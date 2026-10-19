@@ -91,6 +91,10 @@ class SessionConfig(BaseModel):
     # the ANTHROPIC_API_KEY server env var unless you need per-session keys.
     # Never returned to the browser (write-only; masked on GET).
     llm_api_key: str | None = None
+    # Condition C4: read LLM answers only from the on-disk cache filled in advance
+    # by eval/prewarm_llm.py, so annotators never wait on the model. A miss shows
+    # the "LLM re-rank unavailable" notice and the annotator carries on.
+    llm_cache_only: bool = False
     # Neo4j graph neighborhood. Connection + schema live in neo4j.yaml (see
     # neo4j.example.yaml); this flag just turns the feature on for the session.
     enable_graph: bool = False

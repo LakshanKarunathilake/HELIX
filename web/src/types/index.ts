@@ -39,6 +39,7 @@ export interface SessionConfig {
   llm_prompt?: string | null
   llm_api_key?: string | null
   llm_api_key_set?: boolean   // read-only flag from GET (key itself is masked)
+  llm_cache_only?: boolean    // C4: answers come only from the prewarmed cache
   enable_graph?: boolean
 }
 

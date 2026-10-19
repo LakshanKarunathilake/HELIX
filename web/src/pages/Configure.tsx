@@ -51,6 +51,7 @@ export function Configure() {
   const [llmPrompt, setLlmPrompt] = useState('')
   const [llmApiKey, setLlmApiKey] = useState('')
   const [llmApiKeySet, setLlmApiKeySet] = useState(false)
+  const [llmCacheOnly, setLlmCacheOnly] = useState(false)
   const [defaultPrompt, setDefaultPrompt] = useState('')
   // Neo4j graph
   const [enableGraph, setEnableGraph] = useState(false)
@@ -98,6 +99,7 @@ export function Configure() {
     if (existingCfg.llm_top_n != null) setLlmTopN(existingCfg.llm_top_n)
     if (existingCfg.llm_prompt) setLlmPrompt(existingCfg.llm_prompt)
     setLlmApiKeySet(!!existingCfg.llm_api_key_set)
+    if (existingCfg.llm_cache_only != null) setLlmCacheOnly(existingCfg.llm_cache_only)
     if (existingCfg.enable_graph != null) setEnableGraph(existingCfg.enable_graph)
   }, [existingCfg])
 
@@ -156,6 +158,7 @@ export function Configure() {
           llm_top_n: llmTopN,
           llm_prompt: llmPrompt.trim() || null,
           llm_api_key: llmApiKey || null,   // blank = keep existing (server-side)
+          llm_cache_only: llmCacheOnly,
           enable_graph: enableGraph,
           collect_feedback: collectFeedback,
           debug_show_gold: debugShowGold,
@@ -185,6 +188,7 @@ export function Configure() {
           llm_top_n: llmTopN,
           llm_prompt: llmPrompt.trim() || null,
           llm_api_key: llmApiKey || null,
+          llm_cache_only: llmCacheOnly,
           enable_graph: enableGraph,
           collect_feedback: collectFeedback,
           debug_show_gold: debugShowGold,
@@ -234,8 +238,16 @@ export function Configure() {
         />
       )}
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">
+        <h1 className="flex items-center gap-3 text-2xl font-bold text-gray-900">
           {isEdit ? `Edit — ${sessionName}` : 'New session'}
+          {existingCfg?.study_condition && (
+            <span
+              className="text-xs font-semibold text-gray-600 bg-gray-100 rounded-full px-2.5 py-0.5"
+              title="Study condition — set by the study builder, not editable here"
+            >
+              Study condition: {existingCfg.study_condition}
+            </span>
+          )}
         </h1>
         <p className="text-gray-500 mt-1 text-sm">
           Configure your annotation session, column mapping, and knowledge bases.
@@ -331,6 +343,22 @@ export function Configure() {
             the API server. Falls back to retrieval ranking on any error.
           </p>
           <div className={`space-y-4 ${enableLlmRerank ? '' : 'opacity-40 pointer-events-none'}`}>
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={llmCacheOnly}
+                onChange={e => setLlmCacheOnly(e.target.checked)}
+              />
+              <span className="text-sm text-gray-700">
+                Use precomputed answers only
+                <span className="block text-xs text-gray-400">
+                  Never call the model while annotating; answers come from the cache filled by
+                  <code className="bg-gray-100 rounded px-1 mx-1">eval/prewarm_llm.py</code>.
+                  Uncached rows fall back to retrieval ranking.
+                </span>
+              </span>
+            </label>
             <div className="grid grid-cols-3 gap-4">
               <div>
                 <label className="label">Provider</label>

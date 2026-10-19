@@ -9,6 +9,8 @@ interface Props {
   onSelect: (id: string) => void
   /** Feedback sessions log which panels were opened on the row. */
   onPanelOpen?: (panel: PanelName) => void
+  /** The LLM picked this candidate (C4 / LLM re-rank sessions). */
+  aiPick?: boolean
 }
 
 function scoreColor(score: number | null) {
@@ -96,7 +98,7 @@ function DefinitionTooltip({ definition, onView }: { definition: string; onView?
   )
 }
 
-export function CandidateCard({ candidate, rank, selected, onSelect, onPanelOpen }: Props) {
+export function CandidateCard({ candidate, rank, selected, onSelect, onPanelOpen, aiPick }: Props) {
   const [showAliases, setShowAliases] = useState(false)
 
   const others = (candidate.aliases ?? []).filter(a => a !== candidate.label)
@@ -138,9 +140,16 @@ export function CandidateCard({ candidate, rank, selected, onSelect, onPanelOpen
 
         {/* label + id + meta */}
         <div className="flex-1 min-w-0">
-          <p className={`font-semibold truncate ${selected ? 'text-brand-900' : 'text-gray-900'}`}>
-            {candidate.label || '(no label)'}
-          </p>
+          <div className="flex items-center gap-2 min-w-0">
+            <p className={`font-semibold truncate ${selected ? 'text-brand-900' : 'text-gray-900'}`}>
+              {candidate.label || '(no label)'}
+            </p>
+            {aiPick && (
+              <span className="flex-shrink-0 text-[11px] font-semibold text-violet-800 bg-violet-100 rounded-full px-2">
+                AI pick
+              </span>
+            )}
+          </div>
           <p className="text-xs font-mono text-gray-500 mt-0.5">{candidate.id}</p>
 
           {candidate.matched_alias && candidate.matched_alias !== candidate.label && (

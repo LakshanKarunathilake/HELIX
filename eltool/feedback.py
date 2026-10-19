@@ -22,6 +22,10 @@ HINTS: list[tuple[str, str]] = [
     ("guess", "Guess"),
 ]
 
+# C4 only (sessions that show the LLM's pick). Kept out of HINTS so the
+# nine-hint protocol of C1-C3 is unchanged; always appended last (UI key 0).
+AI_SUGGESTION: tuple[str, str] = ("ai_suggestion", "The AI suggestion and its explanation")
+
 CONFIDENCE: list[tuple[str, str]] = [
     ("sure", "Sure"),
     ("fairly_sure", "Fairly sure"),
@@ -35,9 +39,17 @@ HINT_CODES = {c for c, _ in HINTS}
 CONFIDENCE_CODES = {c for c, _ in CONFIDENCE}
 
 
-def options() -> dict:
+def _hints(include_ai: bool) -> list[tuple[str, str]]:
+    return HINTS + [AI_SUGGESTION] if include_ai else list(HINTS)
+
+
+def hint_codes(include_ai: bool) -> set[str]:
+    return {c for c, _ in _hints(include_ai)}
+
+
+def options(include_ai: bool = False) -> dict:
     return {
-        "hints": [{"code": c, "label": l} for c, l in HINTS],
+        "hints": [{"code": c, "label": l} for c, l in _hints(include_ai)],
         "confidence": [{"code": c, "label": l} for c, l in CONFIDENCE],
     }
 
@@ -49,6 +61,6 @@ def format_panels(panels: list[str] | None) -> str:
     return ";".join(seen) if seen else "none"
 
 
-def validate_reflection_ranking(ranking: list[str]) -> None:
-    if sorted(ranking) != sorted(HINT_CODES):
+def validate_reflection_ranking(ranking: list[str], include_ai: bool = False) -> None:
+    if sorted(ranking) != sorted(hint_codes(include_ai)):
         raise ValueError("ranking must list every hint code exactly once")

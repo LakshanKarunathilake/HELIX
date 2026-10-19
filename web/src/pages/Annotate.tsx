@@ -61,9 +61,11 @@ export function Annotate() {
 
   // ── per-decision feedback (Annotation Guide Sec. 8) ───────────────────
   const collectFeedback = !!cfg?.collect_feedback
+  // C4 (LLM shown) adds a 10th hint: "The AI suggestion and its explanation".
+  const aiHint = !!cfg?.enable_llm_rerank
   const { data: feedbackOptions } = useQuery({
-    queryKey: ['feedback-options'],
-    queryFn: api.getFeedbackOptions,
+    queryKey: ['feedback-options', aiHint],
+    queryFn: () => api.getFeedbackOptions(aiHint),
     enabled: collectFeedback,
     staleTime: Infinity,
   })
@@ -269,7 +271,13 @@ export function Annotate() {
     const dense = kb ? (cands[kb]?.dense ?? []) : []
     const chosen = parseIds(kb ? sels[kb] : '')[0] ?? ''
     const rank = dense.findIndex(c => c.id === chosen)
+    // What the LLM banner showed (C4). Omitted on a cache miss / error.
+    const llm = kb ? cands[kb]?.llm : null
+    const shown = llm && !llm.error && llm.entity_id
+      ? { llm_id: llm.entity_id, llm_confidence: llm.confidence }
+      : {}
     return {
+      ...shown,
       elapsed_ms: Math.round(performance.now() - rowStartRef.current),
       selected_rank: rank >= 0 ? rank + 1 : null,
       top1_id: dense[0]?.id ?? '',
@@ -794,9 +802,12 @@ export function Annotate() {
                 </div>
 
                 {/* LLM re-rank pick */}
-                {candidates[kb.name]?.llm && (
-                  <LLMPickBanner llm={candidates[kb.name]!.llm!} />
-                )}
+                {candidates[kb.name]?.llm && (() => {
+                  const r = candidates[kb.name]!
+                  const pick = [...(r.dense ?? []), ...(r.lexical ?? [])]
+                    .find(c => c.id === r.llm!.entity_id)
+                  return <LLMPickBanner llm={r.llm!} label={pick?.label} />
+                })()}
 
                 {/* candidates */}
                 {loadingKBs[kb.name] && (
@@ -824,6 +835,7 @@ export function Annotate() {
                   const denseCands = result?.dense ?? []
                   const lexicalCands = result?.lexical ?? []
                   const showBoth = denseCands.length > 0 && lexicalCands.length > 0
+                  const aiPickId = result?.llm && !result.llm.error ? result.llm.entity_id : null
                   const renderList = (list: Candidate[], listLabel: string, labelClass: string) => (
                     <div>
                       {showBoth && (
@@ -838,6 +850,7 @@ export function Annotate() {
                             selected={parseIds(selections[kb.name]).includes(c.id)}
                             onSelect={id => select(kb.name, id)}
                             onPanelOpen={markPanel}
+                            aiPick={!!aiPickId && c.id === aiPickId}
                           />
                         ))}
                       </div>
@@ -1051,7 +1064,7 @@ function Err({ msg }: { msg: string }) {
 
 // ── LLMPickBanner ─────────────────────────────────────────────────────────────
 
-function LLMPickBanner({ llm }: { llm: LLMRerank }) {
+function LLMPickBanner({ llm, label }: { llm: LLMRerank; label?: string }) {
   if (llm.error) {
     return (
       <div className="flex items-center gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
@@ -1066,11 +1079,12 @@ function LLMPickBanner({ llm }: { llm: LLMRerank }) {
       <div className="flex items-center gap-2 text-sm text-violet-800 font-medium">
         <Sparkles className="w-4 h-4 flex-shrink-0" />
         LLM pick: <code className="font-mono text-xs bg-violet-100 rounded px-1">{llm.entity_id}</code>
+        {label && <span className="truncate text-violet-900">{label}</span>}
         <span className="ml-auto text-xs font-semibold text-violet-600 tabular-nums">{pct}% confident</span>
       </div>
       {llm.rationale && <p className="text-xs text-violet-700 leading-snug">{llm.rationale}</p>}
       <p className="text-[10px] text-violet-400">
-        {llm.model}{llm.cached ? ' · cached' : ''}
+        {llm.model}{llm.cached ? ' · DGX (local) · precomputed' : ''}
       </p>
     </div>
   )

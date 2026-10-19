@@ -10,7 +10,9 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from eval.build_study_sessions import CONDITION_ORDER, extra_blocks, select_blocks
+from eval.build_study_sessions import (
+    CONDITION_ORDER, condition_order, extra_blocks, select_blocks, study_session_config,
+)
 
 
 @pytest.fixture
@@ -102,3 +104,36 @@ def test_adding_extra_blocks_does_not_change_study_blocks(varied_corpus):
     used = {d for b in before for d in b}
     extra_blocks(varied_corpus, used, [40, 200], seed=13)
     assert select_blocks(varied_corpus, 6, 40, seed=11) == before
+
+
+def test_condition_order_is_abcd_dcba():
+    assert condition_order(["C1", "C2", "C3", "C4"]) == \
+        ["C1", "C2", "C3", "C4", "C4", "C3", "C2", "C1"]
+
+
+def test_default_conditions_keep_todays_order():
+    assert condition_order(["C1", "C2", "C3"]) == CONDITION_ORDER == \
+        ["C1", "C2", "C3", "C3", "C2", "C1"]
+
+
+BASE = {"session_name": "src", "annotator": "a", "enable_llm_rerank": True,
+        "llm_provider": "anthropic", "llm_model": "claude-haiku-4-5"}
+LLM = {"llm_model": "openai/gpt-oss-120b", "llm_base_url": "http://127.0.0.1:18000/v1",
+       "llm_provider": "openai"}
+
+
+def test_c4_turns_on_cache_only_llm_with_the_given_model():
+    cfg = study_session_config(BASE, "s-7-c4", "/x.csv", "C4", feedback=True, llm=LLM)
+    assert cfg["enable_llm_rerank"] is True and cfg["llm_cache_only"] is True
+    assert cfg["auto_select_secs"] == 5 and cfg["enable_auto_select"] is True
+    assert cfg["enable_graph"] is False
+    assert (cfg["llm_model"], cfg["llm_base_url"], cfg["llm_provider"]) == \
+        ("openai/gpt-oss-120b", "http://127.0.0.1:18000/v1", "openai")
+    assert cfg["study_condition"] == "C4" and cfg["collect_feedback"] is True
+
+
+@pytest.mark.parametrize("cond", ["C1", "C2", "C3"])
+def test_other_conditions_never_show_the_llm(cond):
+    cfg = study_session_config(BASE, f"s-{cond}", "/x.csv", cond, feedback=False, llm=LLM)
+    assert cfg["enable_llm_rerank"] is False
+    assert cfg["llm_model"] == "claude-haiku-4-5"      # untouched outside C4
