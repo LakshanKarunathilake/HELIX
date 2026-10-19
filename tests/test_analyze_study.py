@@ -12,7 +12,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from eval.analyze_study import summarise
+from eval.analyze_study import cohen_kappa, compare_human_ai, summarise
 
 
 def row(uid, cond, gold, pred, top1, method="user_confirm", ms="5000", rank="1"):
@@ -140,3 +140,73 @@ def test_feedback_breakdown_reports_accuracy_per_hint_and_confidence():
 def test_sessions_without_feedback_have_no_feedback_keys():
     df = pd.DataFrame([row("m1", "C2", gold="C1", pred="C1", top1="C1")])
     assert "by_hint" not in summarise(df, kb_col="umls")["C2"]
+
+
+# --- Human vs AI ----------------------------------------------------------
+
+def arow(uid, cond, gold, pred, top1="X", **extra):
+    r = row(uid, cond, gold, pred, top1)
+    r.update(extra)
+    return r
+
+
+def _pair():
+    human = pd.DataFrame([
+        arow("m1", "C2", "G1", "G1", "G1", _hint="a", _confidence="sure"),
+        arow("m2", "C2", "G2", "G2", "G9", _hint="b", _confidence="unsure"),
+        arow("m3", "C2", "G3", "G9", "G3", _hint="a", _confidence="sure"),
+        arow("m4", "C2", "G4", "G4", "G4", _hint="a", _confidence="sure"),
+    ])
+    ai = pd.DataFrame([
+        arow("m1", "C2", "G1", "G1", "G1", _hint="a", _confidence="sure"),
+        arow("m2", "C2", "G2", "G9", "G9", _hint="b", _confidence="unsure"),
+        arow("m3", "C2", "G3", "G3", "G3", _hint="b", _confidence="sure"),
+        arow("m4", "C2", "G4", "G4", "G4", _hint="a", _confidence="fairly_sure"),
+    ])
+    return human, ai
+
+
+def test_kappa_identical_is_one():
+    assert cohen_kappa(["x", "y", "x"], ["x", "y", "x"]) == pytest.approx(1.0)
+
+
+def test_kappa_known_value():
+    assert cohen_kappa(["x", "x", "y", "y"], ["x", "y", "y", "y"]) == pytest.approx(0.5)
+
+
+def test_compare_counts_ai_only_and_human_only_right():
+    human, ai = _pair()
+
+    s = compare_human_ai(human, ai, "umls")["C2"]
+
+    assert s["n"] == 4
+    assert s["human_acc1"] == pytest.approx(75.0)
+    assert s["ai_acc1"] == pytest.approx(75.0)
+    assert s["ai_only_right"] == 1       # m3
+    assert s["human_only_right"] == 1    # m2
+    assert s["agreement"] == pytest.approx(50.0)   # m1, m4
+    assert s["retrieval_acc1"] == pytest.approx(75.0)
+    assert s["ai_missing"] == 0
+    assert s["hint_kappa"] is not None
+    assert s["human_by_confidence"]["sure"] == {"n": 3, "acc1": pytest.approx(200 / 3)}
+    assert s["ai_by_confidence"]["fairly_sure"] == {"n": 1, "acc1": pytest.approx(100.0)}
+
+
+def test_compare_joins_on_mention_uid_not_row_order():
+    human, ai = _pair()
+    base = compare_human_ai(human, ai, "umls")
+    shuffled = ai.iloc[[3, 1, 0, 2]].reset_index(drop=True)
+
+    assert compare_human_ai(human, shuffled, "umls") == base
+
+
+def test_ai_rows_still_failing_are_excluded_and_counted():
+    human, ai = _pair()
+    ai.loc[ai["mention_uid"] == "m2", ["umls", "_llm_error"]] = ["", "HTTP 500"]
+    ai = ai[ai["mention_uid"] != "m4"]                  # not yet run
+
+    s = compare_human_ai(human, ai, "umls")["C2"]
+
+    assert s["n"] == 2
+    assert s["ai_missing"] == 2
+    assert s["human_only_right"] == 0

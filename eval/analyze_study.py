@@ -116,6 +116,86 @@ def _feedback_summary(g: pd.DataFrame, human: list[bool]) -> dict:
     }
 
 
+def cohen_kappa(a: list[str], b: list[str]) -> float:
+    """Cohen's kappa between two label lists; 0.0 if empty or chance agreement is 1."""
+    n = len(a)
+    if n == 0:
+        return 0.0
+    po = sum(x == y for x, y in zip(a, b)) / n
+    ca, cb = Counter(a), Counter(b)
+    pe = sum(ca[k] * cb.get(k, 0) for k in ca) / (n * n)
+    if pe >= 1.0:
+        return 0.0
+    return (po - pe) / (1.0 - pe)
+
+
+def _answered(df: pd.DataFrame, kb_col: str) -> pd.DataFrame:
+    return df[df[kb_col].astype(str).str.strip() != ""]
+
+
+def _acc_by_level(j: pd.DataFrame, col: str, hit: pd.Series) -> dict[str, dict]:
+    if col not in j.columns:
+        return {}
+    out = {}
+    for key, idx in j.groupby(j[col].astype(str).str.strip()).groups.items():
+        if key:
+            out[key] = {"n": len(idx), "acc1": 100.0 * float(hit[idx].mean())}
+    return out
+
+
+def compare_human_ai(human: pd.DataFrame, ai: pd.DataFrame, kb_col: str) -> dict[str, dict]:
+    """Paired human-vs-AI comparison per condition, joined on mention_uid.
+
+    Only mentions with a non-empty answer on both sides count; human rows
+    annotated with the debug gold shown are dropped. Human-answered mentions
+    lacking an AI answer are reported as ``ai_missing``.
+    """
+    h = _answered(human, kb_col)
+    if "_debug_gold_shown" in h.columns:
+        h = h[h["_debug_gold_shown"].astype(str).str.strip() != "1"]
+    a = _answered(ai, kb_col).drop_duplicates(UID_COL, keep="last")
+    a = a.set_index(UID_COL)
+
+    out: dict[str, dict] = {}
+    for cond, g in h.groupby("_condition", sort=True):
+        g = g[g[UID_COL].isin(a.index)]
+        total = int((h["_condition"] == cond).sum())
+        j = g.reset_index(drop=True)
+        aj = a.loc[j[UID_COL]].reset_index()
+        n = len(j)
+        entry = {"n": n, "ai_missing": total - n}
+        if n == 0:
+            out[str(cond)] = entry
+            continue
+        gold = j["gold_cui"]
+        hh = pd.Series([_hit(x, y) for x, y in zip(j[kb_col], gold)])
+        aa = pd.Series([_hit(x, y) for x, y in zip(aj[kb_col], gold)])
+        rr = [_hit(x, y) for x, y in zip(j["_top1_id"], gold)]
+        agree = [_hit(x, y) for x, y in zip(j[kb_col], aj[kb_col])]
+
+        hint_kappa = None
+        if "_hint" in j.columns and "_hint" in aj.columns:
+            ha = j["_hint"].astype(str).str.strip()
+            hb = aj["_hint"].astype(str).str.strip()
+            both = (ha != "") & (hb != "")
+            if both.any():
+                hint_kappa = cohen_kappa(list(ha[both]), list(hb[both]))
+
+        entry.update({
+            "human_acc1": 100.0 * float(hh.mean()),
+            "ai_acc1": 100.0 * float(aa.mean()),
+            "retrieval_acc1": 100.0 * sum(rr) / n,
+            "agreement": 100.0 * sum(agree) / n,
+            "ai_only_right": int((aa & ~hh).sum()),
+            "human_only_right": int((hh & ~aa).sum()),
+            "hint_kappa": hint_kappa,
+            "ai_by_confidence": _acc_by_level(aj, "_confidence", aa),
+            "human_by_confidence": _acc_by_level(j, "_confidence", hh),
+        })
+        out[str(cond)] = entry
+    return out
+
+
 def load(prefix: str) -> tuple[pd.DataFrame, str]:
     gold = pd.read_csv(GOLD_FILE, dtype=str, keep_default_na=False)
     frames, kb_col = [], None
@@ -135,10 +215,35 @@ def load(prefix: str) -> tuple[pd.DataFrame, str]:
     return df.merge(gold, on=UID_COL, how="left"), kb_col
 
 
+def _print_comparison(cmp: dict[str, dict]) -> None:
+    hdr = (f"{'cond':6}{'n':>5}{'retrieval':>11}{'human':>8}{'AI':>8}{'agree':>8}"
+           f"{'AI-only':>9}{'human-only':>12}{'hint k':>8}")
+    print("\nHuman vs AI (paired, same mentions)")
+    print(hdr)
+    print("-" * len(hdr))
+    for c, s in cmp.items():
+        if not s["n"]:
+            print(f"{c:6}{0:>5}   (no overlapping answers; {s['ai_missing']} AI missing)")
+            continue
+        k = "n/a" if s["hint_kappa"] is None else f"{s['hint_kappa']:.2f}"
+        print(f"{c:6}{s['n']:>5}{s['retrieval_acc1']:>10.1f}%{s['human_acc1']:>7.1f}%"
+              f"{s['ai_acc1']:>7.1f}%{s['agreement']:>7.1f}%{s['ai_only_right']:>9}"
+              f"{s['human_only_right']:>12}{k:>8}")
+        if s["ai_missing"]:
+            print(f"      ({s['ai_missing']} mention(s) without an AI answer excluded)")
+    print("\nAcc@1 by stated confidence")
+    for c, s in cmp.items():
+        for who, key in (("human", "human_by_confidence"), ("AI", "ai_by_confidence")):
+            for lvl, v in (s.get(key) or {}).items():
+                print(f"  {c:6}{who:7}{lvl:14}{v['n']:>4}  {v['acc1']:5.1f}%")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--prefix", default="study2")
     ap.add_argument("--json", help="also write the summary here")
+    ap.add_argument("--ai-prefix", help="AI session prefix to compare with humans, "
+                    "e.g. ai-openai-gpt-oss-120b-study2")
     args = ap.parse_args()
 
     df, kb_col = load(args.prefix)
@@ -182,6 +287,12 @@ def main() -> None:
             if s.get("excluded_debug"):
                 print(f"!!   {c}: {s['excluded_debug']} excluded, {s['n']} usable")
         print("!" * 72)
+
+    if args.ai_prefix:
+        ai_df, _ = load(args.ai_prefix)
+        cmp = compare_human_ai(df, ai_df, kb_col)
+        _print_comparison(cmp)
+        res = {**res, "human_vs_ai": cmp}
 
     if args.json:
         Path(args.json).write_text(json.dumps(res, indent=2))
