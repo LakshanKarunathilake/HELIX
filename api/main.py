@@ -7,16 +7,20 @@ Run from the ELTool root:
 from __future__ import annotations
 
 import io
+import json
 import logging
 import re
 import shutil
 import sys
 import threading
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 from typing import Any
 
 import pandas as pd
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +32,7 @@ from pydantic import BaseModel, ValidationError
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from eltool.config import KBConfig, SessionConfig
+from eltool import feedback as fb
 from eltool.provenance import classify_method
 from eltool.graph_client import GraphError, Neo4jGraphClient, load_neo4j_settings
 from eltool.kb_client import KBClient
@@ -35,11 +40,11 @@ from eltool.llm_reranker import LLMRerankError, LLMReranker
 from eltool.metrics import metrics
 from eltool.session import (
     input_copy_path, list_sessions, output_csv_path, output_snapshot_path,
-    session_config_path, session_dir,
+    reflection_path, session_config_path, session_dir,
 )
 from eltool.store import (
-    ANNOTATOR_COL, LLM_COL, detect_delimiter, find_resume_index, init_output,
-    load_input, save_output, write_row,
+    ANNOTATOR_COL, CONFIDENCE_COL, HINT_COL, LLM_COL, detect_delimiter,
+    find_resume_index, init_output, load_input, save_output, write_feedback, write_row,
 )
 
 # Output CSVs are written by full-file read-modify-write, so concurrent saves
@@ -110,6 +115,10 @@ class CreateSessionRequest(BaseModel):
     enable_graph: bool = False
     graph_pin_threshold: float = 0.90
     graph_switch_margin: float = 0.10
+    enable_auto_select: bool = True
+    study_condition: str = ""
+    collect_feedback: bool = False
+    debug_show_gold: bool = False
 
 
 @app.post("/api/sessions")
@@ -156,6 +165,10 @@ def create_session(req: CreateSessionRequest):
             enable_graph=req.enable_graph,
             graph_pin_threshold=req.graph_pin_threshold,
             graph_switch_margin=req.graph_switch_margin,
+            enable_auto_select=req.enable_auto_select,
+            study_condition=req.study_condition,
+            collect_feedback=req.collect_feedback,
+            debug_show_gold=req.debug_show_gold,
         )
     except ValidationError as e:
         raise HTTPException(400, str(e))
@@ -238,6 +251,54 @@ def get_progress(name: str):
 
 # ── rows ──────────────────────────────────────────────────────────────────────
 
+def build_gold_report(gold: str | None, lookup) -> list[dict]:
+    """Per gold component: is it in the index, and what is it?
+
+    This is the distinction that matters when diagnosing a miss — a gold that is
+    absent from the index is a coverage failure no reranking can fix, whereas an
+    indexed gold that was not ranked first is a ranking failure that can be.
+    `found` is None (not False) when the lookup itself failed, so a broken KB is
+    never reported as a missing concept.
+    """
+    out: list[dict] = []
+    for cid in [c.strip() for c in str(gold or "").split("|") if c.strip()]:
+        try:
+            ent = lookup(cid)
+        except Exception as exc:  # noqa: BLE001
+            out.append({"id": cid, "found": None, "error": str(exc)})
+            continue
+        if not ent:
+            out.append({"id": cid, "found": False})
+            continue
+        aliases = ent.get("all_aliases") or ent.get("aliases") or []
+        out.append({
+            "id": cid,
+            "found": True,
+            "label": ent.get("primary_alias") or (aliases[0] if aliases else cid),
+            "semantic_groups": ent.get("semantic_groups") or "",
+            "semantic_types": ent.get("semantic_types") or "",
+            "definition": ent.get("definition") or "",
+            "n_aliases": len(aliases),
+        })
+    return out
+
+
+_GOLD_FILE = Path(__file__).resolve().parent.parent / "eval" / "out" / "study_gold.csv"
+
+
+def _lookup_gold(uid: str) -> str | None:
+    """Gold for one mention, read from the separate gold file (debug mode only)."""
+    if not uid or not _GOLD_FILE.exists():
+        return None
+    try:
+        g = pd.read_csv(_GOLD_FILE, dtype=str, keep_default_na=False)
+        hit = g.loc[g["mention_uid"] == uid, "gold_cui"]
+        return str(hit.iloc[0]) if len(hit) else None
+    except Exception as exc:
+        logger.warning("gold lookup failed for %s: %s", uid, exc)
+        return None
+
+
 @app.get("/api/sessions/{name}/rows/{idx}")
 def get_row(name: str, idx: int):
     cfg = _load_cfg(name)
@@ -265,6 +326,25 @@ def get_row(name: str, idx: int):
     if cfg.span_col:
         entity_span = str(row.get(cfg.span_col, "") or "")
 
+    # DEBUG ONLY — the gold answer, looked up from the gold file that is
+    # deliberately kept out of session data. Never included unless the session
+    # explicitly asks; rows saved while it is on are stamped as contaminated.
+    debug_gold: str | None = None
+    debug_gold_info: list[dict] = []
+    if cfg.debug_show_gold:
+        debug_gold = _lookup_gold(str(row.get("mention_uid", "")).strip())
+        if debug_gold and cfg.kbs:
+            base = cfg.kbs[0].endpoint_url
+
+            def _kb_entity(cid: str):
+                r = requests.get(_entity_url(base, cid), timeout=10)
+                if r.status_code == 404:
+                    return None
+                r.raise_for_status()
+                return r.json()
+
+            debug_gold_info = build_gold_report(debug_gold, _kb_entity)
+
     # Document-level progress: how many mentions in THIS document are annotated.
     doc_progress: dict[str, Any] | None = None
     if cfg.doc_id_col:
@@ -286,6 +366,14 @@ def get_row(name: str, idx: int):
                 "row_indices": same_doc,
             }
 
+    # Per-decision feedback already recorded for this row (None = not yet, or
+    # the session does not collect feedback). The UI prompts only when None.
+    feedback: dict[str, str] | None = None
+    if cfg.collect_feedback and HINT_COL in out_df.columns:
+        hint = str(out_df.at[idx, HINT_COL] or "")
+        if hint:
+            feedback = {"hint": hint, "confidence": str(out_df.at[idx, CONFIDENCE_COL] or "")}
+
     return {
         "idx": idx,
         "total": len(df),
@@ -296,6 +384,9 @@ def get_row(name: str, idx: int):
         "context_text": context_text,
         "entity_span": entity_span,
         "doc_progress": doc_progress,
+        "debug_gold": debug_gold,   # None unless the session enables debug_show_gold
+        "debug_gold_info": debug_gold_info,
+        "feedback": feedback,
     }
 
 
@@ -344,6 +435,7 @@ class AnnotateRequest(BaseModel):
     top1_id: str | None = None          # what retrieval ranked first
     user_interacted: bool = False       # annotator touched the UI before commit
     manual_entry: bool = False          # id typed by hand rather than picked
+    panels: list[str] | None = None     # UI panels opened on the row (feedback sessions)
 
 
 def _provenance_for(cfg, req: AnnotateRequest) -> dict[str, str] | None:
@@ -362,6 +454,7 @@ def _provenance_for(cfg, req: AnnotateRequest) -> dict[str, str] | None:
         "_selected_rank": "" if req.selected_rank is None else str(req.selected_rank),
         "_top1_id": req.top1_id or "",
         "_condition": cfg.study_condition,
+        "_debug_gold_shown": "1" if cfg.debug_show_gold else "0",
     }
 
 
@@ -371,12 +464,86 @@ def save_row(name: str, idx: int, req: AnnotateRequest):
     df, _ = load_input(Path(cfg.input_path), cfg.delimiter)
     out_path = output_csv_path(name)
     provenance = _provenance_for(cfg, req)
+    panels = fb.format_panels(req.panels) if cfg.collect_feedback else None
     with _WRITE_LOCK:   # atomic read-modify-write
         out_df = init_output(out_path, df, [k.name for k in cfg.kbs], cfg.annotator,
-                             provenance=bool(cfg.study_condition))
+                             provenance=bool(cfg.study_condition),
+                             feedback=cfg.collect_feedback)
         write_row(out_path, out_df, idx, cfg.annotator, req.annotations,
-                  llm_used=req.llm_used, provenance=provenance)
+                  llm_used=req.llm_used, provenance=provenance, panels=panels)
     return {"ok": True}
+
+
+# ── per-decision feedback (Annotation Guide Sec. 8) ─────────────────────────────
+
+@app.get("/api/feedback/options")
+def feedback_options():
+    return fb.options()
+
+
+class FeedbackRequest(BaseModel):
+    hint: str
+    confidence: str
+
+
+@app.post("/api/sessions/{name}/rows/{idx}/feedback")
+def save_feedback(name: str, idx: int, req: FeedbackRequest):
+    """Hint + confidence for a row that has already been saved. Recorded after
+    the save so it never counts toward the measured decision time."""
+    cfg = _load_cfg(name)
+    if not cfg.collect_feedback:
+        raise HTTPException(400, "This session does not collect feedback.")
+    if req.hint not in fb.HINT_CODES:
+        raise HTTPException(422, f"Unknown hint: {req.hint}")
+    if req.confidence not in fb.CONFIDENCE_CODES:
+        raise HTTPException(422, f"Unknown confidence: {req.confidence}")
+    df, _ = load_input(Path(cfg.input_path), cfg.delimiter)
+    if idx < 0 or idx >= len(df):
+        raise HTTPException(404, "Row index out of range")
+    out_path = output_csv_path(name)
+    kb_names = [k.name for k in cfg.kbs]
+    with _WRITE_LOCK:
+        out_df = init_output(out_path, df, kb_names, cfg.annotator,
+                             provenance=bool(cfg.study_condition), feedback=True)
+        if not all(str(out_df.at[idx, kb] or "").strip() for kb in kb_names):
+            raise HTTPException(409, "Save the annotation before recording feedback.")
+        write_feedback(out_path, out_df, idx, req.hint, req.confidence)
+    return {"ok": True}
+
+
+class ReflectionRequest(BaseModel):
+    ranking: list[str]      # every hint code, most useful first
+    comment: str = ""
+
+
+@app.get("/api/sessions/{name}/reflection")
+def get_reflection(name: str):
+    _load_cfg(name)
+    path = reflection_path(name)
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+@app.put("/api/sessions/{name}/reflection")
+def save_reflection(name: str, req: ReflectionRequest):
+    """End-of-session reflection: hint types ranked by usefulness, plus a
+    short comment on what helped or misled."""
+    cfg = _load_cfg(name)
+    if not cfg.collect_feedback:
+        raise HTTPException(400, "This session does not collect feedback.")
+    try:
+        fb.validate_reflection_ranking(req.ranking)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    record = {
+        "session_name": name,
+        "annotator": cfg.annotator,
+        "study_condition": cfg.study_condition,
+        "ranking": req.ranking,
+        "comment": req.comment.strip(),
+        "submitted_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    reflection_path(name).write_text(json.dumps(record, indent=2))
+    return record
 
 
 # ── candidates ────────────────────────────────────────────────────────────────
@@ -394,6 +561,19 @@ def _serialize_candidates(cands):
 def _derived_url(base: str, suffix: str) -> str:
     """Append /dense or /lexical to the configured endpoint URL."""
     return base.rstrip("/") + suffix
+
+
+def _entity_url(base: str, entity_id: str) -> str:
+    """The KB's by-id lookup route, derived from its configured /query URL.
+
+    The id is escaped (composite dictionary ids contain '|') and stripped of
+    path separators so it cannot steer the request off the /entity route.
+    """
+    root = base.rstrip("/")
+    if root.endswith("/query"):
+        root = root[: -len("/query")]
+    safe = quote(str(entity_id).replace("/", "").replace("..", ""), safe="")
+    return f"{root}/entity/{safe}"
 
 
 def _pick_best(dense: list, lexical: list, entity_type: str, threshold: float):
@@ -421,6 +601,47 @@ def _pick_best(dense: list, lexical: list, entity_type: str, threshold: float):
         if match:
             return match
     return pool[0]
+
+
+@app.get("/api/sessions/{name}/kb/{kb_name}/entity/{entity_id:path}")
+def lookup_entity(name: str, kb_name: str, entity_id: str):
+    """Resolve a manually typed id against the KB index.
+
+    Returns {found: false} rather than an HTTP error when the index simply does
+    not contain the id — that is a normal, informative answer for the annotator
+    (on MedMentions ~40% of gold concepts are not indexed at all), not a fault.
+    """
+    cfg = _load_cfg(name)
+    kb = next((k for k in cfg.kbs if k.name == kb_name), None)
+    if kb is None:
+        raise HTTPException(404, f"No KB named '{kb_name}' in this session")
+
+    eid = (entity_id or "").strip()
+    if not eid:
+        raise HTTPException(400, "Empty entity id")
+
+    try:
+        resp = requests.get(_entity_url(kb.endpoint_url, eid), timeout=10)
+    except requests.RequestException as exc:
+        raise HTTPException(502, f"KB unreachable: {exc}")
+
+    if resp.status_code == 404:
+        return {"found": False, "id": eid,
+                "message": f"'{eid}' is not in the {kb_name} index."}
+    if not resp.ok:
+        raise HTTPException(502, f"KB error {resp.status_code}: {resp.text[:200]}")
+
+    ent = resp.json()
+    aliases = ent.get("all_aliases") or ent.get("aliases") or []
+    return {
+        "found": True,
+        "id": ent.get("entity_id", eid),
+        "label": (ent.get("primary_alias") or (aliases[0] if aliases else eid)),
+        "aliases": aliases,
+        "semantic_groups": ent.get("semantic_groups") or "",
+        "semantic_types": ent.get("semantic_types") or "",
+        "definition": ent.get("definition") or "",
+    }
 
 
 # ── auto-annotate ─────────────────────────────────────────────────────────────

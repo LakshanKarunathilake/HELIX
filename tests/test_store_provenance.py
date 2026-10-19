@@ -97,3 +97,38 @@ def test_init_output_does_not_add_provenance_to_existing_session(tmp_path, input
     reopened = init_output(out, input_df, ["UMLS"], "lakshan")
 
     assert not [c for c in reopened.columns if c in PROVENANCE_COLS]
+
+
+def test_revisiting_a_row_keeps_the_first_decisions_provenance(tmp_path, input_df):
+    """Prev/Next navigation re-saves a row. The first encounter is the measured
+    decision; a later pass must not overwrite its timing."""
+    out = tmp_path / "annotated.csv"
+    df = init_output(out, input_df, ["UMLS"], "lakshan", provenance=True)
+
+    first = {"_method": "user_override", "_elapsed_ms": "8400",
+             "_selected_rank": "3", "_top1_id": "C1", "_condition": "C2"}
+    df = write_row(out, df, 0, "lakshan", {"UMLS": "C7"}, provenance=first)
+
+    revisit = {"_method": "user_confirm", "_elapsed_ms": "175",
+               "_selected_rank": "1", "_top1_id": "C1", "_condition": "C2"}
+    write_row(out, df, 0, "lakshan", {"UMLS": "C9"}, provenance=revisit)
+
+    saved = pd.read_csv(out, dtype=str, keep_default_na=False)
+    assert saved.at[0, "_elapsed_ms"] == "8400"      # original timing survives
+    assert saved.at[0, "_method"] == "user_override"
+    assert saved.at[0, "_selected_rank"] == "3"
+    assert saved.at[0, "UMLS"] == "C9"               # but the annotation updates
+
+
+def test_revisits_are_counted(tmp_path, input_df):
+    out = tmp_path / "annotated.csv"
+    df = init_output(out, input_df, ["UMLS"], "lakshan", provenance=True)
+    p = {"_method": "auto_accept", "_elapsed_ms": "5000", "_condition": "C2"}
+
+    df = write_row(out, df, 0, "lakshan", {"UMLS": "C1"}, provenance=p)
+    assert pd.read_csv(out, dtype=str, keep_default_na=False).at[0, "_revisions"] == "0"
+
+    df = write_row(out, df, 0, "lakshan", {"UMLS": "C2"}, provenance=p)
+    df = write_row(out, df, 0, "lakshan", {"UMLS": "C3"}, provenance=p)
+
+    assert pd.read_csv(out, dtype=str, keep_default_na=False).at[0, "_revisions"] == "2"

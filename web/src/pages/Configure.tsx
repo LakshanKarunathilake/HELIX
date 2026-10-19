@@ -54,6 +54,8 @@ export function Configure() {
   const [defaultPrompt, setDefaultPrompt] = useState('')
   // Neo4j graph
   const [enableGraph, setEnableGraph] = useState(false)
+  const [collectFeedback, setCollectFeedback] = useState(false)
+  const [debugShowGold, setDebugShowGold] = useState(false)
 
   useEffect(() => {
     api.getDefaultPrompt().then(setDefaultPrompt).catch(() => {})
@@ -85,6 +87,8 @@ export function Configure() {
     if (existingCfg.doc_id_col) setDocIdCol(existingCfg.doc_id_col)
     if (existingCfg.span_col) setSpanCol(existingCfg.span_col)
     if (existingCfg.auto_select_secs != null) setAutoSelectSecs(existingCfg.auto_select_secs)
+    if (existingCfg.debug_show_gold != null) setDebugShowGold(existingCfg.debug_show_gold)
+    if (existingCfg.collect_feedback != null) setCollectFeedback(existingCfg.collect_feedback)
     if (existingCfg.score_tie_threshold != null) setScoreTieThreshold(existingCfg.score_tie_threshold)
     if (existingCfg.entity_type_col) setEntityTypeCol(existingCfg.entity_type_col)
     if (existingCfg.enable_llm_rerank != null) setEnableLlmRerank(existingCfg.enable_llm_rerank)
@@ -153,6 +157,8 @@ export function Configure() {
           llm_prompt: llmPrompt.trim() || null,
           llm_api_key: llmApiKey || null,   // blank = keep existing (server-side)
           enable_graph: enableGraph,
+          collect_feedback: collectFeedback,
+          debug_show_gold: debugShowGold,
         }
         await api.updateSession(sessionName!, updated)
         qc.invalidateQueries({ queryKey: ['session', sessionName] })
@@ -180,6 +186,8 @@ export function Configure() {
           llm_prompt: llmPrompt.trim() || null,
           llm_api_key: llmApiKey || null,
           enable_graph: enableGraph,
+          collect_feedback: collectFeedback,
+          debug_show_gold: debugShowGold,
         })
       }
       navigate(`/annotate/${isEdit ? sessionName : name.trim()}`)
@@ -464,6 +472,50 @@ export function Configure() {
             <code className="bg-gray-100 rounded px-1">neo4j.yaml</code> on the server
             (copy <code className="bg-gray-100 rounded px-1">neo4j.example.yaml</code>); env vars are a fallback.
             Default schema: <code className="bg-gray-100 rounded px-1">(:Concept {'{'}cui{'}'})-[:RELATES_TO {'{'}rel{'}'}]-(:Concept)</code>.
+          </p>
+        </div>
+
+        <div className="border-t border-gray-100 pt-4 mt-2">
+          <label className="flex items-center gap-2 mb-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={collectFeedback}
+              onChange={e => setCollectFeedback(e.target.checked)}
+            />
+            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+              Feedback on each decision
+            </span>
+          </label>
+          <p className="text-xs text-gray-400">
+            After every save the annotator picks the main hint that decided it and a confidence
+            level (two clicks, not counted in decision time). The panels opened on each row are
+            logged, and a reflection — hints ranked by usefulness — is collected per session.
+            Adds <code className="bg-gray-100 rounded px-1">_panels</code>,{' '}
+            <code className="bg-gray-100 rounded px-1">_hint</code> and{' '}
+            <code className="bg-gray-100 rounded px-1">_confidence</code> to the output.
+          </p>
+        </div>
+
+        {/* ── DEBUG: gold answer ─────────────────────────────────────────── */}
+        <div className="border-t-2 border-red-200 pt-4 mt-2 bg-red-50 -mx-5 px-5 pb-4 rounded-b-lg">
+          <label className="flex items-center gap-2 mb-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={debugShowGold}
+              onChange={e => setDebugShowGold(e.target.checked)}
+            />
+            <span className="text-xs font-bold text-red-700 uppercase tracking-wide">
+              🛑 Debug — show the gold answer
+            </span>
+          </label>
+          <p className="text-xs text-red-600">
+            Displays the correct CUI in the annotator so retrieval failures can be inspected.
+            Read from <code className="bg-red-100 rounded px-1">eval/out/study_gold.csv</code>.
+          </p>
+          <p className="text-xs text-red-700 font-semibold mt-1">
+            Every row saved while this is on is stamped <code className="bg-red-100 rounded px-1">_debug_gold_shown</code>{' '}
+            and excluded from study results. Turning it off later does <u>not</u> clean rows already saved —
+            those sessions must be cleared and re-annotated.
           </p>
         </div>
       </Section>

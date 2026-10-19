@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ChevronLeft, ChevronRight, Save, Download, Ban,
-  X, AlertCircle, CheckCircle2, Loader2, PartyPopper,
+  X, AlertCircle, CheckCircle2, Loader2, PartyPopper, MessageSquareText, NotebookPen,
 } from 'lucide-react'
 import { Sparkles } from 'lucide-react'
 import * as api from '@/api/client'
@@ -11,8 +11,10 @@ import { CandidateCard } from '@/components/CandidateCard'
 import { CountdownTimer } from '@/components/CountdownTimer'
 import { FloatingGraphPanel } from '@/components/FloatingGraphPanel'
 import { DocumentReview } from '@/components/DocumentReview'
+import { FeedbackPrompt } from '@/components/FeedbackPrompt'
+import { ReflectionModal } from '@/components/ReflectionModal'
 import { Network } from 'lucide-react'
-import type { Candidate, GraphData, LLMRerank, SessionConfig } from '@/types'
+import type { Candidate, GraphData, LLMRerank, PanelName, RowFeedback, SessionConfig } from '@/types'
 
 const DEFAULT_AUTO_SELECT_SECS = 5
 
@@ -57,6 +59,26 @@ export function Annotate() {
     enabled: !!sessionName,
   })
 
+  // ── per-decision feedback (Annotation Guide Sec. 8) ───────────────────
+  const collectFeedback = !!cfg?.collect_feedback
+  const { data: feedbackOptions } = useQuery({
+    queryKey: ['feedback-options'],
+    queryFn: api.getFeedbackOptions,
+    enabled: collectFeedback,
+    staleTime: Infinity,
+  })
+  const { data: reflection } = useQuery({
+    queryKey: ['reflection', sessionName],
+    queryFn: () => api.getReflection(sessionName!),
+    enabled: collectFeedback && !!sessionName,
+  })
+  // After a save, the row waits here for its hint + confidence before moving
+  // on to `then` — so the prompt never counts toward the next row's timing.
+  type Then = number | 'stay' | 'finish'
+  const [pendingFeedback, setPendingFeedback] =
+    useState<{ idx: number; term: string; then: Then; initial?: RowFeedback | null } | null>(null)
+  const [showReflection, setShowReflection] = useState(false)
+
   // ── row navigation ─────────────────────────────────────────────────────
   const [rowIdx, setRowIdx] = useState<number>(0)
   const initialJumpDone = useRef(false)
@@ -95,6 +117,9 @@ export function Annotate() {
   const [timerActive, setTimerActive] = useState(false)
   const [userInteracted, setUserInteracted] = useState(false)
   const [manualIds, setManualIds] = useState<Record<string, string>>({})
+  // Result of resolving a manually typed id against the KB index, per KB.
+  type Lookup = { state: 'loading' } | { state: 'done'; result: api.EntityLookup }
+  const [manualLookup, setManualLookup] = useState<Record<string, Lookup | undefined>>({})
   const [warning, setWarning] = useState('')
   const [activeTab, setActiveTab] = useState(0)
   const [showDocReview, setShowDocReview] = useState(false)
@@ -104,6 +129,12 @@ export function Annotate() {
   // Both are reported raw; the server classifies and stamps the condition.
   const rowStartRef = useRef<number>(performance.now())
   const manualEntryRef = useRef(false)
+  // Feedback sessions: which panels were opened on this row (frozen on first
+  // save server-side). The graph panel persists across rows, so it counts as
+  // opened on any row that starts with it already expanded.
+  const panelsRef = useRef<Set<PanelName>>(new Set())
+  const graphOpenRef = useRef(false)
+  const markPanel = useCallback((p: PanelName) => { panelsRef.current.add(p) }, [])
 
   // Reset when row changes
   useEffect(() => {
@@ -116,9 +147,11 @@ export function Annotate() {
     setTimerActive(false)
     setUserInteracted(false)
     setManualIds({})
+    setManualLookup({})
     setWarning('')
     rowStartRef.current = performance.now()   // pilot study: time on this row
     manualEntryRef.current = false
+    panelsRef.current = new Set(graphOpenRef.current ? ['graph'] : [])
   }, [rowIdx])
 
   // Populate selections from saved annotations when row data arrives
@@ -242,8 +275,46 @@ export function Annotate() {
       top1_id: dense[0]?.id ?? '',
       user_interacted: interacted,
       manual_entry: manualEntryRef.current,
+      panels: [...panelsRef.current],
     }
   }, [cfg])
+
+  // Feedback already recorded for the row on screen (null = still needed).
+  const rowFeedbackRef = useRef<RowFeedback | null>(null)
+  rowFeedbackRef.current = rowData?.idx === rowIdx ? (rowData.feedback ?? null) : null
+  const rowLabelRef = useRef('')
+  rowLabelRef.current = rowData?.label ?? ''
+  const reflectionDoneRef = useRef(false)
+  reflectionDoneRef.current = !!reflection
+
+  const proceed = (then: Then) => {
+    if (then === 'stay') return
+    if (then === 'finish') {
+      setWarning('🎉 All rows annotated!')
+      if (cfg?.collect_feedback && !reflectionDoneRef.current) setShowReflection(true)
+      return
+    }
+    setRowIdx(then)
+  }
+
+  // Every saved decision goes through here: feedback sessions ask for the hint
+  // and confidence (once per row) before navigating on.
+  const afterSave = (idx: number, then: Then) => {
+    if (cfg?.collect_feedback && !rowFeedbackRef.current) {
+      setPendingFeedback({ idx, term: rowLabelRef.current, then })
+    } else {
+      proceed(then)
+    }
+  }
+
+  const submitFeedback = async (hint: string, confidence: string) => {
+    if (!sessionName || !pendingFeedback) return
+    const { idx, then } = pendingFeedback
+    await api.saveFeedback(sessionName, idx, hint, confidence)
+    qc.invalidateQueries({ queryKey: ['row', sessionName, idx] })
+    setPendingFeedback(null)
+    proceed(then)
+  }
 
   // Auto-advance: when the countdown fires (and the user hasn't interacted),
   // save the auto-selected annotations and move to the next row.
@@ -262,8 +333,7 @@ export function Annotate() {
           provenanceFor(sels, candidatesRef.current, false))   // countdown expired untouched
         qc.invalidateQueries({ queryKey: ['progress', sessionName] })
         qc.invalidateQueries({ queryKey: ['row', sessionName, idx] })
-        if (idx < totalRef.current - 1) setRowIdx(idx + 1)
-        else setWarning('🎉 All rows annotated!')
+        afterSave(idx, idx < totalRef.current - 1 ? idx + 1 : 'finish')
       } catch (_) { /* silent */ }
     }, secs * 1000)
     return () => clearTimeout(t)
@@ -295,6 +365,36 @@ export function Annotate() {
     select(kb, 'NIL')
   }
 
+  // Resolve a typed id against the index before accepting it. A miss is not an
+  // error: ~40% of MedMentions gold concepts are not indexed, so the annotator
+  // is told and can still commit the id deliberately.
+  const resolveManualId = async (kb: string, id: string) => {
+    if (!sessionName || !id) return
+    markPanel('lookup')
+    setManualLookup(prev => ({ ...prev, [kb]: { state: 'loading' } }))
+    try {
+      const result = await api.lookupEntity(sessionName, kb, id)
+      setManualLookup(prev => ({ ...prev, [kb]: { state: 'done', result } }))
+      if (result.found) {
+        manualEntryRef.current = true
+        select(kb, result.id)
+        setManualIds(prev => ({ ...prev, [kb]: '' }))
+      }
+    } catch (e: any) {
+      setManualLookup(prev => ({
+        ...prev,
+        [kb]: { state: 'done', result: { found: false, id, message: e.message } },
+      }))
+    }
+  }
+
+  const useManualIdAnyway = (kb: string, id: string) => {
+    manualEntryRef.current = true
+    select(kb, id)
+    setManualIds(prev => ({ ...prev, [kb]: '' }))
+    setManualLookup(prev => ({ ...prev, [kb]: undefined }))
+  }
+
   const clearSel = (kb: string) => {
     setSelections(prev => { const n = { ...prev }; delete n[kb]; return n })
     setUserInteracted(true)
@@ -315,36 +415,53 @@ export function Annotate() {
       setWarning(`Select an option for: ${pending.join(', ')}`)
       return
     }
-    if (rowIdx >= total - 1) {
-      setWarning('🎉 All rows annotated!')
-      return
-    }
+    setTimerActive(false)   // a pending countdown must not save this row again
     await saveRow()
-    setRowIdx(r => r + 1)
+    afterSave(rowIdx, rowIdx >= total - 1 ? 'finish' : rowIdx + 1)
   }
 
   const goPrev = async () => {
     if (rowIdx <= 0) return
-    if (allFilled) await saveRow()
-    setRowIdx(r => r - 1)
+    if (!allFilled) { setRowIdx(r => r - 1); return }
+    setTimerActive(false)
+    await saveRow()
+    afterSave(rowIdx, rowIdx - 1)
   }
 
   // keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) return
+      if (pendingFeedback || showReflection) return   // modal owns the keyboard
       if (e.key === 'ArrowRight' || e.key === 'n') goNext()
       if (e.key === 'ArrowLeft'  || e.key === 'p') goPrev()
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [allFilled, rowIdx, selections])
+  }, [allFilled, rowIdx, selections, pendingFeedback, showReflection])
 
   // ── render guards ──────────────────────────────────────────────────────
   if (!cfgLoading && !cfg) return <Err msg="Session not found" />
 
   return (
     <div className="relative flex flex-col h-[calc(100vh-56px)]">
+
+      {/* ── DEBUG MODE BANNER ───────────────────────────────────────────────
+          Deliberately loud and impossible to miss. Any row saved while this is
+          showing is stamped `_debug_gold_shown` and excluded from the study's
+          accuracy numbers by eval/analyze_study.py. */}
+      {cfg?.debug_show_gold && (
+        <div className="flex-shrink-0 bg-red-600 text-white px-6 py-2.5 border-b-4 border-red-800 animate-pulse">
+          <div className="max-w-4xl mx-auto flex items-center gap-3">
+            <AlertCircle className="w-5 h-5 flex-shrink-0" />
+            <div className="text-sm leading-tight">
+              <span className="font-bold uppercase tracking-wide">Debug mode — gold answer visible.</span>{' '}
+              Rows saved now are marked contaminated and will NOT count toward the study.
+              Set <code className="font-mono bg-red-800 rounded px-1">debug_show_gold: false</code> before annotating for real.
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── sticky top bar ──────────────────────────────────────────────── */}
       <div className="bg-white border-b border-gray-200 px-6 py-3 flex-shrink-0">
@@ -379,10 +496,20 @@ export function Annotate() {
                 onChange={e => setRowIdx(Math.max(0, Math.min(total - 1, +e.target.value - 1)))}
                 className="w-16 input text-center py-1 text-xs"
               />
+              {collectFeedback && (
+                <button
+                  className="btn-secondary text-xs py-1"
+                  onClick={() => setShowReflection(true)}
+                  title="Rank the hints by usefulness for this session"
+                >
+                  <NotebookPen className="w-3.5 h-3.5" /> Reflection
+                  {reflection && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />}
+                </button>
+              )}
               {cfg?.enable_graph && cfg?.doc_id_col && rowData?.doc_progress && (
                 <button
                   className="btn-secondary text-xs py-1"
-                  onClick={() => setShowDocReview(true)}
+                  onClick={() => { markPanel('document_review'); setShowDocReview(true) }}
                   title="Review & rearrange this document's selections on the graph"
                 >
                   <Network className="w-3.5 h-3.5" /> Review document
@@ -434,6 +561,80 @@ export function Annotate() {
                       ))}
                     </div>
                   )}
+                  {/* DEBUG ONLY — the answer. Red so it can never be mistaken
+                      for part of the normal annotation UI. */}
+                  {rowData?.debug_gold != null && (() => {
+                    // Where a miss comes from: gold absent from the index is a
+                    // coverage failure; gold present but unranked is a recall
+                    // failure; gold in the shown list is a ranking failure.
+                    const denseIds = (cfg?.kbs ?? []).flatMap(k =>
+                      (candidates[k.name]?.dense ?? []).map(c => c.id))
+                    return (
+                      <div className="mt-3 border-2 border-red-500 bg-red-50 rounded-lg px-3 py-2 space-y-2">
+                        <div>
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-red-600">
+                            Debug · gold answer
+                          </p>
+                          <code className="text-sm font-mono font-bold text-red-700 break-all">
+                            {rowData.debug_gold || '(no gold)'}
+                          </code>
+                        </div>
+
+                        {(rowData.debug_gold_info ?? []).map(g => {
+                          const rank = denseIds.indexOf(g.id)
+                          return (
+                            <div key={g.id} className="border-t border-red-200 pt-1.5">
+                              {g.found === true ? (
+                                <>
+                                  <p className="text-xs font-semibold text-red-800">
+                                    {g.label}{' '}
+                                    <span className="font-normal text-red-600">· in index</span>
+                                  </p>
+                                  {(g.semantic_groups || g.semantic_types) && (
+                                    <p className="text-[11px] text-red-600">
+                                      {[g.semantic_groups, g.semantic_types].filter(Boolean).join(' · ')}
+                                      {g.n_aliases ? ` · ${g.n_aliases} aliases` : ''}
+                                    </p>
+                                  )}
+                                  <p className="text-[11px] font-semibold mt-0.5">
+                                    {rank === 0 ? (
+                                      <span className="text-emerald-700">retrieved at rank 1 ✓</span>
+                                    ) : rank > 0 ? (
+                                      <span className="text-amber-700">
+                                        retrieved at rank {rank + 1} — RANKING failure
+                                      </span>
+                                    ) : (
+                                      <span className="text-amber-800">
+                                        indexed but NOT retrieved — recall failure
+                                      </span>
+                                    )}
+                                  </p>
+                                  {g.definition && (
+                                    <p className="text-[11px] text-red-500 mt-0.5 line-clamp-2">{g.definition}</p>
+                                  )}
+                                </>
+                              ) : g.found === false ? (
+                                <p className="text-xs font-semibold text-red-800">
+                                  <code className="font-mono">{g.id}</code> — NOT IN INDEX
+                                  <span className="block font-normal text-[11px] text-red-600">
+                                    coverage failure · unreachable by any reranking
+                                  </span>
+                                </p>
+                              ) : (
+                                <p className="text-[11px] text-red-500">
+                                  lookup failed: {g.error}
+                                </p>
+                              )}
+                            </div>
+                          )
+                        })}
+
+                        <p className="text-[10px] text-red-500">
+                          this row will be excluded from study results
+                        </p>
+                      </div>
+                    )
+                  })()}
                   {rowData?.doc_progress && rowData.doc_progress.total > 0 && (() => {
                     const dp = rowData.doc_progress!
                     const dpct = Math.round((dp.done / dp.total) * 100)
@@ -473,6 +674,28 @@ export function Annotate() {
                           </span>
                         ) : null)}
                       </div>
+                      {collectFeedback && feedbackOptions && (() => {
+                        const f = rowData?.feedback
+                        const label = (list: { code: string; label: string }[], code?: string) =>
+                          list.find(o => o.code === code)?.label ?? code
+                        return (
+                          <button
+                            className={`mt-2 inline-flex items-center gap-1.5 text-xs rounded-full px-3 py-1 border ${
+                              f ? 'bg-gray-50 text-gray-600 border-gray-200 hover:border-brand-300'
+                                : 'bg-amber-50 text-amber-700 border-amber-300 hover:border-amber-400'
+                            }`}
+                            title={f ? 'Change the hint or confidence for this decision' : 'This decision has no feedback yet'}
+                            onClick={() => setPendingFeedback({
+                              idx: rowIdx, term: rowData?.label ?? '', then: 'stay', initial: f,
+                            })}
+                          >
+                            <MessageSquareText className="w-3.5 h-3.5" />
+                            {f
+                              ? <>{label(feedbackOptions.hints, f.hint)} · {label(feedbackOptions.confidence, f.confidence)}</>
+                              : <>Feedback missing — add</>}
+                          </button>
+                        )
+                      })()}
                     </div>
                   )}
                 </>
@@ -614,6 +837,7 @@ export function Annotate() {
                             rank={j + 1}
                             selected={parseIds(selections[kb.name]).includes(c.id)}
                             onSelect={id => select(kb.name, id)}
+                            onPanelOpen={markPanel}
                           />
                         ))}
                       </div>
@@ -628,33 +852,82 @@ export function Annotate() {
                 })()}
 
                 {/* manual id */}
-                <div className="flex gap-2 pt-1">
-                  <input
-                    className="input text-sm flex-1"
-                    placeholder="Or enter a KB id manually…"
-                    value={manualIds[kb.name] ?? ''}
-                    onChange={e => setManualIds(prev => ({ ...prev, [kb.name]: e.target.value }))}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter' && manualIds[kb.name]?.trim()) {
-                        manualEntryRef.current = true
-                        select(kb.name, manualIds[kb.name].trim())
-                        setManualIds(prev => ({ ...prev, [kb.name]: '' }))
-                      }
-                    }}
-                  />
-                  <button
-                    className="btn-secondary text-sm"
-                    disabled={!manualIds[kb.name]?.trim()}
-                    onClick={() => {
-                      if (manualIds[kb.name]?.trim()) {
-                        manualEntryRef.current = true
-                        select(kb.name, manualIds[kb.name].trim())
-                        setManualIds(prev => ({ ...prev, [kb.name]: '' }))
-                      }
-                    }}
-                  >
-                    Use
-                  </button>
+                <div className="pt-1 space-y-2">
+                  <div className="flex gap-2">
+                    <input
+                      className="input text-sm flex-1"
+                      placeholder="Or enter a KB id manually…"
+                      value={manualIds[kb.name] ?? ''}
+                      onChange={e => {
+                        setManualIds(prev => ({ ...prev, [kb.name]: e.target.value }))
+                        setManualLookup(prev => ({ ...prev, [kb.name]: undefined }))
+                      }}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' && manualIds[kb.name]?.trim()) {
+                          resolveManualId(kb.name, manualIds[kb.name].trim())
+                        }
+                      }}
+                    />
+                    <button
+                      className="btn-secondary text-sm"
+                      disabled={!manualIds[kb.name]?.trim() || manualLookup[kb.name]?.state === 'loading'}
+                      onClick={() => resolveManualId(kb.name, manualIds[kb.name].trim())}
+                    >
+                      {manualLookup[kb.name]?.state === 'loading' ? '…' : 'Look up'}
+                    </button>
+                  </div>
+
+                  {/* Resolved against the index: found -> what it is; missing ->
+                      say so plainly, but still allow a deliberate commit. */}
+                  {(() => {
+                    const lk = manualLookup[kb.name]
+                    if (!lk || lk.state === 'loading') return null
+                    const r = lk.result
+                    if (r.found) return (
+                      <div className="border border-emerald-300 bg-emerald-50 rounded-lg px-3 py-2">
+                        <div className="flex items-center gap-2">
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+                          <span className="text-sm font-semibold text-emerald-800">{r.label}</span>
+                          <code className="text-xs font-mono text-emerald-700">{r.id}</code>
+                        </div>
+                        {(r.semantic_groups || r.semantic_types) && (
+                          <p className="text-xs text-emerald-700 mt-1">
+                            {[r.semantic_groups, r.semantic_types].filter(Boolean).join(' · ')}
+                          </p>
+                        )}
+                        {r.aliases?.length > 1 && (
+                          <p className="text-xs text-emerald-600 mt-1">
+                            {r.aliases.length} aliases: {r.aliases.slice(0, 4).join(', ')}
+                            {r.aliases.length > 4 ? ' …' : ''}
+                          </p>
+                        )}
+                        {r.definition && (
+                          <p className="text-xs text-emerald-700 mt-1 line-clamp-3">{r.definition}</p>
+                        )}
+                      </div>
+                    )
+                    return (
+                      <div className="border border-amber-400 bg-amber-50 rounded-lg px-3 py-2">
+                        <div className="flex items-start gap-2">
+                          <AlertCircle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                          <div className="flex-1">
+                            <p className="text-sm font-semibold text-amber-800">Not in the index</p>
+                            <p className="text-xs text-amber-700">{r.message}</p>
+                            <p className="text-xs text-amber-600 mt-1">
+                              Check for a typo — or commit it anyway if the concept is genuinely
+                              absent from the dictionary.
+                            </p>
+                          </div>
+                          <button
+                            className="btn-secondary text-xs flex-shrink-0"
+                            onClick={() => useManualIdAnyway(kb.name, r.id)}
+                          >
+                            Use anyway
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })()}
                 </div>
               </div>
             ))}
@@ -708,9 +981,36 @@ export function Annotate() {
             selectedId={parseIds(selections[activeKb.name])[0]}
             onSelect={id => select(activeKb.name, id)}
             title="Candidate graph (Neo4j)"
+            onOpenChange={open => { graphOpenRef.current = open; if (open) markPanel('graph') }}
           />
         )
       })()}
+
+      {/* per-decision feedback, after each save */}
+      {pendingFeedback && feedbackOptions && (
+        <FeedbackPrompt
+          key={pendingFeedback.idx}
+          term={pendingFeedback.term}
+          options={feedbackOptions}
+          initial={pendingFeedback.initial}
+          onSubmit={submitFeedback}
+          // A correction can be abandoned; a first-time prompt cannot.
+          onCancel={pendingFeedback.then === 'stay' ? () => setPendingFeedback(null) : undefined}
+        />
+      )}
+
+      {showReflection && feedbackOptions && (
+        <ReflectionModal
+          options={feedbackOptions}
+          existing={reflection}
+          onClose={() => setShowReflection(false)}
+          onSave={async (ranking, comment) => {
+            await api.saveReflection(sessionName!, ranking, comment)
+            qc.invalidateQueries({ queryKey: ['reflection', sessionName] })
+            setShowReflection(false)
+          }}
+        />
+      )}
 
       {/* Level-2 document negotiation */}
       {showDocReview && cfg && (() => {
