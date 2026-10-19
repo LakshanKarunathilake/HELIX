@@ -106,6 +106,8 @@ export function Annotate() {
   const reviewSession = queue !== null
   const queuePos = queue ? queue.indexOf(rowIdx) : -1
   const acceptedByAI = queue ? total - queue.length : 0
+  // review_mode on but nothing routed yet: eval/preannotate.py has not run.
+  const queueEmpty = queue !== null && queue.length === 0
   // Where Next / Prev go from `idx`: the adjacent row, or the adjacent queue row.
   const nextTarget = (idx: number): number | 'finish' => {
     if (!queue) return idx >= total - 1 ? 'finish' : idx + 1
@@ -124,7 +126,7 @@ export function Annotate() {
   const { data: rowData, isLoading: rowLoading } = useQuery({
     queryKey: ['row', sessionName, rowIdx],
     queryFn: () => api.getRow(sessionName!, rowIdx),
-    enabled: !!sessionName && total > 0,
+    enabled: !!sessionName && total > 0 && !queueEmpty,
   })
 
   type KBCandidates = { dense: Candidate[]; lexical: Candidate[]; llm: LLMRerank | null }
@@ -456,7 +458,11 @@ export function Annotate() {
   const goPrev = async () => {
     const target = prevTarget(rowIdx)
     if (target === null) return
-    if (!allFilled) { setRowIdx(target); return }
+    // Review queue: an untouched row only holds the AI's pre-selection — going
+    // back must not record it as the human's confirmation.
+    const untouched = reviewSession && !userInteracted
+      && !Object.values(savedAnnotations).some(v => v)
+    if (!allFilled || untouched) { setRowIdx(target); return }
     setTimerActive(false)
     await saveRow()
     afterSave(rowIdx, target)
@@ -472,10 +478,18 @@ export function Annotate() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [allFilled, rowIdx, selections, pendingFeedback, showReflection])
+  }, [allFilled, rowIdx, selections, userInteracted, savedAnnotations, pendingFeedback, showReflection])
 
   // ── render guards ──────────────────────────────────────────────────────
   if (!cfgLoading && !cfg) return <Err msg="Session not found" />
+  if (queueEmpty) return (
+    <div className="flex items-center justify-center h-64 text-gray-600 gap-2" data-testid="queue-empty">
+      <AlertCircle className="w-5 h-5 text-amber-500" />
+      <span>
+        No rows to review yet — run <code className="bg-gray-100 rounded px-1">eval/preannotate.py</code> for this session first.
+      </span>
+    </div>
+  )
 
   return (
     <div className="relative flex flex-col h-[calc(100vh-56px)]">

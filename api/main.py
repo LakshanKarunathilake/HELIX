@@ -464,13 +464,19 @@ def _records_llm(cfg) -> bool:
     return bool(cfg.study_condition and cfg.enable_llm_rerank)
 
 
+def _records_provenance(cfg) -> bool:
+    """Study sessions and review-mode (mode C) sessions log per-row provenance;
+    review sessions need human time and method to measure the queue."""
+    return bool(cfg.study_condition or cfg.review_mode)
+
+
 _AI_WRITTEN_COLS = ("_llm_id", "_llm_confidence", "_llm_level", "_llm_label",
                     "_top1_id", "_rationale", "_route")
 
 
 def _provenance_for(cfg, req: AnnotateRequest) -> dict[str, str] | None:
-    """Build the provenance row for a study session (None for ordinary ones)."""
-    if not cfg.study_condition:
+    """Build the provenance row for a study or review session (None for ordinary ones)."""
+    if not _records_provenance(cfg):
         return None
     selected = "|".join(req.annotations[k] for k in sorted(req.annotations))
     return {
@@ -483,7 +489,7 @@ def _provenance_for(cfg, req: AnnotateRequest) -> dict[str, str] | None:
         "_elapsed_ms": "" if req.elapsed_ms is None else str(req.elapsed_ms),
         "_selected_rank": "" if req.selected_rank is None else str(req.selected_rank),
         "_top1_id": req.top1_id or "",
-        "_condition": cfg.study_condition,
+        "_condition": cfg.study_condition or "REVIEW",
         "_debug_gold_shown": "1" if cfg.debug_show_gold else "0",
         **({
             "_llm_id": req.llm_id or "",
@@ -501,7 +507,7 @@ def save_row(name: str, idx: int, req: AnnotateRequest):
     panels = fb.format_panels(req.panels) if cfg.collect_feedback else None
     with _WRITE_LOCK:   # atomic read-modify-write
         out_df = init_output(out_path, df, [k.name for k in cfg.kbs], cfg.annotator,
-                             provenance=bool(cfg.study_condition),
+                             provenance=_records_provenance(cfg),
                              feedback=cfg.collect_feedback, llm=_records_llm(cfg))
         if cfg.review_mode and provenance:
             # Mode C: the pre-annotation pass wrote these; the human's first save
@@ -545,7 +551,7 @@ def save_feedback(name: str, idx: int, req: FeedbackRequest):
     kb_names = [k.name for k in cfg.kbs]
     with _WRITE_LOCK:
         out_df = init_output(out_path, df, kb_names, cfg.annotator,
-                             provenance=bool(cfg.study_condition), feedback=True,
+                             provenance=_records_provenance(cfg), feedback=True,
                              llm=_records_llm(cfg))
         if not all(str(out_df.at[idx, kb] or "").strip() for kb in kb_names):
             raise HTTPException(409, "Save the annotation before recording feedback.")

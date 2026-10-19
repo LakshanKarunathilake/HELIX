@@ -218,3 +218,19 @@ def test_human_save_keeps_ai_columns_on_queue_rows(client, sessions):
         for col in ("_llm_id", "_llm_confidence", "_llm_level", "_top1_id"):
             assert out.at[i, col] == before.at[i, col] != ""
         assert out.at[i, "_method"] != ""
+
+
+def test_human_save_in_review_session_without_study_condition_records_provenance(client, sessions):
+    name = _make(sessions, cond="")
+    preannotate(name, FakeAnn({1: ("C2", "unsure")}), FakeAPI())
+    client.post(f"/api/sessions/{name}/rows/1",
+                json={"annotations": {"UMLS": "C2"}, "top1_id": "C1", "elapsed_ms": 4200,
+                      "user_interacted": True})
+    out = _out(sessions)
+    assert out.at[1, "UMLS"] == "C2"
+    assert out.at[1, "_method"] == "user_override" and out.at[1, "_elapsed_ms"] == "4200"
+    assert out.at[1, "_condition"] == "REVIEW"
+    # AI-written columns survive the human save
+    assert out.at[1, "_route"] == "review" and out.at[1, "_llm_id"] == "C2"
+    assert out.at[1, "_llm_level"] == "unsure" and out.at[1, "_top1_id"] == "C1"
+    assert out.at[0, "_method"] == "llm_auto"

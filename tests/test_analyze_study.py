@@ -256,3 +256,25 @@ def test_minutes_saved_uses_median_human_time():
     # Human-saved queue rows took 20, 40, 10, 30 s -> median 25 s, total 100 s.
     assert s["human_minutes"] == pytest.approx(100 / 60)
     assert s["est_minutes_saved"] == pytest.approx(4 * 25 / 60)
+
+
+def test_auto_rows_a_human_resaved_do_not_count_as_auto():
+    df = _review_df()
+    # m1 was auto-accepted (right); a human later re-saved it via Jump-to (wrong).
+    df.loc[df["mention_uid"] == "m1", ["umls", "_method", "_elapsed_ms"]] = ["G0", "user_override", "5000"]
+
+    s = summarise_review(df, "umls")
+
+    assert s["n_auto"] == 4                           # routing is unchanged
+    assert s["auto_acc1"] == pytest.approx(200 / 3)   # m2 wrong, m3, m4 right; m1 excluded
+
+
+def test_review_summary_tolerates_missing_optional_columns():
+    df = _review_df().drop(columns=["_method", "_elapsed_ms", "_llm_id"])
+
+    s = summarise_review(df, "umls")
+
+    assert (s["n_auto"], s["n_review"], s["n_spotcheck"]) == (4, 3, 2)
+    assert s["spotcheck_agreement"] == pytest.approx(0.0)
+    assert s["human_minutes"] == pytest.approx(0.0)
+    assert s["est_minutes_saved"] is None

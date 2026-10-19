@@ -206,11 +206,19 @@ def summarise_review(df: pd.DataFrame, kb_col: str) -> dict:
     unprimed estimate of the same thing. Percentages are 0-100; rows not yet
     answered by a human are ignored for accuracy and time.
     """
-    route = df["_route"].astype(str).str.strip()
-    answered = df[kb_col].astype(str).str.strip() != ""
-    human_saved = answered & (df["_method"].astype(str).str.strip() != "llm_auto")
+    def col(name: str) -> pd.Series:      # optional columns read as empty
+        if name in df.columns:
+            return df[name].astype(str).str.strip()
+        return pd.Series("", index=df.index)
 
-    auto = df[(route == "auto") & answered]
+    route = col("_route")
+    method = col("_method")
+    answered = col(kb_col) != ""
+    human_saved = answered & (method != "llm_auto")
+
+    # An auto row a human later re-saved (e.g. via Jump to) carries the human's
+    # answer, not the AI's, so it no longer measures auto-accept quality.
+    auto = df[(route == "auto") & answered & (method == "llm_auto")]
     review = df[(route == "review") & human_saved]
     spot = df[(route == "spotcheck") & human_saved]
     queue = df[route.isin(["review", "spotcheck"]) & human_saved]
@@ -218,7 +226,7 @@ def summarise_review(df: pd.DataFrame, kb_col: str) -> dict:
     def pct(hits: list[bool]) -> float | None:
         return 100.0 * sum(hits) / len(hits) if hits else None
 
-    secs = pd.to_numeric(queue["_elapsed_ms"], errors="coerce").dropna() / 1000.0
+    secs = pd.to_numeric(col("_elapsed_ms")[queue.index], errors="coerce").dropna() / 1000.0
     median = float(secs.median()) if len(secs) else None
     n_auto = int((route == "auto").sum())
     return {
@@ -226,7 +234,7 @@ def summarise_review(df: pd.DataFrame, kb_col: str) -> dict:
         "n_review": int((route == "review").sum()),
         "n_spotcheck": int((route == "spotcheck").sum()),
         "auto_acc1": pct([_hit(p, g) for p, g in zip(auto[kb_col], auto["gold_cui"])]),
-        "spotcheck_agreement": pct([_hit(p, a) for p, a in zip(spot[kb_col], spot["_llm_id"])]),
+        "spotcheck_agreement": pct([_hit(p, a) for p, a in zip(spot[kb_col], col("_llm_id")[spot.index])]),
         "review_acc1": pct([_hit(p, g) for p, g in zip(review[kb_col], review["gold_cui"])]),
         "human_median_secs": median,
         "human_minutes": float(secs.sum() / 60),
