@@ -130,6 +130,24 @@ def select_blocks(
     return blocks
 
 
+def extra_blocks(
+    df: pd.DataFrame,
+    used_docs: set[str],
+    sizes: list[int],
+    seed: int = 20260906,
+) -> list[list[str]]:
+    """Blocks of >= each entry of ``sizes`` mentions, drawn only from documents
+    not in ``used_docs`` and disjoint from one another. Leaves ``select_blocks``
+    (and so the study blocks) untouched."""
+    remaining = df[~df["document_id"].isin(used_docs)]
+    out: list[list[str]] = []
+    for i, size in enumerate(sizes):
+        block = select_blocks(remaining, 1, size, seed=seed)[0]
+        out.append(block)
+        remaining = remaining[~remaining["document_id"].isin(block)]
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--blocks", type=int, default=6)
@@ -141,6 +159,8 @@ def main() -> None:
                     help="prompt for hint + confidence after every decision (Annotation Guide Sec. 8)")
     ap.add_argument("--debug", action="store_true",
                     help="also build a debug-gold session with the answers VISIBLE")
+    ap.add_argument("--dev-size", type=int, default=0,
+                    help="also build a dev-llm session of ~N mentions for the LLM bake-off")
     args = ap.parse_args()
 
     base_cfg = json.loads((SOURCE_SESSION / "session.json").read_text())
@@ -215,6 +235,33 @@ def main() -> None:
         used_uids.extend(dbg_df[UID_COL].tolist())
         print(f"\ndebug-gold          DEBUG  {len(dbg_docs)} docs  {len(dbg_df)} mentions "
               f"(gold VISIBLE — not study data)")
+
+    # Dev set for the LLM bake-off: disjoint from every study block, from the
+    # debug-gold documents (computed as the debug branch would, even without
+    # --debug) and from SEEN_DOCUMENTS (already dropped from df).
+    if args.dev_size > 0:
+        study_docs = {d for b in blocks for d in b}
+        dbg_docs = extra_blocks(session_all, study_docs, [args.size], seed=args.seed + 1)[0]
+        dev_docs = extra_blocks(
+            session_all, study_docs | set(dbg_docs), [args.dev_size], seed=args.seed + 2
+        )[0]
+        dev_df = session_all[session_all["document_id"].isin(dev_docs)].reset_index(drop=True)
+        print(f"\ndev-llm             DEV    {len(dev_docs):2d} docs  {len(dev_df):3d} mentions")
+        if not args.dry_run:
+            sdir = ROOT / "sessions" / "dev-llm"
+            sdir.mkdir(parents=True, exist_ok=True)
+            inp = sdir / "input_dev-llm.csv"
+            dev_df.to_csv(inp, index=False)
+            cfg = dict(base_cfg)
+            cfg.update(
+                session_name="dev-llm", input_path=str(inp),
+                study_condition="", collect_feedback=False,
+                enable_llm_rerank=False, entity_type_col=None,
+                info_columns=["document_id", "entity_type_name", "entity_span"],
+                **CONDITION_SETTINGS["C2"],
+            )
+            (sdir / "session.json").write_text(json.dumps(cfg, indent=2))
+            used_uids.extend(dev_df[UID_COL].tolist())
 
     if args.dry_run:
         print("\n(dry run — nothing written)")

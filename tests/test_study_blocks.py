@@ -10,7 +10,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from eval.build_study_sessions import CONDITION_ORDER, select_blocks
+from eval.build_study_sessions import CONDITION_ORDER, extra_blocks, select_blocks
 
 
 @pytest.fixture
@@ -80,3 +80,25 @@ def test_condition_order_is_balanced_across_early_and_late_slots():
 
     assert sorted(first_half) == sorted(second_half)
     assert second_half == first_half[::-1]
+
+
+def test_extra_blocks_avoid_used_documents(corpus):
+    used = {f"d{i}" for i in range(0, 30, 2)}
+    blocks = extra_blocks(corpus, used, [40, 60], seed=7)
+    flat = [d for b in blocks for d in b]
+    assert not (set(flat) & used)
+    assert len(flat) == len(set(flat))
+
+
+def test_extra_blocks_hit_requested_sizes(corpus):
+    blocks = extra_blocks(corpus, set(), [40, 200], seed=7)
+    counts = corpus.groupby("document_id").size()
+    sizes = [sum(counts[d] for d in b) for b in blocks]
+    assert sizes[0] >= 40 and sizes[1] >= 200
+
+
+def test_adding_extra_blocks_does_not_change_study_blocks(varied_corpus):
+    before = select_blocks(varied_corpus, 6, 40, seed=11)
+    used = {d for b in before for d in b}
+    extra_blocks(varied_corpus, used, [40, 200], seed=13)
+    assert select_blocks(varied_corpus, 6, 40, seed=11) == before
