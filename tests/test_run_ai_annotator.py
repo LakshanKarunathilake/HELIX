@@ -1,0 +1,174 @@
+"""Mode A runner: the LLM annotates a human study session's rows, seeing what a
+human sees in that condition, and writes an ordinary HELIX session."""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+import eltool.session as session_mod
+from eltool.llm_annotator import AnnotationDecision
+from eltool.llm_reranker import LLMRerankError
+from eltool.session import reflection_path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "eval"))
+import run_ai_annotator as R  # noqa: E402
+
+SRC = "study2-1-c2"
+
+
+@pytest.fixture(autouse=True)
+def sessions(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+    return tmp_path
+
+
+def _make_source(tmp_path, name=SRC, condition="C2"):
+    sdir = tmp_path / name
+    sdir.mkdir(parents=True)
+    inp = sdir / "input.csv"
+    pd.DataFrame({"entity_text": ["lung", "DM"], "document_id": ["d1", "d2"]}).to_csv(inp, index=False)
+    cfg = {"session_name": name, "annotator": "human", "input_path": str(inp),
+           "delimiter": ",", "label_column": "entity_text",
+           "kbs": [{"name": "UMLS", "endpoint_url": "http://x/query"}],
+           "study_condition": condition, "enable_llm_rerank": True}
+    (sdir / "session.json").write_text(json.dumps(cfg))
+    return name
+
+
+def _saved(tmp_path, name):
+    return pd.read_csv(tmp_path / name / "annotated.csv", dtype=str, keep_default_na=False)
+
+
+def _cand(i):
+    return {"id": i, "label": i, "score": 0.9, "matched_alias": "", "aliases": [],
+            "semantic_groups": [], "semantic_types": [], "definition": ""}
+
+
+class FakeAPI:
+    def __init__(self, dense=("C1", "C2"), lexical=("C2", "C3")):
+        self.dense, self.lexical = list(dense), list(lexical)
+        self.graph_calls = []
+
+    def row(self, session, idx):
+        return {"idx": idx, "total": 2, "label": ["lung", "DM"][idx], "context_text": None}
+
+    def candidates(self, session, label, kb, context):
+        return {"dense_candidates": [_cand(i) for i in self.dense],
+                "lexical_candidates": [_cand(i) for i in self.lexical]}
+
+    def graph(self, session, ids):
+        self.graph_calls.append(list(ids))
+        return {"nodes": [{"id": "C1", "label": "Lung"}],
+                "edges": [{"source": "C1", "target": "C2", "type": "isa"}], "enabled": True}
+
+
+class FakeAnn:
+    model, provider = "m", "openai"
+
+    def __init__(self, fail_first=False):
+        self.calls, self.seen, self.fail_first = 0, [], fail_first
+
+    def annotate(self, mention, context, candidates, *, suggested_id=None, graph_evidence=""):
+        self.calls += 1
+        self.seen.append({"suggested": suggested_id, "graph": graph_evidence,
+                          "ids": [c["id"] for c in candidates], "context": context})
+        if self.fail_first and self.calls == 1:
+            raise LLMRerankError("boom")
+        return AnnotationDecision("C1", "definition", "sure", 0.9, "because", "m", "openai", 12, False)
+
+    def reflect(self, decisions):
+        return {"ranking": ["definition", "name", "alias", "type", "context", "graph",
+                            "popularity", "other", "none"][:9], "comment": "ok"}
+
+
+def test_writes_every_row_with_protocol_columns(sessions):
+    _make_source(sessions)
+    ann = FakeAnn()
+    stats = R.run_session(SRC, ann, FakeAPI())
+    out = _saved(sessions, "ai-m-" + SRC)
+    assert stats["llm"] == 2
+    assert list(out["annotator"]) == ["llm:m", "llm:m"]
+    assert out.at[0, "UMLS"] == "C1"
+    assert out.at[0, "_hint"] == "definition" and out.at[0, "_confidence"] == "sure"
+    assert out.at[0, "_llm_confidence"] == "0.900" and out.at[0, "_rationale"] == "because"
+    assert out.at[0, "_top1_id"] == "C1" and out.at[0, "_condition"] == "C2"
+    assert out.at[0, "_selected_rank"] == "1" and out.at[0, "_panels"] == "none"
+    # model sees dense then novel lexical ids
+    assert ann.seen[0]["ids"] == ["C1", "C2", "C3"]
+
+
+@pytest.mark.parametrize("cond,sugg,graph", [("C1", None, False), ("C2", "C1", False),
+                                             ("C3", "C1", True), ("DEV", "C1", False),
+                                             ("X9", "C1", False)])
+def test_condition_controls_what_the_model_sees(sessions, cond, sugg, graph):
+    name = _make_source(sessions, "src-" + cond.lower(), cond)
+    ann, api = FakeAnn(), FakeAPI()
+    R.run_session(name, ann, api)
+    assert ann.seen[0]["suggested"] == sugg
+    assert bool(ann.seen[0]["graph"]) is graph
+    if graph:
+        assert api.graph_calls[0] == ["C1", "C2", "C3"]
+    else:
+        assert api.graph_calls == []
+
+
+def test_rerun_skips_rows_already_written(sessions):
+    _make_source(sessions)
+    ann = FakeAnn()
+    R.run_session(SRC, ann, FakeAPI(), limit=1)
+    R.run_session(SRC, ann, FakeAPI())
+    assert ann.calls == 2
+
+
+def test_model_error_is_recorded_and_run_continues(sessions):
+    _make_source(sessions)
+    name = "ai-m-" + SRC
+    stats = R.run_session(SRC, FakeAnn(fail_first=True), FakeAPI())
+    out = _saved(sessions, name)
+    assert stats["error"] == 1
+    assert "boom" in out.at[0, "_llm_error"] and out.at[0, "_method"] == "" and out.at[0, "UMLS"] == ""
+    assert out.at[1, "_method"] == "llm"
+    assert not reflection_path(name).exists()          # open row -> no reflection yet
+    ok = FakeAnn()
+    R.run_session(SRC, ok, FakeAPI())
+    out = _saved(sessions, name)
+    assert ok.calls == 1
+    assert out.at[0, "_method"] == "llm" and out.at[0, "_llm_error"] == ""
+    assert reflection_path(name).exists()
+
+
+def test_no_candidates_writes_nil_without_calling_model(sessions):
+    _make_source(sessions)
+    ann = FakeAnn()
+    R.run_session(SRC, ann, FakeAPI(dense=(), lexical=()))
+    out = _saved(sessions, "ai-m-" + SRC)
+    assert out.at[0, "UMLS"] == "NIL" and out.at[0, "_method"] == "llm_no_candidates"
+    assert out.at[0, "_top1_id"] == "" and ann.calls == 0
+
+
+def test_reflection_written_once_at_the_end(sessions):
+    _make_source(sessions)
+    name = "ai-m-" + SRC
+    R.run_session(SRC, FakeAnn(), FakeAPI())
+    rec = json.loads(reflection_path(name).read_text())
+    assert rec["annotator"] == "llm:m" and rec["session_name"] == name
+    assert rec["study_condition"] == "C2" and rec["comment"] == "ok" and len(rec["ranking"]) == 9
+    reflection_path(name).write_text('{"keep": 1}')
+    R.run_session(SRC, FakeAnn(), FakeAPI())
+    assert json.loads(reflection_path(name).read_text()) == {"keep": 1}
+
+
+def test_names_and_session_copy(sessions):
+    assert R.ai_session_name("openai/gpt-oss-120b", "s1") == "ai-openai-gpt-oss-120b-s1"
+    _make_source(sessions, condition="")
+    n = R.make_ai_session(SRC, "openai/x")
+    assert R.make_ai_session(SRC, "openai/x") == n
+    cfg = json.loads((sessions / n / "session.json").read_text())
+    assert cfg["annotator"] == "llm:openai/x" and cfg["collect_feedback"] is True
+    assert cfg["enable_llm_rerank"] is False and cfg["study_condition"] == "DEV"
+    assert Path(cfg["input_path"]).parent == sessions / n and Path(cfg["input_path"]).exists()

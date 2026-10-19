@@ -27,6 +27,9 @@ HINT_COL = "_hint"
 CONFIDENCE_COL = "_confidence"
 FEEDBACK_COLS = [PANELS_COL, HINT_COL, CONFIDENCE_COL]
 
+# Extra columns written only by the AI annotator runner (eval/run_ai_annotator.py).
+AI_COLS = ["_llm_confidence", "_rationale", "_llm_error"]
+
 
 def detect_delimiter(path: Path) -> str:
     sample = Path(path).read_text(errors="replace")[:4096]
