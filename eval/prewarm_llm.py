@@ -11,6 +11,16 @@ Needs HELIX running (for retrieval) and the LLM reachable. Prompts for nothing;
 each session's own llm_* settings are used (API key from the session config,
 else the provider's env var, as the reranker does).
 
+Run it ON THE HELIX HOST with the same HELIX_LLM_CACHE_DIR as the server
+(default ~/.cache/helix_llm_rerank): the cache is a local directory, and the
+server only ever reads the one it was started with.
+
+Retrieval failures are not cached. The /candidates endpoint turns a KB error
+into an empty list, so a row whose enabled dense or lexical list comes back
+empty is counted ``failed`` and left uncached — caching a fused list built from
+half the retrieval would give a key the live endpoint never produces. Exit
+status is 1 when any row failed; rerun to retry (cached rows are skipped).
+
 Run:  python eval/prewarm_llm.py --prefix study3 [--helix http://127.0.0.1:8000]
 """
 from __future__ import annotations
@@ -52,6 +62,21 @@ def _fused(resp: dict) -> list[SimpleNamespace]:
     return _fuse_candidates(dense, lexical)
 
 
+class RetrievalGap(Exception):
+    """An enabled retrieval list came back empty (likely a swallowed KB error)."""
+
+
+def _check_retrieval(resp: dict, kb) -> None:
+    dense = resp.get("dense_candidates") or []
+    lexical = resp.get("lexical_candidates") or []
+    if not dense and not lexical:
+        raise RetrievalGap("no candidates (KB down or nothing retrieved)")
+    if kb.enable_dense and not dense:
+        raise RetrievalGap("dense list empty while lexical returned results")
+    if kb.enable_lexical and not lexical:
+        raise RetrievalGap("lexical list empty while dense returned results")
+
+
 def prewarm_session(session: str, api: HelixAPI) -> Counter:
     cfg = _session_config(session, api)
     stats: Counter = Counter({"cached": 0, "computed": 0, "failed": 0})
@@ -67,19 +92,20 @@ def prewarm_session(session: str, api: HelixAPI) -> Counter:
             row = api.row(session, i)
             context = row.get("context_text")
             for kb in cfg.kbs:
-                fused = _fused(api.candidates(session, row["label"], kb.name, context))
-                if not fused:      # the endpoint skips the LLM too
-                    continue
-                result = reranker.rank(row["label"], context, fused)
+                resp = api.candidates(session, row["label"], kb.name, context)
+                _check_retrieval(resp, kb)
+                result = reranker.rank(row["label"], context, _fused(resp))
                 stats["cached" if result.cached else "computed"] += 1
-        except (LLMRerankError, requests.RequestException) as e:
+        except (RetrievalGap, LLMRerankError, requests.RequestException) as e:
             print(f"  {session} row {i}: {e}", file=sys.stderr)
             stats["failed"] += 1
     return stats
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n")[0],
+        epilog="Run on the HELIX host with the same HELIX_LLM_CACHE_DIR as the server.")
     ap.add_argument("--prefix", required=True, help="session folder prefix, e.g. study3")
     ap.add_argument("--helix", default="http://127.0.0.1:8000")
     a = ap.parse_args(argv)

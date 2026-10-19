@@ -197,7 +197,7 @@ def extra_blocks(
     return out
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--blocks", type=int, default=None,
                     help="number of blocks (default: two per condition)")
@@ -216,11 +216,13 @@ def main() -> None:
                     help="also build a debug-gold session with the answers VISIBLE")
     ap.add_argument("--dev-size", type=int, default=0,
                     help="also build a dev-llm session of ~N mentions for the LLM bake-off")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     conds = [c.strip().upper() for c in args.conditions.split(",") if c.strip()]
     unknown = [c for c in conds if c not in CONDITION_SETTINGS]
     if unknown:
         ap.error(f"unknown condition(s): {', '.join(unknown)}")
+    if "C4" in conds and not (args.llm_model and args.llm_base_url):
+        ap.error("C4 needs --llm-model and --llm-base-url (the model the annotator is shown)")
     order = condition_order(conds)
     if args.blocks is None:
         args.blocks = len(order)

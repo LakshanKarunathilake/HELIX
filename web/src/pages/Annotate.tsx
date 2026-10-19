@@ -806,7 +806,7 @@ export function Annotate() {
                   const r = candidates[kb.name]!
                   const pick = [...(r.dense ?? []), ...(r.lexical ?? [])]
                     .find(c => c.id === r.llm!.entity_id)
-                  return <LLMPickBanner llm={r.llm!} label={pick?.label} />
+                  return <LLMPickBanner llm={r.llm!} label={pick?.label} precomputed={!!cfg.llm_cache_only} />
                 })()}
 
                 {/* candidates */}
@@ -1064,7 +1064,7 @@ function Err({ msg }: { msg: string }) {
 
 // ── LLMPickBanner ─────────────────────────────────────────────────────────────
 
-function LLMPickBanner({ llm, label }: { llm: LLMRerank; label?: string }) {
+function LLMPickBanner({ llm, label, precomputed }: { llm: LLMRerank; label?: string; precomputed?: boolean }) {
   if (llm.error) {
     return (
       <div className="flex items-center gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
@@ -1084,7 +1084,7 @@ function LLMPickBanner({ llm, label }: { llm: LLMRerank; label?: string }) {
       </div>
       {llm.rationale && <p className="text-xs text-violet-700 leading-snug">{llm.rationale}</p>}
       <p className="text-[10px] text-violet-400">
-        {llm.model}{llm.cached ? ' · DGX (local) · precomputed' : ''}
+        {llm.model}{llm.cached ? (precomputed ? ' · DGX (local) · precomputed' : ' · cached') : ''}
       </p>
     </div>
   )

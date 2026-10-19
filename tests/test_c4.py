@@ -158,26 +158,29 @@ def test_cache_only_session_returns_candidates_and_llm_error_on_miss(
     assert fake_llm == []          # the model was never called
 
 
+class ClientHelix(HelixAPI):
+    """HelixAPI over a FastAPI TestClient instead of the network."""
+
+    def __init__(self, tc):
+        super().__init__("")
+        self.tc = tc
+
+    def _get(self, url):
+        r = self.tc.get(url)
+        r.raise_for_status()
+        return r.json()
+
+    def _post(self, url, body):
+        r = self.tc.post(url, json=body)
+        r.raise_for_status()
+        return r.json()
+
+
 def test_prewarm_then_cache_only_api_hits(client, tmp_path, fake_kb, fake_llm):
     from eval.prewarm_llm import prewarm_session
 
-    class TestClientHelix(HelixAPI):
-        def __init__(self, tc):
-            super().__init__("")
-            self.tc = tc
-
-        def _get(self, url):
-            r = self.tc.get(url)
-            r.raise_for_status()
-            return r.json()
-
-        def _post(self, url, body):
-            r = self.tc.post(url, json=body)
-            r.raise_for_status()
-            return r.json()
-
     _make_session(tmp_path, "s-c4", **C4)
-    api = TestClientHelix(client)
+    api = ClientHelix(client)
 
     stats = prewarm_session("s-c4", api)
     assert stats == {"cached": 0, "computed": 2, "failed": 0}
@@ -195,3 +198,51 @@ def test_prewarm_then_cache_only_api_hits(client, tmp_path, fake_kb, fake_llm):
     assert llm["cached"] is True
     assert llm["entity_id"] == "C1"          # ids[1] of fused order C3, C1, C2, C4
     assert len(fake_llm) == 2                # human session never called the model
+
+
+def _kb_failing(monkeypatch, which: set[str]):
+    """KB whose dense and/or lexical endpoint raises (the API swallows it -> [])."""
+    def query(self, label):
+        side = "lexical" if self.cfg.endpoint_url.endswith("/lexical") else "dense"
+        if side in which:
+            raise RuntimeError(f"{side} down")
+        return list(LEXICAL if side == "lexical" else DENSE)
+
+    monkeypatch.setattr(KBClient, "query", query)
+
+
+def _cache_files(tmp_path):
+    d = tmp_path / "_llm_cache"
+    return list(d.glob("*.json")) if d.exists() else []
+
+
+def test_prewarm_counts_empty_retrieval_as_failed_and_caches_nothing(
+        client, tmp_path, monkeypatch, fake_llm):
+    from eval.prewarm_llm import main, prewarm_session
+
+    _kb_failing(monkeypatch, {"dense", "lexical"})
+    _make_session(tmp_path, "s-c4", **C4)
+    assert prewarm_session("s-c4", ClientHelix(client)) == \
+        {"cached": 0, "computed": 0, "failed": 2}
+    assert fake_llm == [] and _cache_files(tmp_path) == []
+
+
+@pytest.mark.parametrize("down", ["dense", "lexical"])
+def test_prewarm_one_sided_retrieval_failure_is_failed_not_cached(
+        client, tmp_path, monkeypatch, fake_llm, down):
+    from eval.prewarm_llm import prewarm_session
+
+    _kb_failing(monkeypatch, {down})
+    _make_session(tmp_path, "s-c4", **C4)
+    assert prewarm_session("s-c4", ClientHelix(client)) == \
+        {"cached": 0, "computed": 0, "failed": 2}
+    assert fake_llm == [] and _cache_files(tmp_path) == []
+
+
+def test_prewarm_cli_exits_nonzero_when_rows_fail(client, tmp_path, monkeypatch, fake_llm):
+    import eval.prewarm_llm as P
+
+    _kb_failing(monkeypatch, {"lexical"})
+    _make_session(tmp_path, "s-c4", **C4)
+    monkeypatch.setattr(P, "HelixAPI", lambda base: ClientHelix(client))
+    assert P.main(["--prefix", "s-"]) == 1

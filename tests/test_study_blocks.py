@@ -137,3 +137,17 @@ def test_other_conditions_never_show_the_llm(cond):
     cfg = study_session_config(BASE, f"s-{cond}", "/x.csv", cond, feedback=False, llm=LLM)
     assert cfg["enable_llm_rerank"] is False
     assert cfg["llm_model"] == "claude-haiku-4-5"      # untouched outside C4
+
+
+@pytest.mark.parametrize("extra", [
+    [],
+    ["--llm-model", "openai/gpt-oss-120b"],
+    ["--llm-base-url", "http://127.0.0.1:18000/v1"],
+])
+def test_c4_without_model_and_endpoint_is_rejected(extra, capsys):
+    from eval.build_study_sessions import main
+
+    with pytest.raises(SystemExit) as e:
+        main(["--dry-run", "--conditions", "C1,C2,C3,C4", *extra])
+    assert e.value.code == 2
+    assert "C4 needs --llm-model and --llm-base-url" in capsys.readouterr().err
