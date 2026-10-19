@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from eltool.config import KBConfig, SessionConfig
 from eltool import feedback as fb
 from eltool.provenance import classify_method
+from eltool.review import review_payload
 from eltool.graph_client import GraphError, Neo4jGraphClient, load_neo4j_settings
 from eltool.kb_client import KBClient
 from eltool.llm_reranker import LLMRerankError, LLMReranker
@@ -43,7 +44,7 @@ from eltool.session import (
     reflection_path, session_config_path, session_dir,
 )
 from eltool.store import (
-    ANNOTATOR_COL, CONFIDENCE_COL, HINT_COL, LLM_COL, detect_delimiter,
+    ANNOTATOR_COL, CONFIDENCE_COL, HINT_COL, LLM_COL, ROUTE_COL, detect_delimiter,
     find_resume_index, init_output, load_input, save_output, write_feedback, write_row,
 )
 
@@ -120,6 +121,8 @@ class CreateSessionRequest(BaseModel):
     study_condition: str = ""
     collect_feedback: bool = False
     debug_show_gold: bool = False
+    review_mode: bool = False
+    review_spotcheck_rate: float = 0.1
 
 
 @app.post("/api/sessions")
@@ -171,6 +174,8 @@ def create_session(req: CreateSessionRequest):
             study_condition=req.study_condition,
             collect_feedback=req.collect_feedback,
             debug_show_gold=req.debug_show_gold,
+            review_mode=req.review_mode,
+            review_spotcheck_rate=req.review_spotcheck_rate,
         )
     except ValidationError as e:
         raise HTTPException(400, str(e))
@@ -248,7 +253,17 @@ def get_progress(name: str):
         resume = total if bool(filled.all()) else int((~filled).to_numpy().argmax())
     else:
         done, resume = 0, 0
-    return {"total": total, "done": done, "resume_idx": resume}
+    result: dict[str, Any] = {"total": total, "done": done, "resume_idx": resume}
+    if cfg.review_mode:
+        routes = (out_df[ROUTE_COL].astype(str) if ROUTE_COL in out_df.columns
+                  else pd.Series("", index=out_df.index))
+        queue = [int(i) for i in out_df.index[routes.isin(["review", "spotcheck"])]]
+        first_open = next((i for i in queue
+                           if not all(str(out_df.at[i, kb]).strip() for kb in kb_names)),
+                          len(out_df))
+        result["queue"] = queue
+        result["resume_idx"] = first_open
+    return result
 
 
 # ── rows ──────────────────────────────────────────────────────────────────────
@@ -389,6 +404,7 @@ def get_row(name: str, idx: int):
         "debug_gold": debug_gold,   # None unless the session enables debug_show_gold
         "debug_gold_info": debug_gold_info,
         "feedback": feedback,
+        "review": review_payload(out_df, idx) if cfg.review_mode else None,
     }
 
 

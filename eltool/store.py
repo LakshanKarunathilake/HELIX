@@ -34,6 +34,13 @@ LLM_PROVENANCE_COLS = ["_llm_id", "_llm_confidence"]
 # Extra columns written only by the AI annotator runner (eval/run_ai_annotator.py).
 AI_COLS = ["_llm_confidence", "_rationale", "_llm_error"]
 
+# Mode C (eltool/review.py): where each row was routed, and what the AI said.
+# `_llm_level` is the confidence level (sure/fairly_sure/unsure); the numeric
+# confidence lives in `_llm_confidence`.
+ROUTE_COL = "_route"
+REVIEW_COLS = [ROUTE_COL, "_llm_id", "_llm_level", "_llm_confidence", "_llm_label",
+               "_rationale", "_llm_error", "_top1_id"]
+
 
 def detect_delimiter(path: Path) -> str:
     sample = Path(path).read_text(errors="replace")[:4096]
