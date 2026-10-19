@@ -26,7 +26,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +113,8 @@ def _render_candidates(cands: list[dict[str, Any]]) -> str:
 class LLMReranker:
     """Claude-backed re-ranker over a retrieved candidate set."""
 
+    CACHE_NAMESPACE: str = ""
+
     def __init__(
         self,
         model: str = DEFAULT_MODEL,
@@ -123,12 +125,16 @@ class LLMReranker:
         base_url: str | None = None,
         use_cache: bool = True,
         timeout: float = 30.0,
+        temperature: float | None = None,
+        cache_only: bool = False,
     ):
         self.provider = (provider or "anthropic").lower()
         self.model = model or DEFAULT_MODEL
         self.top_n = top_n or DEFAULT_TOP_N
         self.timeout = timeout
         self.use_cache = use_cache
+        self.temperature = temperature
+        self.cache_only = cache_only
         self.base_url = base_url or None
         self.system_prompt = (system_prompt or "").strip() or DEFAULT_SYSTEM_PROMPT
         self._api_key = api_key or self._default_key()
@@ -156,17 +162,15 @@ class LLMReranker:
         if len(ctx) > MAX_CONTEXT_CHARS:
             ctx = ctx[:MAX_CONTEXT_CHARS] + " …[truncated]"
 
-        cache_key = self._cache_key(mention, ctx, cands)
-        if self.use_cache:
-            hit = self._cache_read(cache_key)
-            if hit is not None:
-                return RerankResult(**{**hit, "cached": True})
+        ids = [c["id"] for c in cands]
+        key = self._cache_key(mention, ctx, cands)
 
-        result = self._call_api(mention, ctx, cands)
+        def call() -> dict[str, Any]:
+            data = self._request(self._user_text(mention, ctx, cands), self._json_schema(ids))
+            return self._finalize(data, ids).to_dict()
 
-        if self.use_cache:
-            self._cache_write(cache_key, result.to_dict())
-        return result
+        value, cached = self._cached_call(key, call)
+        return RerankResult(**{**value, "cached": cached})
 
     # ── internals ────────────────────────────────────────────────────────────
     def _client_lazy(self):
@@ -241,63 +245,80 @@ class LLMReranker:
             provider=self.provider,
         )
 
-    def _call_api(self, mention: str, ctx: str, cands: list[dict[str, Any]]) -> RerankResult:
+    def _request(self, user_text: str, schema: dict[str, Any],
+                 tool_name: str = "select_entity") -> dict[str, Any]:
+        """Single provider-dispatching request path; returns the tool-call arguments."""
         if self.provider == "openai":
-            return self._call_openai(mention, ctx, cands)
-        return self._call_anthropic(mention, ctx, cands)
+            return self._request_openai(user_text, schema, tool_name)
+        return self._request_anthropic(user_text, schema, tool_name)
 
-    def _call_anthropic(self, mention, ctx, cands) -> RerankResult:
+    def _request_anthropic(self, user_text, schema, tool_name) -> dict[str, Any]:
         client = self._client_lazy()
-        ids = [c["id"] for c in cands]
-        tool = {"name": "select_entity",
+        tool = {"name": tool_name,
                 "description": "Record the chosen knowledge-base entity for the mention.",
-                "input_schema": self._json_schema(ids)}
+                "input_schema": schema}
+        kwargs: dict[str, Any] = dict(
+            model=self.model, max_tokens=1024,
+            system=[{"type": "text", "text": self.system_prompt,
+                     "cache_control": {"type": "ephemeral"}}],
+            tools=[tool], tool_choice={"type": "tool", "name": tool_name},
+            messages=[{"role": "user", "content": user_text}],
+        )
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
         try:
-            resp = client.messages.create(
-                model=self.model, max_tokens=1024,
-                system=[{"type": "text", "text": self.system_prompt,
-                         "cache_control": {"type": "ephemeral"}}],
-                tools=[tool], tool_choice={"type": "tool", "name": "select_entity"},
-                messages=[{"role": "user", "content": self._user_text(mention, ctx, cands)}],
-            )
+            resp = client.messages.create(**kwargs)
         except Exception as e:
             raise LLMRerankError(f"LLM request failed: {e}") from e
         block = next((b for b in resp.content if getattr(b, "type", None) == "tool_use"), None)
         if block is None:
             raise LLMRerankError("Model did not return a tool_use block.")
-        return self._finalize(block.input or {}, ids)
+        return dict(block.input or {})
 
-    def _call_openai(self, mention, ctx, cands) -> RerankResult:
+    def _request_openai(self, user_text, schema, tool_name) -> dict[str, Any]:
         """OpenAI-compatible backend — also serves Gemini (compat endpoint), Azure, local."""
         client = self._client_lazy()
-        ids = [c["id"] for c in cands]
         tool = {"type": "function",
-                "function": {"name": "select_entity",
+                "function": {"name": tool_name,
                              "description": "Record the chosen knowledge-base entity for the mention.",
-                             "parameters": self._json_schema(ids)}}
+                             "parameters": schema}}
+        kwargs: dict[str, Any] = dict(
+            model=self.model, max_tokens=1024,
+            messages=[{"role": "system", "content": self.system_prompt},
+                      {"role": "user", "content": user_text}],
+            tools=[tool],
+            tool_choice={"type": "function", "function": {"name": tool_name}},
+        )
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
         try:
-            resp = client.chat.completions.create(
-                model=self.model, max_tokens=1024,
-                messages=[{"role": "system", "content": self.system_prompt},
-                          {"role": "user", "content": self._user_text(mention, ctx, cands)}],
-                tools=[tool],
-                tool_choice={"type": "function", "function": {"name": "select_entity"}},
-            )
+            resp = client.chat.completions.create(**kwargs)
         except Exception as e:
             raise LLMRerankError(f"LLM request failed: {e}") from e
         calls = getattr(resp.choices[0].message, "tool_calls", None) or []
         if not calls:
             raise LLMRerankError("Model did not return a function call.")
         try:
-            data = json.loads(calls[0].function.arguments or "{}")
+            return json.loads(calls[0].function.arguments or "{}")
         except (TypeError, ValueError) as e:
             raise LLMRerankError(f"Bad function-call arguments: {e}") from e
-        return self._finalize(data, ids)
+
+    def _cached_call(self, key: str, call: Callable[[], dict[str, Any]]) -> tuple[dict[str, Any], bool]:
+        if self.use_cache:
+            hit = self._cache_read(key)
+            if hit is not None:
+                return hit, True
+        if self.cache_only:
+            raise LLMRerankError("cache miss (cache_only)")
+        value = call()
+        if self.use_cache:
+            self._cache_write(key, value)
+        return value, False
 
     # ── on-disk cache ────────────────────────────────────────────────────────
-    def _cache_key(self, mention: str, ctx: str, cands: list[dict[str, Any]]) -> str:
-        payload = json.dumps(
-            {
+    def _cache_key(self, mention: str, ctx: str, cands: list[dict[str, Any]],
+                   extra: dict[str, Any] | None = None) -> str:
+        body = {
                 "provider": self.provider,
                 "base_url": self.base_url or "",
                 "model": self.model,
@@ -305,10 +326,12 @@ class LLMReranker:
                 "mention": mention,
                 "context": ctx,
                 "candidates": [{"id": c["id"], "label": c["label"]} for c in cands],
-            },
-            sort_keys=True,
-            ensure_ascii=False,
-        )
+        }
+        if self.CACHE_NAMESPACE:
+            body["ns"] = self.CACHE_NAMESPACE
+        if extra is not None:
+            body["extra"] = extra
+        payload = json.dumps(body, sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _cache_path(self, key: str) -> Path:
