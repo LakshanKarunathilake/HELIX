@@ -25,13 +25,14 @@ for _p in (str(ROOT), str(Path(__file__).resolve().parent)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+import requests  # noqa: E402
 import eltool.session as session_mod  # noqa: E402  (module attr read at call time)
 from eltool.config import SessionConfig  # noqa: E402
 from eltool.llm_annotator import AnnotationDecision, LLMAnnotator  # noqa: E402
 from eltool.llm_evidence import render_graph_evidence  # noqa: E402
 from eltool.llm_reranker import LLMRerankError  # noqa: E402
 from eltool.store import (  # noqa: E402
-    AI_COLS, init_output, load_input, save_output, write_feedback, write_row,
+    AI_COLS, init_output, load_input, save_output, write_row,
 )
 from helix_api import HelixAPI  # noqa: E402
 
@@ -125,38 +126,36 @@ def run_session(source: str, annotator: LLMAnnotator, api: HelixAPI,
     for i in range(n):
         if _filled(df, kb, i):
             continue
-        row = api.row(source, i)
-        context = row.get("context_text") or None
-        resp = api.candidates(source, row["label"], kb, context)
-        cands, dense_ids = _merged_candidates(resp)
-        if not cands:
-            write_row(out_path, df, i, cfg.annotator, {kb: "NIL"}, llm_used="",
-                      provenance=decision_columns(None, dense_ids, cond, "llm_no_candidates"))
-            df.at[i, "_llm_error"] = ""
-            save_output(out_path, df)
-            stats["llm_no_candidates"] += 1
-            continue
-        suggested = None if cond == "C1" else (dense_ids[0] if dense_ids else None)
-        evidence = ""
         try:
-            if cond == "C3":
-                evidence = render_graph_evidence(api.graph(source, [c["id"] for c in cands]),
-                                                 [c["id"] for c in cands])
-            d = annotator.annotate(row["label"], context, cands,
-                                   suggested_id=suggested, graph_evidence=evidence)
-        except LLMRerankError as e:
+            row = api.row(source, i)
+            context = row.get("context_text") or None
+            resp = api.candidates(source, row["label"], kb, context)
+            cands, dense_ids = _merged_candidates(resp)
+            d = None
+            if cands:
+                suggested = None if cond == "C1" else (dense_ids[0] if dense_ids else None)
+                evidence = ""
+                if cond == "C3":
+                    ids = [c["id"] for c in cands]
+                    evidence = render_graph_evidence(api.graph(source, ids), ids)
+                d = annotator.annotate(row["label"], context, cands,
+                                       suggested_id=suggested, graph_evidence=evidence)
+        except (LLMRerankError, requests.RequestException) as e:
             df.at[i, "_llm_error"] = str(e)
             save_output(out_path, df)
             stats["error"] += 1
             continue
-        prov = decision_columns(d, dense_ids, cond, "llm")
-        df.at[i, "_llm_error"] = ""
-        write_row(out_path, df, i, cfg.annotator, {kb: d.entity_id},
-                  llm_used=f"{annotator.provider}/{annotator.model}", provenance=prov)
-        for col in ("_llm_confidence", "_rationale"):
+        method = "llm" if d else "llm_no_candidates"
+        prov = decision_columns(d, dense_ids, cond, method)
+        # Fill the whole row on the dataframe first so write_row's single save
+        # carries KB + feedback + AI columns together (crash-safe resume).
+        for col in ("_llm_confidence", "_rationale", "_hint", "_confidence"):
             df.at[i, col] = prov[col]
-        write_feedback(out_path, df, i, d.hint, d.confidence_level)
-        stats["llm"] += 1
+        df.at[i, "_llm_error"] = ""
+        write_row(out_path, df, i, cfg.annotator, {kb: d.entity_id if d else "NIL"},
+                  llm_used=f"{annotator.provider}/{annotator.model}" if d else "",
+                  provenance=prov)
+        stats[method] += 1
 
     _maybe_reflect(name, cfg, df, kb, annotator)
     return stats

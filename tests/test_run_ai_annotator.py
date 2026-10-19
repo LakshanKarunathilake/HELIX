@@ -172,3 +172,39 @@ def test_names_and_session_copy(sessions):
     assert cfg["annotator"] == "llm:openai/x" and cfg["collect_feedback"] is True
     assert cfg["enable_llm_rerank"] is False and cfg["study_condition"] == "DEV"
     assert Path(cfg["input_path"]).parent == sessions / n and Path(cfg["input_path"]).exists()
+
+
+def test_one_save_carries_whole_row(sessions, monkeypatch):
+    _make_source(sessions)
+    import eltool.store as store
+    real = store.save_output
+    seen = []
+
+    def spy(path, df):
+        real(path, df)
+        if Path(path).name == "annotated.csv" and df.at[0, "UMLS"]:
+            seen.append((df.at[0, "_hint"], df.at[0, "_confidence"], df.at[0, "_rationale"]))
+
+    monkeypatch.setattr(store, "save_output", spy)
+    monkeypatch.setattr(R, "save_output", spy)
+    R.run_session(SRC, FakeAnn(), FakeAPI(), limit=1)
+    # first save that has the KB cell already has the feedback with it
+    assert seen and seen[0] == ("definition", "sure", "because")
+
+
+def test_http_error_is_recorded_and_run_continues(sessions):
+    import requests
+    _make_source(sessions)
+
+    class Flaky(FakeAPI):
+        def candidates(self, session, label, kb, context):
+            if label == "lung":
+                raise requests.ConnectionError("down")
+            return super().candidates(session, label, kb, context)
+
+    stats = R.run_session(SRC, FakeAnn(), Flaky())
+    out = _saved(sessions, "ai-m-" + SRC)
+    assert stats["error"] == 1 and "down" in out.at[0, "_llm_error"]
+    assert out.at[0, "UMLS"] == "" and out.at[1, "_method"] == "llm"
+    R.run_session(SRC, FakeAnn(), FakeAPI())
+    assert _saved(sessions, "ai-m-" + SRC).at[0, "_llm_error"] == ""
