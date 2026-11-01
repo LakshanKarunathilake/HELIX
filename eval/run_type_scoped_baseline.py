@@ -157,7 +157,7 @@ def fetch(args) -> None:
     print("done", flush=True)
 
 
-def build_scope(name: str, rows: list[dict], umls_meta: Path, semgroups: Path):
+def build_scope(name: str, rows: list[dict], umls_meta: Path, semgroups: Path | None):
     """-> (TypeScope, candidate-TUI lookup, gold-TUI lookup)."""
     mrsty = umls_meta / "MRSTY.RRF"
     if DATASETS[name]["kb_ids"] == "umls":
@@ -165,6 +165,8 @@ def build_scope(name: str, rows: list[dict], umls_meta: Path, semgroups: Path):
         golds = set().union(*(gold_ids(r["gold_cui"]) for r in rows))
         cui_tuis = load_cui_tuis(mrsty, golds)
         return scope, (lambda cid, types: parse_tuis(types)), cui_tuis
+    if semgroups is None:
+        raise SystemExit("--semgroups (or env SEMGROUPS) is required for BC5CDR")
     cached = OUT / "mesh_tuis.json"
     if cached.exists():
         mesh_tuis = {k: set(v) for k, v in json.load(open(cached)).items()}
@@ -178,7 +180,8 @@ def build_scope(name: str, rows: list[dict], umls_meta: Path, semgroups: Path):
 def score(args) -> None:
     rows = load_rows(args.dataset)
     cache = load_cache(args.dataset)
-    scope, cand_tuis, id_tuis = build_scope(args.dataset, rows, Path(args.umls_meta), Path(args.semgroups))
+    scope, cand_tuis, id_tuis = build_scope(args.dataset, rows, Path(args.umls_meta),
+                                            Path(args.semgroups) if args.semgroups else None)
 
     by_split: dict[str, list] = defaultdict(list)
     by_type: dict[tuple, list] = defaultdict(list)
