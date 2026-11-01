@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-16-ai-annotation-design.md` (Sections 6–7 define behaviour; Sections 3–5 are the DGX/connection runbook, done by hand, not by this plan).
 
+**Approved designs:** https://claude.ai/artifact/Ld5p5UqrvkTGSNZ2dnbY3X — screens follow these mockups (approved 2026-10-19).
+
 ## Global Constraints
 
 - No AI-side code reads `eval/out/study_gold.csv` or any `gold_cui` column. Only `eval/analyze_study.py` joins gold.
@@ -205,7 +207,7 @@ Lines are `"<src> (<name>) —[<rel or 'related'>]— <tgt> (<name>)"`; edges wh
   - `make_ai_session(source: str, model: str) -> str` — copies the source `session.json` and input file into the new folder; sets `annotator="llm:<model>"`, `collect_feedback=True`, `enable_llm_rerank=False`, keeps `study_condition` (or `"DEV"` when empty); idempotent.
   - `decision_columns(d: AnnotationDecision | None, dense_ids: list[str], condition: str, method: str) -> dict[str, str]` — fills `_method, _elapsed_ms (latency_ms), _selected_rank (1-based in dense_ids or ""), _top1_id (dense_ids[0] or ""), _condition, _revisions "0", _debug_gold_shown "0", _panels "none", _hint, _confidence (level), _llm_confidence (numeric, 3 dp), _rationale`.
   - `run_session(source: str, annotator: LLMAnnotator, api: HelixAPI, limit: int | None = None) -> Counter` — per row of the source session, **skipping rows whose KB column is already filled in the AI session**: fetch row + candidates **from the source session** (so retrieval settings match the human's), dense ids; C1 → no suggestion; C2/C3/DEV → `suggested_id=dense[0]`; C3 → also graph evidence. Write via `write_row` (provenance dict + `annotator="llm:<model>"`) and `write_feedback`. Returns counts per `_method`. After the last row, if no `reflection.json` exists, write `annotator.reflect(...)` in the same JSON shape the API writes.
-  - CLI: `python eval/run_ai_annotator.py --prefix study2 --model openai/gpt-oss-120b --base-url http://127.0.0.1:18000/v1 [--provider openai] [--api-key-file ~/.helix_llm_key] [--limit N] [--helix http://127.0.0.1:8000]`; prints the Counter per session.
+  - CLI: `python eval/run_ai_annotator.py --prefix study2 --model openai/gpt-oss-120b --base-url http://127.0.0.1:18000/v1 [--provider openai] [--api-key-file ~/.helix_llm_key] [--limit N] [--helix http://127.0.0.1:8000]`; prints one line per session: `<session>  <done>/<total>  Counter({...})`, and when rows failed, `<k> rows failed (<first error>) — rerun to retry them` (Terminal mockup); ends with `reflection written for <n> sessions`.
 
 - [ ] **Step 1: Failing tests** (fake `HelixAPI` returning fixed rows/candidates/graph; fake annotator returning scripted decisions or raising; sessions dir monkeypatched to `tmp_path` like `tests/test_feedback.py`)
 
@@ -320,7 +322,11 @@ def test_condition_order_is_abcd_dcba(): assert condition_order(["C1","C2","C3",
 
 - [ ] **Step 2:** `python -m pytest tests/test_c4.py tests/test_study_blocks.py -v` → FAIL.
 - [ ] **Step 3: Implement backend + builder.** Builder applies `enable_llm_rerank=False` **before** `CONDITION_SETTINGS[condition]` so C4 can turn it on; `--conditions C1,C2,C3` keeps today's default order exactly.
-- [ ] **Step 4: Implement frontend** (options query key includes the flag; provenance fields; no other UI change — the existing `LLMPickBanner` and LLM-first auto-select already give C4 its UI).
+- [ ] **Step 4: Implement frontend** (options query key includes the flag; provenance fields) plus, per the approved C4 mockups:
+  - `CandidateCard` gets `aiPick?: boolean` → a small purple `AI pick` tag after the label; `Annotate` passes it for the candidate whose id equals `candidates[kb].llm.entity_id`.
+  - `LLMPickBanner` shows the label next to the id and a footer `<model> · DGX (local) · precomputed` when `llm.cached`.
+  - `FeedbackPrompt`: the 10th hint is bound to key `0` and tinted purple with a `C4 only` tag.
+  - Configure: checkbox **Use precomputed answers only** (`llm_cache_only`) in the LLM section, and a read-only chip showing `study_condition` when set.
 - [ ] **Step 5: Verify:** `python -m pytest -q tests` → pass; `cd web && npx tsc --noEmit -p .` → no output.
 - [ ] **Step 6: Manual check:** build one C4 session against a stub or the real model, run prewarm, open it: the purple banner shows on every row, the AI pick is pre-selected, the feedback prompt lists 10 hints; stop the tunnel and reload — rows still show the banner (cache), a new uncached label shows the amber "LLM re-rank unavailable" notice and the annotator can continue.
 - [ ] **Step 7: Commit** `git commit -m "feat(study): C4 AI-assisted condition with prewarmed, cache-only LLM"`
@@ -357,7 +363,7 @@ def test_condition_order_is_abcd_dcba(): assert condition_order(["C1","C2","C3",
 **Interfaces:**
 - Consumes: Task 8 API fields.
 - Produces:
-  - Annotate: when `progress.queue` exists, Next/Prev/finish move along `queue` (next queue index after `rowIdx`; finish after the last), the header shows `Queue i / n`; on a `review` row the AI pick is pre-selected (no countdown) with a banner "AI suggested <id> (<level>) — <rationale>"; on a `spotcheck` row nothing AI-related is shown.
+  - Annotate: when `progress.queue` exists, Next/Prev/finish move along `queue` (next queue index after `rowIdx`; finish after the last), the header shows `Queue i / n`; on a `review` row the AI pick is pre-selected (no countdown) with a banner "AI suggested <id> <label> (<level>) — <rationale>" and a reason line "Sent for review: <reasons>. Pre-selected — press Next to confirm, or pick another." where reasons come from `review_reasons(level, llm_id, top1_id) -> list[str]` in `eltool/review.py` (`the AI was not sure`, `its pick differs from the top suggestion`, `the AI found no match`), returned by the API in `review.reasons`; the header shows a `Review queue` pill, `i of n to check` and `<k> accepted by AI`; on a `spotcheck` row nothing AI-related is shown and it carries no label at all. Footer buttons read `Prev in queue` / `Next in queue`.
   - `summarise_review(df: pd.DataFrame, kb_col: str) -> dict` → `n_auto, n_review, n_spotcheck, auto_acc1 (vs gold), spotcheck_agreement (human answer == _llm_id), review_acc1, human_minutes, est_minutes_saved (n_auto × median human secs over review+spotcheck rows)`; CLI `--review-prefix`.
 
 - [ ] **Step 1: Failing tests:** `test_review_summary_counts_routes`, `test_auto_accuracy_uses_gold`, `test_minutes_saved_uses_median_human_time`.

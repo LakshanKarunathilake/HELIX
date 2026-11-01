@@ -91,6 +91,10 @@ class SessionConfig(BaseModel):
     # the ANTHROPIC_API_KEY server env var unless you need per-session keys.
     # Never returned to the browser (write-only; masked on GET).
     llm_api_key: str | None = None
+    # Condition C4: read LLM answers only from the on-disk cache filled in advance
+    # by eval/prewarm_llm.py, so annotators never wait on the model. A miss shows
+    # the "LLM re-rank unavailable" notice and the annotator carries on.
+    llm_cache_only: bool = False
     # Neo4j graph neighborhood. Connection + schema live in neo4j.yaml (see
     # neo4j.example.yaml); this flag just turns the feature on for the session.
     enable_graph: bool = False
@@ -117,6 +121,10 @@ class SessionConfig(BaseModel):
     # and excluded from the study's accuracy numbers — turning the flag back off
     # does NOT clean those rows. Never leave on for a real annotation pass.
     debug_show_gold: bool = False
+    # Mode C: the LLM pre-annotates every row (eval/preannotate.py); the human
+    # only works the review/spotcheck queue. See eltool/review.py.
+    review_mode: bool = False
+    review_spotcheck_rate: float = 0.1
 
     @field_validator("session_name")
     @classmethod

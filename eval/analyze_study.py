@@ -17,6 +17,7 @@ kept out of the sessions, and reports per condition:
 Usage:
     python eval/analyze_study.py                     # all study2-* sessions
     python eval/analyze_study.py --prefix study2 --json out.json
+    python eval/analyze_study.py --review-prefix review   # + mode C summary
 """
 
 from __future__ import annotations
@@ -116,6 +117,145 @@ def _feedback_summary(g: pd.DataFrame, human: list[bool]) -> dict:
     }
 
 
+def cohen_kappa(a: list[str], b: list[str]) -> float:
+    """Cohen's kappa between two label lists; 0.0 if empty or chance agreement is 1."""
+    n = len(a)
+    if n == 0:
+        return 0.0
+    po = sum(x == y for x, y in zip(a, b)) / n
+    ca, cb = Counter(a), Counter(b)
+    pe = sum(ca[k] * cb.get(k, 0) for k in ca) / (n * n)
+    if pe >= 1.0:
+        return 0.0
+    return (po - pe) / (1.0 - pe)
+
+
+def _answered(df: pd.DataFrame, kb_col: str) -> pd.DataFrame:
+    return df[df[kb_col].astype(str).str.strip() != ""]
+
+
+def _acc_by_level(j: pd.DataFrame, col: str, hit: pd.Series) -> dict[str, dict]:
+    if col not in j.columns:
+        return {}
+    out = {}
+    for key, idx in j.groupby(j[col].astype(str).str.strip()).groups.items():
+        if key:
+            out[key] = {"n": len(idx), "acc1": 100.0 * float(hit[idx].mean())}
+    return out
+
+
+def compare_human_ai(human: pd.DataFrame, ai: pd.DataFrame, kb_col: str) -> dict[str, dict]:
+    """Paired human-vs-AI comparison per condition, joined on mention_uid.
+
+    Only mentions with a non-empty answer on both sides count; human rows
+    annotated with the debug gold shown are dropped. Human-answered mentions
+    lacking an AI answer are reported as ``ai_missing``.
+    """
+    h = _answered(human, kb_col)
+    if "_debug_gold_shown" in h.columns:
+        h = h[h["_debug_gold_shown"].astype(str).str.strip() != "1"]
+    a = _answered(ai, kb_col).drop_duplicates(UID_COL, keep="last")
+    a = a.set_index(UID_COL)
+
+    out: dict[str, dict] = {}
+    for cond, g in h.groupby("_condition", sort=True):
+        g = g[g[UID_COL].isin(a.index)]
+        total = int((h["_condition"] == cond).sum())
+        j = g.reset_index(drop=True)
+        aj = a.loc[j[UID_COL]].reset_index()
+        n = len(j)
+        entry = {"n": n, "ai_missing": total - n}
+        if n == 0:
+            out[str(cond)] = entry
+            continue
+        gold = j["gold_cui"]
+        hh = pd.Series([_hit(x, y) for x, y in zip(j[kb_col], gold)])
+        aa = pd.Series([_hit(x, y) for x, y in zip(aj[kb_col], gold)])
+        rr = [_hit(x, y) for x, y in zip(j["_top1_id"], gold)]
+        agree = [_hit(x, y) for x, y in zip(j[kb_col], aj[kb_col])]
+
+        hint_kappa = None
+        if "_hint" in j.columns and "_hint" in aj.columns:
+            ha = j["_hint"].astype(str).str.strip()
+            hb = aj["_hint"].astype(str).str.strip()
+            both = (ha != "") & (hb != "")
+            if both.any():
+                hint_kappa = cohen_kappa(list(ha[both]), list(hb[both]))
+
+        entry.update({
+            "human_acc1": 100.0 * float(hh.mean()),
+            "ai_acc1": 100.0 * float(aa.mean()),
+            "retrieval_acc1": 100.0 * sum(rr) / n,
+            "agreement": 100.0 * sum(agree) / n,
+            "ai_only_right": int((aa & ~hh).sum()),
+            "human_only_right": int((hh & ~aa).sum()),
+            "hint_kappa": hint_kappa,
+            "ai_by_confidence": _acc_by_level(aj, "_confidence", aa),
+            "human_by_confidence": _acc_by_level(j, "_confidence", hh),
+        })
+        out[str(cond)] = entry
+    return out
+
+
+def summarise_review(df: pd.DataFrame, kb_col: str) -> dict:
+    """Mode C (review queue) summary over review-session rows merged with gold.
+
+    Auto rows are the LLM's answers accepted without a human, so their Acc@1
+    vs gold is the auto-accept quality. Spot-check rows reached the human
+    WITHOUT the AI's answer, so agreement with ``_llm_id`` there is an
+    unprimed estimate of the same thing. Percentages are 0-100; rows not yet
+    answered by a human are ignored for accuracy and time.
+    """
+    def col(name: str) -> pd.Series:      # optional columns read as empty
+        if name in df.columns:
+            return df[name].astype(str).str.strip()
+        return pd.Series("", index=df.index)
+
+    route = col("_route")
+    method = col("_method")
+    answered = col(kb_col) != ""
+    human_saved = answered & (method != "llm_auto")
+
+    # Auto-accept quality is scored on the AI's own answer (_llm_id, written by
+    # pre-annotation and never overwritten), so it holds even if the row's KB
+    # cell was ever edited. The API refuses human saves on auto rows.
+    llm_id = col("_llm_id")
+    auto = df[(route == "auto") & (llm_id != "")]
+    review = df[(route == "review") & human_saved]
+    spot = df[(route == "spotcheck") & human_saved]
+    queue = df[route.isin(["review", "spotcheck"]) & human_saved]
+
+    def pct(hits: list[bool]) -> float | None:
+        return 100.0 * sum(hits) / len(hits) if hits else None
+
+    secs = pd.to_numeric(col("_elapsed_ms")[queue.index], errors="coerce").dropna() / 1000.0
+    median = float(secs.median()) if len(secs) else None
+    n_auto = int((route == "auto").sum())
+    return {
+        "n_auto": n_auto,
+        "n_review": int((route == "review").sum()),
+        "n_spotcheck": int((route == "spotcheck").sum()),
+        "auto_acc1": pct([_hit(p, g) for p, g in zip(llm_id[auto.index], auto["gold_cui"])]),
+        "spotcheck_agreement": pct([_hit(p, a) for p, a in zip(spot[kb_col], col("_llm_id")[spot.index])]),
+        "review_acc1": pct([_hit(p, g) for p, g in zip(review[kb_col], review["gold_cui"])]),
+        "human_median_secs": median,
+        "human_minutes": float(secs.sum() / 60),
+        "est_minutes_saved": n_auto * median / 60 if median is not None else None,
+    }
+
+
+def _print_review(s: dict) -> None:
+    f = lambda v, unit="%": "n/a" if v is None else f"{v:.1f}{unit}"  # noqa: E731
+    print("\nReview queue (mode C)")
+    print(f"  routes: {s['n_auto']} auto, {s['n_review']} review, {s['n_spotcheck']} spot-check")
+    print(f"  auto-accepted Acc@1 (vs gold)      {f(s['auto_acc1'])}")
+    print(f"  spot-check agreement with the AI   {f(s['spotcheck_agreement'])}")
+    print(f"  reviewed rows Acc@1 (vs gold)      {f(s['review_acc1'])}")
+    print(f"  human time {f(s['human_minutes'], ' min')}; "
+          f"est. saved {f(s['est_minutes_saved'], ' min')} "
+          f"(auto rows x median {f(s['human_median_secs'], ' s')})")
+
+
 def load(prefix: str) -> tuple[pd.DataFrame, str]:
     gold = pd.read_csv(GOLD_FILE, dtype=str, keep_default_na=False)
     frames, kb_col = [], None
@@ -128,17 +268,45 @@ def load(prefix: str) -> tuple[pd.DataFrame, str]:
         frames.append(pd.read_csv(out, dtype=str, keep_default_na=False))
     if not frames:
         raise SystemExit(f"no annotated sessions matching '{prefix}-*' yet")
-    df = pd.concat(frames, ignore_index=True)
+    # Sessions differ in optional columns; absent cells read as "" not NaN.
+    df = pd.concat(frames, ignore_index=True).fillna("")
     missing = set(df[UID_COL]) - set(gold[UID_COL])
     if missing:
         raise SystemExit(f"{len(missing)} mentions have no gold entry — stale gold file?")
     return df.merge(gold, on=UID_COL, how="left"), kb_col
 
 
+def _print_comparison(cmp: dict[str, dict]) -> None:
+    hdr = (f"{'cond':6}{'n':>5}{'retrieval':>11}{'human':>8}{'AI':>8}{'agree':>8}"
+           f"{'AI-only':>9}{'human-only':>12}{'hint k':>8}")
+    print("\nHuman vs AI (paired, same mentions)")
+    print(hdr)
+    print("-" * len(hdr))
+    for c, s in cmp.items():
+        if not s["n"]:
+            print(f"{c:6}{0:>5}   (no overlapping answers; {s['ai_missing']} AI missing)")
+            continue
+        k = "n/a" if s["hint_kappa"] is None else f"{s['hint_kappa']:.2f}"
+        print(f"{c:6}{s['n']:>5}{s['retrieval_acc1']:>10.1f}%{s['human_acc1']:>7.1f}%"
+              f"{s['ai_acc1']:>7.1f}%{s['agreement']:>7.1f}%{s['ai_only_right']:>9}"
+              f"{s['human_only_right']:>12}{k:>8}")
+        if s["ai_missing"]:
+            print(f"      ({s['ai_missing']} mention(s) without an AI answer excluded)")
+    print("\nAcc@1 by stated confidence")
+    for c, s in cmp.items():
+        for who, key in (("human", "human_by_confidence"), ("AI", "ai_by_confidence")):
+            for lvl, v in (s.get(key) or {}).items():
+                print(f"  {c:6}{who:7}{lvl:14}{v['n']:>4}  {v['acc1']:5.1f}%")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--prefix", default="study2")
     ap.add_argument("--json", help="also write the summary here")
+    ap.add_argument("--ai-prefix", help="AI session prefix to compare with humans, "
+                    "e.g. ai-openai-gpt-oss-120b-study2")
+    ap.add_argument("--review-prefix", help="review-mode (mode C) session prefix to "
+                    "summarise: auto-accept quality, spot-check agreement, time saved")
     args = ap.parse_args()
 
     df, kb_col = load(args.prefix)
@@ -182,6 +350,18 @@ def main() -> None:
             if s.get("excluded_debug"):
                 print(f"!!   {c}: {s['excluded_debug']} excluded, {s['n']} usable")
         print("!" * 72)
+
+    if args.ai_prefix:
+        ai_df, _ = load(args.ai_prefix)
+        cmp = compare_human_ai(df, ai_df, kb_col)
+        _print_comparison(cmp)
+        res = {**res, "human_vs_ai": cmp}
+
+    if args.review_prefix:
+        rev_df, rev_kb = load(args.review_prefix)
+        rev = summarise_review(rev_df, rev_kb)
+        _print_review(rev)
+        res = {**res, "review": rev}
 
     if args.json:
         Path(args.json).write_text(json.dumps(res, indent=2))
