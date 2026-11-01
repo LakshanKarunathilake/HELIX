@@ -77,3 +77,6 @@ graphify-out/cache/semantic/pd5fd89c46bb5/eca75867c8cc4a1eecddd56bb6bba2dffa8837
 
 # LaTeX paper sources — kept local only (avoids self-match in plagiarism checks)
 paper/
+
+# macOS Finder metadata
+.DS_Store
