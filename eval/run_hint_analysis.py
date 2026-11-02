@@ -27,6 +27,10 @@ Commands:
                  --kb http://127.0.0.1:8765 --labels-file eval/out/typescope/medmentions.abbrev.labels.txt
   analyze  ceiling breakdown and rule comparison on one split:
              python eval/run_hint_analysis.py analyze --dataset medmentions --umls-meta "$UMLS_META"
+
+--index picks the pools (as in the baseline's fetch): "full" (default) or a dataset
+dictionary tag, e.g. --index dataset, or --index 'dataset-{split}' for BC5CDR
+chemical's per-split indexes. Outputs are named <dataset>.<index>.<split>.hints.*.
 """
 from __future__ import annotations
 
@@ -44,7 +48,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from eval.abbrev import expand_mention, find_abbreviations  # noqa: E402
 from eval.run_type_scoped_baseline import (DATASETS, OUT, build_scope, gold_ids,  # noqa: E402
-                                           load_cache, load_rows)
+                                           id_parts, index_tag, load_cache, load_rows)
 
 MM_CTX = Path("eval/out/medmentions_ctx")
 BC5CDR_PUBTATOR = Path.home() / "Downloads/CDR_Data/CDR.Corpus.v010516"
@@ -130,13 +134,23 @@ def expansions(rows, texts) -> dict[tuple, str]:
     return out
 
 
-def load_kb(name: str, split: str, ids: set[str], meta: Path) -> dict:
-    """Names, CUIs and the MRREL relations among the candidate ids (cached per split)."""
-    path = OUT / f"{name}.{split}.kb.pkl"
+def hit(cid: str | None, gold: set[str]) -> bool:
+    return bool(cid) and bool(id_parts(cid) & gold)
+
+
+def load_kb(name: str, stem: str, ids: set[str], meta: Path) -> dict:
+    """Names, CUIs and the MRREL relations among the candidate ids (cached per index and split).
+
+    Composite dictionary ids ('601367|D002544') get the union of their parts; for MeSH
+    datasets OMIM parts are looked up too.
+    """
+    path = OUT / f"{stem}.kb.pkl"
     if path.exists():
         kb = pickle.load(open(path, "rb"))
         if ids <= kb["ids"]:
             return kb
+    composite = ids
+    ids = {p for c in composite for p in id_parts(c)}
     umls = DATASETS[name]["kb_ids"] == "umls"
     names: dict[str, set] = defaultdict(set)
     cuis: dict[str, set] = defaultdict(set)
@@ -147,7 +161,7 @@ def load_kb(name: str, split: str, ids: set[str], meta: Path) -> dict:
             if umls and cols[1] == "ENG" and cols[0] in ids:
                 names[cols[0]].add(norm(cols[14]))
                 cuis[cols[0]].add(cols[0])
-            elif not umls and cols[11] == "MSH" and cols[13] in ids:
+            elif not umls and cols[11] in ("MSH", "OMIM") and cols[13] in ids:
                 names[cols[13]].add(norm(cols[14]))
                 cuis[cols[13]].add(cols[0])
     all_cuis = set().union(*cuis.values())
@@ -162,7 +176,11 @@ def load_kb(name: str, split: str, ids: set[str], meta: Path) -> dict:
             deg[c1] += 1
             if c2 in all_cuis:
                 rel[c1].setdefault(c2, set()).add(r)
-    kb = {"ids": set(ids), "names": dict(names), "cuis": dict(cuis), "rel": dict(rel), "deg": dict(deg)}
+    for c in composite:
+        if "|" in c:
+            names[c] = set().union(*(names.get(p, set()) for p in id_parts(c)))
+            cuis[c] = set().union(*(cuis.get(p, set()) for p in id_parts(c)))
+    kb = {"ids": set(composite), "names": dict(names), "cuis": dict(cuis), "rel": dict(rel), "deg": dict(deg)}
     pickle.dump(kb, open(path, "wb"))
     return kb
 
@@ -195,7 +213,7 @@ def expand(args) -> None:
     bad = [r for r in rows if _span_text(texts[r["document_id"]], r["entity_span"]) != r["entity_text"]]
     print(f"[{args.dataset}] {len(rows)} mentions; {len(bad)} whose span does not match the text")
     exp = expansions(rows, texts)
-    cache = load_cache(args.dataset)
+    cache = load_cache(args.dataset)          # only to report what is still to fetch from the full index
     by_split = Counter(r["split"] for r in rows if (r["document_id"], r["entity_span"]) in exp)
     print(f"  expanded mentions: {len(exp)} ({dict(by_split)})")
     with open(OUT / f"{args.dataset}.abbrev.tsv", "w", encoding="utf-8", newline="") as fo:
@@ -205,9 +223,10 @@ def expand(args) -> None:
             e = exp.get((r["document_id"], r["entity_span"]))
             if e:
                 w.writerow([r["split"], r["document_id"], r["entity_span"], r["entity_text"], e])
-    todo = sorted(set(exp.values()) - set(cache))
-    (OUT / f"{args.dataset}.abbrev.labels.txt").write_text("".join(t + "\n" for t in todo), encoding="utf-8")
-    print(f"  {len(todo)} expanded texts not yet in the pool cache -> {args.dataset}.abbrev.labels.txt")
+    labels = sorted(set(exp.values()))
+    (OUT / f"{args.dataset}.abbrev.labels.txt").write_text("".join(t + "\n" for t in labels), encoding="utf-8")
+    print(f"  {len(labels)} distinct expanded texts -> {args.dataset}.abbrev.labels.txt "
+          f"({len(set(labels) - set(cache))} not yet in the full-index pool cache)")
 
 
 def _span_text(text: str, span: str) -> str:
@@ -217,10 +236,12 @@ def _span_text(text: str, span: str) -> str:
 
 def analyze(args) -> None:
     ds, split, k = args.dataset, args.split, args.k
+    tag = index_tag(args.index, split)
+    stem = f"{ds}.{tag}.{split}"
     rows = [r for r in load_rows(ds) if r["split"] == split and gold_ids(r["gold_cui"])]
     texts = load_doc_texts(ds, Path(args.bc5cdr_pubtator))
     exp = expansions(rows, texts)
-    cache = load_cache(ds)
+    cache = load_cache(ds, args.index, split)
     scope, cand_tuis, _ = build_scope(ds, rows, Path(args.umls_meta),
                                       Path(args.semgroups) if args.semgroups else None)
 
@@ -242,10 +263,11 @@ def analyze(args) -> None:
         if e and e not in cache:
             unfetched += 1
         ms.append({"row": r, "gold": gold_ids(r["gold_cui"]), "expanded": e, "base": base,
+                   "raw": [(cid, s) for cid, s, _ in cache.get(r["entity_text"], [])][:k],
                    "abbrev": scoped(e, r["entity_type"]) if e and e in cache else base})
 
     ids = set().union(*({c for c, _ in m["base"]} | {c for c, _ in m["abbrev"]} | m["gold"] for m in ms))
-    kb = load_kb(ds, split, ids, Path(args.umls_meta))
+    kb = load_kb(ds, stem, ids, Path(args.umls_meta))
     rels = {kind: relation_fn(kb, kind) for kind in ("any", "ro", "hier")}
     names, deg, cuis = kb["names"], kb["deg"], kb["cuis"]
 
@@ -290,6 +312,7 @@ def analyze(args) -> None:
 
     d = args.delta
     rules = {
+        "dense (no type filter)": lambda m: choose(m["raw"]),
         "base (type-scoped)": lambda m: run(m),
         "abbrev": lambda m: run(m, "abbrev"),
         "lex": lambda m: run(m, lex=True),
@@ -307,18 +330,21 @@ def analyze(args) -> None:
         "abbrev + ties: exact type, names": lambda m: run(m, "abbrev", graph="tie", delta=0),
         "CEILING graph, gold anchors": lambda m: run(m, graph="g_oracle"),
     }
-    correct = {name: [fn(m) in m["gold"] for m in ms] for name, fn in rules.items()}
+    correct = {name: [hit(fn(m), m["gold"]) for m in ms] for name, fn in rules.items()}
     base_ok = correct["base (type-scoped)"]
     n = len(ms)
 
-    print(f"\n=== {ds} {split}: hint ceiling check on the type-scoped top-{k} ({n} mentions) ===")
+    print(f"\n=== {ds} {split}, {tag} index: hint ceiling check on the type-scoped top-{k} ({n} mentions) ===")
     if unfetched:
         print(f"warning: {unfetched} expanded mentions have no cached pool -- run fetch --labels-file first")
 
     # where the gold sits (0-based position in the scoped top-k)
-    pos = [next((j for j, (c, _) in enumerate(m["base"]) if c in m["gold"]), None) for m in ms]
+    pos = [next((j for j, (c, _) in enumerate(m["base"]) if hit(c, m["gold"])), None) for m in ms]
     rank = [None if p is None else p + 1 for p in pos]
     fixable = [i for i in range(n) if pos[i]]
+    recall = {pool: round(100 * sum(1 for m in ms if any(hit(c, m["gold"]) for c, _ in m[pool])) / n, 2)
+              for pool in ("raw", "base", "abbrev")}
+    print(f"Acc@{k}: dense {recall['raw']}  |  type-scoped {recall['base']}  |  abbrev + type-scoped {recall['abbrev']}")
     print(f"gold at rank 1: {sum(1 for x in rank if x == 1)}  |  ranks 2-{k} (fixable by reranking): "
           f"{len(fixable)}  |  not in scoped top-{k}: {sum(1 for x in rank if not x)}")
     gaps = sorted(ms[i]["base"][0][1] - ms[i]["base"][pos[i]][1] for i in fixable)
@@ -361,7 +387,7 @@ def analyze(args) -> None:
         accs = [100 * sum(correct[s][i] for i in idxs) / len(idxs) for s in show]
         print(f"{t:10} | {len(idxs):5} | " + " | ".join(f"{a:14.2f}" for a in accs))
 
-    with open(OUT / f"{ds}.{split}.hints.tsv", "w", encoding="utf-8", newline="") as fo:
+    with open(OUT / f"{stem}.hints.tsv", "w", encoding="utf-8", newline="") as fo:
         w = csv.writer(fo, delimiter="\t")
         w.writerow(["document_id", "entity_span", "entity_type", "entity_text", "expanded", "gold",
                     "rank_scoped", "top1", "top1_lex", "gold_lex", "top1_graph", "gold_graph"]
@@ -375,15 +401,39 @@ def analyze(args) -> None:
                         m["lex_base"][g] if g is not None else "", m["g_any_base"][0] if ids_ else "",
                         m["g_any_base"][g] if g is not None else ""]
                        + [int(correct[r][i]) for r in rules])
-    json.dump({"dataset": ds, "split": split, "k": k, "n": n, "fixable": len(fixable),
+    json.dump({"dataset": ds, "split": split, "index": tag, "k": k, "n": n, "fixable": len(fixable),
+               f"acc{k}": recall,
                "expanded": n_exp, "ceiling": ceil, "rules": table},
-              open(OUT / f"{ds}.{split}.hints.json", "w"), indent=2)
-    print(f"\nwrote {OUT}/{ds}.{split}.hints.tsv and .json")
+              open(OUT / f"{stem}.hints.json", "w"), indent=2)
+    print(f"\nwrote {OUT}/{stem}.hints.tsv and .json")
+
+
+SUMMARY_RULES = ["dense (no type filter)", "base (type-scoped)", "abbrev", "abbrev + ties: more KB names"]
+
+
+def summary(args) -> None:
+    """One row per (dataset, index, split) from the analyze outputs, as TSV and on screen."""
+    order = {s: i for i, s in enumerate(("train", "dev", "test"))}
+    runs = [json.load(open(p)) for p in OUT.glob("*.hints.json")]
+    runs = [r for r in runs if "index" in r]
+    runs.sort(key=lambda r: (r["dataset"], not r["index"].startswith("full"), order[r["split"]]))
+    head = ["dataset", "index", "split", "n", "Acc@10 dense", "Acc@10 abbrev+scoped"] + SUMMARY_RULES
+    lines = ["\t".join(head)]
+    for r in runs:
+        acc = r.get(f"acc{r['k']}", {})
+        lines.append("\t".join(map(str, [r["dataset"], r["index"].split("-")[0], r["split"], r["n"],
+                                         acc.get("raw", ""), acc.get("abbrev", "")]
+                                        + [r["rules"][x]["acc1"] for x in SUMMARY_RULES])))
+    (OUT / "hints_summary.tsv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    for line in lines:
+        print(" | ".join(f"{c:>12}" for c in line.split("\t")))
+    print(f"\nwrote {OUT}/hints_summary.tsv")
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("summary", help="collect every analyze run into one table")
     for name in ("expand", "analyze"):
         s = sub.add_parser(name)
         s.add_argument("--dataset", choices=DATASETS, required=True)
@@ -391,13 +441,17 @@ def main() -> None:
                        help="folder with the CDR *.PubTator.txt files (env BC5CDR_PUBTATOR)")
         if name == "analyze":
             s.add_argument("--split", default="dev", choices=("train", "dev", "test"))
+            s.add_argument("--index", default="full",
+                           help='"full", or a dataset-dictionary tag; "{split}" in it means one index per split')
             s.add_argument("--k", type=int, default=10)
             s.add_argument("--delta", type=float, default=0.02,
                            help="graph may only promote candidates this close to the leader's dense score")
             s.add_argument("--umls-meta", default=os.environ.get("UMLS_META"))
             s.add_argument("--semgroups", default=os.environ.get("SEMGROUPS"))
     args = p.parse_args()
-    if args.cmd == "expand":
+    if args.cmd == "summary":
+        summary(args)
+    elif args.cmd == "expand":
         expand(args)
     else:
         if not args.umls_meta:

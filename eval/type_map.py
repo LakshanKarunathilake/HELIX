@@ -103,5 +103,7 @@ class TypeScope:
         return self._allowed.get(mention_type)
 
     def compatible(self, mention_type: str, cand_tuis: set[str]) -> bool:
+        """A candidate is dropped only when its known types all miss: an unknown mention
+        type, or a candidate with no known types (an OMIM-only dictionary entry), is kept."""
         allowed = self.allowed(mention_type)
-        return True if allowed is None else bool(allowed & cand_tuis)
+        return True if allowed is None or not cand_tuis else bool(allowed & cand_tuis)

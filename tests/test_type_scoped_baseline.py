@@ -58,3 +58,8 @@ def test_summarize_reports_acc_at_1_and_k():
     assert s["no_compatible"] == 1
     assert s["gold_incompatible"] == 1
     assert s["gold_beyond_k_all"] == 1     # rank 12 is in the pool but past the top 10
+
+
+def test_composite_dictionary_ids_match_any_part():
+    assert hit_rank(["601367|D002544", "D1"], {"D002544"}) == 1
+    assert gold_ids("D002544|D003") == {"D002544", "D003"}

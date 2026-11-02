@@ -6,7 +6,10 @@ returns a pool of candidates; candidates whose semantic type does not fit the
 mention's type are dropped, and the first k that remain are the scoped list. Every
 later step (lexical rules, graph) is measured against this scoped baseline.
 
-Two steps, so the slow part runs once:
+Two steps, so the slow part runs once. --index names the KB the pools come from:
+"full" (full UMLS / full MeSH, the default) or a dataset dictionary tag; a tag
+holding "{split}" gets one pool cache per split (BC5CDR chemical has one
+dictionary index per split).
 
   fetch   query the KB server for a pool of candidates per unique mention text and
           cache it (resumable):
@@ -55,6 +58,11 @@ DATASETS = {
 
 # ── pure scoring logic ────────────────────────────────────────────────────────
 
+def id_parts(cid: str) -> set[str]:
+    """Dictionary ids can be composite ('601367|D002544' = OMIM|MeSH); any part may match."""
+    return {p for p in cid.split("|") if p}
+
+
 def gold_ids(x: str | None) -> set[str]:
     """Gold ids of one mention; composites are '|'-joined, '-1' marks no concept."""
     return {i.strip() for i in (x or "").split("|") if i.strip() and i.strip() != "-1"}
@@ -63,7 +71,7 @@ def gold_ids(x: str | None) -> set[str]:
 def hit_rank(ids: list[str], gold: set[str]) -> int | None:
     """1-based rank of the first id in gold, or None."""
     for r, cid in enumerate(ids, 1):
-        if cid in gold:
+        if id_parts(cid) & gold:
             return r
     return None
 
@@ -118,12 +126,17 @@ def load_rows(name: str) -> list[dict]:
     return rows
 
 
-def cache_path(name: str) -> Path:
-    return OUT / f"{name}.pool.jsonl"
+def index_tag(index: str, split: str | None) -> str:
+    return index.format(split=split) if "{split}" in index else index
 
 
-def load_cache(name: str) -> dict[str, list]:
-    p = cache_path(name)
+def cache_path(name: str, index: str = "full", split: str | None = None) -> Path:
+    tag = index_tag(index, split)
+    return OUT / (f"{name}.pool.jsonl" if tag == "full" else f"{name}.{tag}.pool.jsonl")
+
+
+def load_cache(name: str, index: str = "full", split: str | None = None) -> dict[str, list]:
+    p = cache_path(name, index, split)
     cache = {}
     if p.exists():
         for line in open(p, encoding="utf-8"):
@@ -136,16 +149,18 @@ def load_cache(name: str) -> dict[str, list]:
 
 def fetch(args) -> None:
     OUT.mkdir(parents=True, exist_ok=True)
+    if "{split}" in args.index and not args.split:
+        raise SystemExit("--split is required for a per-split index")
+    labels = {r["entity_text"] for r in load_rows(args.dataset) if not args.split or r["split"] == args.split}
     if args.labels_file:
-        labels = sorted({l.rstrip("\n") for l in open(args.labels_file, encoding="utf-8") if l.strip()})
-    else:
-        labels = sorted({r["entity_text"] for r in load_rows(args.dataset)})
-    done = set(load_cache(args.dataset))
+        labels |= {l.rstrip("\n") for l in open(args.labels_file, encoding="utf-8") if l.strip()}
+    labels = sorted(labels)
+    done = set(load_cache(args.dataset, args.index, args.split))
     todo = [lbl for lbl in labels if lbl not in done]
     print(f"[{args.dataset}] {len(labels)} unique mention texts, {len(todo)} to fetch", flush=True)
     url = args.kb.rstrip("/") + "/query/dense"
     session = requests.Session()
-    with open(cache_path(args.dataset), "a", encoding="utf-8") as out:
+    with open(cache_path(args.dataset, args.index, args.split), "a", encoding="utf-8") as out:
         for i, lbl in enumerate(todo, 1):
             try:
                 res = session.post(url, json={"label": lbl, "top_k": args.pool}, timeout=120).json()["results"]
@@ -166,8 +181,9 @@ def build_scope(name: str, rows: list[dict], umls_meta: Path, semgroups: Path | 
     if DATASETS[name]["kb_ids"] == "umls":
         scope = TypeScope.medmentions(load_tui_tree(mrsty), {r["entity_type"] for r in rows})
         golds = set().union(*(gold_ids(r["gold_cui"]) for r in rows))
-        cui_tuis = load_cui_tuis(mrsty, golds)
-        return scope, (lambda cid, types: parse_tuis(types)), cui_tuis
+        cui_tuis = load_cui_tuis(mrsty)       # dictionary indexes carry no types: look them up
+        return scope, (lambda cid, types: parse_tuis(types) or
+                       set().union(*(cui_tuis.get(p, set()) for p in id_parts(cid)))), cui_tuis
     if semgroups is None:
         raise SystemExit("--semgroups (or env SEMGROUPS) is required for BC5CDR")
     cached = OUT / "mesh_tuis.json"
@@ -177,19 +193,22 @@ def build_scope(name: str, rows: list[dict], umls_meta: Path, semgroups: Path | 
         print("  building MeSH id -> semantic types from MRCONSO (one-off)...", flush=True)
         mesh_tuis = load_mesh_tuis(umls_meta / "MRCONSO.RRF", mrsty)
         json.dump({k: sorted(v) for k, v in mesh_tuis.items()}, open(cached, "w"))
-    return TypeScope.bc5cdr(load_semgroups(semgroups)), (lambda cid, types: mesh_tuis.get(cid, set())), mesh_tuis
+    return (TypeScope.bc5cdr(load_semgroups(semgroups)),
+            (lambda cid, types: set().union(*(mesh_tuis.get(p, set()) for p in id_parts(cid)))), mesh_tuis)
 
 
 def score(args) -> None:
     rows = load_rows(args.dataset)
-    cache = load_cache(args.dataset)
+    caches = {s: load_cache(args.dataset, args.index, s) for s in SPLITS}
     scope, cand_tuis, id_tuis = build_scope(args.dataset, rows, Path(args.umls_meta),
                                             Path(args.semgroups) if args.semgroups else None)
 
     by_split: dict[str, list] = defaultdict(list)
     by_type: dict[tuple, list] = defaultdict(list)
     missing = nil = 0
-    per_mention = OUT / f"{args.dataset}.mentions.tsv"
+    tag = args.index.replace("{split}", "split")
+    stem = args.dataset if tag == "full" else f"{args.dataset}.{tag}"
+    per_mention = OUT / f"{stem}.mentions.tsv"
     with open(per_mention, "w", encoding="utf-8", newline="") as fo:
         w = csv.writer(fo, delimiter="\t")
         w.writerow(["split", "document_id", "entity_type", "entity_text", "gold", "rank_all",
@@ -199,6 +218,7 @@ def score(args) -> None:
             if not gold:
                 nil += 1
                 continue
+            cache = caches.get(r["split"], {})
             if r["entity_text"] not in cache:
                 missing += 1
             pool = [(cid, s, cand_tuis(cid, types)) for cid, s, types in cache.get(r["entity_text"], [])]
@@ -232,8 +252,8 @@ def score(args) -> None:
 
     json.dump({"dataset": args.dataset, "k": k, "by_split": summary,
                f"by_type_{args.report_split}": per_type},
-              open(OUT / f"{args.dataset}.summary.json", "w"), indent=2)
-    print(f"\nwrote {per_mention} and {OUT / (args.dataset + '.summary.json')}")
+              open(OUT / f"{stem}.summary.json", "w"), indent=2)
+    print(f"\nwrote {per_mention} and {OUT / (stem + '.summary.json')}")
 
 
 def main() -> None:
@@ -243,8 +263,9 @@ def main() -> None:
     f.add_argument("--dataset", choices=DATASETS, required=True)
     f.add_argument("--kb", required=True, help="KB server base URL, e.g. http://127.0.0.1:8765")
     f.add_argument("--pool", type=int, default=100, help="candidates fetched per mention (server max 100)")
-    f.add_argument("--labels-file", help="fetch these texts (one per line) instead of the dataset's "
-                                         "mention texts, e.g. abbreviation-expanded mentions")
+    f.add_argument("--labels-file", help="also fetch these texts (one per line), e.g. "
+                                         "abbreviation-expanded mentions")
+    f.add_argument("--split", choices=SPLITS, help="only this split's mentions (needed for a per-split index)")
     s = sub.add_parser("score", help="filter the cached pools by type and report accuracy")
     s.add_argument("--dataset", choices=DATASETS, required=True)
     s.add_argument("--k", type=int, default=10)
@@ -253,6 +274,9 @@ def main() -> None:
     s.add_argument("--semgroups", default=os.environ.get("SEMGROUPS"),
                    help="SemGroups.txt, needed for BC5CDR (env SEMGROUPS)")
     s.add_argument("--report-split", default="dev", choices=SPLITS)
+    for sp in (f, s):
+        sp.add_argument("--index", default="full",
+                        help='"full", or a dataset-dictionary tag; "{split}" in it means one index per split')
     args = p.parse_args()
     if args.cmd == "fetch":
         fetch(args)

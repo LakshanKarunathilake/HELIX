@@ -47,9 +47,9 @@ def test_unknown_mention_type_does_not_filter():
     assert ts.compatible("T200", {"T017"})
 
 
-def test_candidate_without_types_is_incompatible_for_known_type():
+def test_candidate_without_known_types_is_kept():
     ts = TypeScope.medmentions(TREE, ["T038"])
-    assert not ts.compatible("T038", set())
+    assert ts.compatible("T038", set())     # nothing to judge it by (e.g. an OMIM-only entry)
 
 
 def test_bc5cdr_scope_uses_semantic_groups():
