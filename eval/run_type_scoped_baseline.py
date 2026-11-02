@@ -136,7 +136,10 @@ def load_cache(name: str) -> dict[str, list]:
 
 def fetch(args) -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    labels = sorted({r["entity_text"] for r in load_rows(args.dataset)})
+    if args.labels_file:
+        labels = sorted({l.rstrip("\n") for l in open(args.labels_file, encoding="utf-8") if l.strip()})
+    else:
+        labels = sorted({r["entity_text"] for r in load_rows(args.dataset)})
     done = set(load_cache(args.dataset))
     todo = [lbl for lbl in labels if lbl not in done]
     print(f"[{args.dataset}] {len(labels)} unique mention texts, {len(todo)} to fetch", flush=True)
@@ -240,6 +243,8 @@ def main() -> None:
     f.add_argument("--dataset", choices=DATASETS, required=True)
     f.add_argument("--kb", required=True, help="KB server base URL, e.g. http://127.0.0.1:8765")
     f.add_argument("--pool", type=int, default=100, help="candidates fetched per mention (server max 100)")
+    f.add_argument("--labels-file", help="fetch these texts (one per line) instead of the dataset's "
+                                         "mention texts, e.g. abbreviation-expanded mentions")
     s = sub.add_parser("score", help="filter the cached pools by type and report accuracy")
     s.add_argument("--dataset", choices=DATASETS, required=True)
     s.add_argument("--k", type=int, default=10)
