@@ -408,7 +408,8 @@ def analyze(args) -> None:
     print(f"\nwrote {OUT}/{stem}.hints.tsv and .json")
 
 
-SUMMARY_RULES = ["dense (no type filter)", "base (type-scoped)", "abbrev", "abbrev + ties: more KB names"]
+SUMMARY_RULES = ["dense (no type filter)", "base (type-scoped)", "abbrev", "lex (unique only)",
+                 "abbrev + ties: more KB names"]
 
 
 def summary(args) -> None:
