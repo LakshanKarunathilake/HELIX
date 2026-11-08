@@ -65,7 +65,9 @@ docker compose -f deploy/hosted/docker-compose.yml --env-file deploy/hosted/.env
 ## 6. Nightly backup
 
 `backup.sh` archives the sessions volume to `$BACKUP_DIR/sessions-<date>.tgz` and deletes
-archives older than 14 days. Add it to cron (`crontab -e`):
+archives older than 14 days. The archives contain every stored secret, so the script makes
+`$BACKUP_DIR` mode `700` and writes the archives readable by their owner only. Add it to cron
+(`crontab -e`):
 
 ```
 0 3 * * * BACKUP_DIR=/var/backups/helix /path/to/helix/deploy/hosted/backup.sh
@@ -85,10 +87,19 @@ Replace `user:pass` with your login. For a local trial set `HELIX_DOMAIN=localho
    returns `200`.
 5. `docker compose -f deploy/hosted/docker-compose.yml ps` shows no published port other than 80
    and 443.
-6. With your KB kit running, create a session in the browser: candidates load, a saved row
-   appears in `GET /api/sessions/<name>/export`, and the KB headers come back masked.
-7. `BACKUP_DIR=$(mktemp -d) deploy/hosted/backup.sh` writes one `sessions-<date>.tgz`, and
-   `tar tzf` on it lists `session.json` files.
+6. **Create a session.** With your KB kit running, create a session in the browser from an
+   uploaded CSV. Saving returns to the session list without an error, and the new session is
+   in `GET /api/sessions`. This moves the upload from the container's `/tmp` into the sessions
+   volume, which is a different filesystem.
+7. **Upload a context zip.** On the session's configure page, upload a `.zip` of
+   `<doc_id>.txt` files. Or run
+   `curl -sk -u user:pass -F file=@context.zip https://<domain>/api/sessions/<name>/context`,
+   which returns `{"files": N}`. A row whose document is in the zip shows its context text.
+8. Annotate in that session. Candidates load, a saved row appears in
+   `GET /api/sessions/<name>/export`, and the KB headers come back masked.
+9. `BACKUP_DIR=$(mktemp -d) deploy/hosted/backup.sh` writes one `sessions-<date>.tgz`, and
+   `tar tzf` on it lists `session.json` files. The directory is mode `700` and no
+   `.tmp` file is left behind.
 
 Stop it with `docker compose -f deploy/hosted/docker-compose.yml down` (add `-v` only if you
 want to delete the sessions).
