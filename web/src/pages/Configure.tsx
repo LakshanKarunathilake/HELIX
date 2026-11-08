@@ -36,6 +36,9 @@ export function Configure() {
   const fileRef = useRef<HTMLInputElement>(null)
   // context folder
   const [contextFolder, setContextFolder] = useState('')
+  const [hosted, setHosted] = useState(false)
+  const [contextZip, setContextZip] = useState<File | null>(null)
+  const [contextMsg, setContextMsg] = useState('')
   const [docIdCol, setDocIdCol] = useState('')
   const [spanCol, setSpanCol] = useState('')
   // auto-select
@@ -139,6 +142,10 @@ export function Configure() {
     }
   }
 
+  useEffect(() => {
+    api.getInfo().then(i => setHosted(i.hosted)).catch(() => {})
+  }, [])
+
   // ── KB helpers ───────────────────────────────────────────────────────────
   const updateKB = (i: number, patch: Partial<KBConfig>) =>
     setKbs(prev => prev.map((k, idx) => (idx === i ? { ...k, ...patch } : k)))
@@ -182,9 +189,13 @@ export function Configure() {
           debug_show_gold: debugShowGold,
         }
         await api.updateSession(sessionName!, updated)
+        if (contextZip) {
+          const r = await api.uploadContext(sessionName!, contextZip)
+          setContextMsg(`Uploaded ${r.files} context file(s).`)
+        }
         qc.invalidateQueries({ queryKey: ['session', sessionName] })
       } else {
-        await api.createSession({
+        const created = await api.createSession({
           session_name: name.trim(),
           annotator: annotator.trim(),
           tmp_path: parsed!.tmp_path,
@@ -211,6 +222,10 @@ export function Configure() {
           collect_feedback: collectFeedback,
           debug_show_gold: debugShowGold,
         })
+        if (contextZip) {
+          const r = await api.uploadContext(created.session_name, contextZip)
+          setContextMsg(`Uploaded ${r.files} context file(s).`)
+        }
       }
       navigate(`/annotate/${isEdit ? sessionName : name.trim()}`)
     } catch (err: any) {
@@ -730,16 +745,31 @@ export function Configure() {
           Folder of plain-text files named by document ID (e.g. <code className="bg-gray-100 px-1 rounded">25823274_en.txt</code>).
           The annotator will show the document passage with the entity highlighted.
         </p>
+        {!hosted && (
+          <div>
+            <label className="label">Folder path (absolute, on this machine)</label>
+            <input
+              className="input font-mono text-sm"
+              placeholder="/path/to/texts"
+              value={contextFolder}
+              onChange={e => setContextFolder(e.target.value)}
+            />
+          </div>
+        )}
         <div>
-          <label className="label">Folder path (absolute, on this machine)</label>
+          <label className="label">
+            Upload .zip of <code>&lt;doc_id&gt;</code>.txt files
+            <span className="ml-1 text-gray-400 font-normal">(max 50 MB)</span>
+          </label>
           <input
-            className="input font-mono text-sm"
-            placeholder="/path/to/texts"
-            value={contextFolder}
-            onChange={e => setContextFolder(e.target.value)}
+            type="file"
+            accept=".zip,application/zip"
+            className="text-sm"
+            onChange={e => { setContextZip(e.target.files?.[0] ?? null); setContextMsg('') }}
           />
+          {contextMsg && <p className="text-xs text-green-700 mt-1">{contextMsg}</p>}
         </div>
-        {contextFolder.trim() && (
+        {(contextFolder.trim() || contextZip) && (
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="label">

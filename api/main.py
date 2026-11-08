@@ -33,7 +33,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from eltool.config import SLUG_RE, GraphConnection, KBConfig, SessionConfig
 from eltool import feedback as fb
 from eltool.provenance import classify_method
-from eltool.hosting import cors_origins
+from eltool.hosting import cors_origins, hosted_mode
+from eltool.context_upload import ContextUploadError, extract_context_zip
 from eltool.graph_client import GraphError, Neo4jGraphClient, load_neo4j_settings
 from eltool.graph_pool import GraphClientPool, resolve_graph_client
 from eltool.hosting import UnsafeURLError
@@ -65,6 +66,26 @@ app.add_middleware(
 
 _TMP = Path("/tmp/eltool_uploads")
 _TMP.mkdir(exist_ok=True)
+
+MAX_CONTEXT_UPLOAD = 50 * 1024 * 1024
+
+
+@app.get("/api/info")
+def get_info():
+    return {"hosted": hosted_mode()}
+
+
+def _check_context_folder(folder: str | None, name: str) -> None:
+    """Hosted mode: only the session's own uploaded context folder is allowed."""
+    if not folder or not hosted_mode():
+        return
+    try:
+        inside = Path(folder).resolve().is_relative_to(session_dir(name).resolve())
+    except (OSError, ValueError):
+        inside = False
+    if not inside:
+        raise HTTPException(
+            400, "In hosted mode, upload context texts instead of naming a server folder.")
 
 
 # ── sessions ────────────────────────────────────────────────────────────────
@@ -143,6 +164,7 @@ def create_session(req: CreateSessionRequest):
     dest = input_copy_path(req.session_name, req.original_filename)
     src.rename(dest)
 
+    _check_context_folder(req.context_folder, req.session_name)
     if req.context_folder and not Path(req.context_folder).is_dir():
         raise HTTPException(400, f"Context folder not found: {req.context_folder}")
 
@@ -198,6 +220,7 @@ def update_session(name: str, body: dict = Body(...)):
     existing = _load_cfg(name)
     # Blank secrets keep the stored value while the address is unchanged.
     body = merge_secrets(body, existing)
+    _check_context_folder(body.get("context_folder"), name)
     try:
         cfg = SessionConfig(**body)
         cfg.save(session_config_path(name))
@@ -209,6 +232,34 @@ def update_session(name: str, body: dict = Body(...)):
         # Never echo str(e) here: it may embed the merged body (secrets).
         raise HTTPException(400, f"Could not save session ({type(e).__name__})")
     return {"ok": True}
+
+
+@app.post("/api/sessions/{name}/context")
+async def upload_context(name: str, file: UploadFile = File(...)):
+    """Upload a .zip of <doc_id>.txt files as this session's context folder."""
+    cfg = _load_cfg(name)
+    tmp = _TMP / f"{uuid.uuid4().hex}_ctx.zip"
+    try:
+        size = 0
+        with open(tmp, "wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_CONTEXT_UPLOAD:
+                    raise HTTPException(413, "Context zip is larger than 50 MB.")
+                out.write(chunk)
+        dest = session_dir(name) / "context"
+        try:
+            count = extract_context_zip(tmp, dest)
+        except ContextUploadError as e:
+            raise HTTPException(400, str(e))
+        cfg.context_folder = str(dest)
+        cfg.save(session_config_path(name))
+        return {"files": count}
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 @app.get("/api/llm/default-prompt")

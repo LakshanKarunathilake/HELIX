@@ -16,6 +16,17 @@ async function req<T>(path: string, options?: RequestInit): Promise<T> {
 export const getSessions = () =>
   req<{ sessions: string[] }>('/sessions').then(r => r.sessions)
 
+export const getInfo = () => req<{ hosted: boolean }>('/info')
+
+export const uploadContext = (sessionName: string, file: File) => {
+  const fd = new FormData()
+  fd.append('file', file)
+  return req<{ files: number }>(`/sessions/${encodeURIComponent(sessionName)}/context`, {
+    method: 'POST',
+    body: fd,
+  })
+}
+
 export const parseFile = (file: File): Promise<ParsedFile> => {
   const fd = new FormData()
   fd.append('file', file)
