@@ -4,6 +4,8 @@ from __future__ import annotations
 import threading
 from collections import OrderedDict
 
+from pydantic import ValidationError
+
 from eltool.config import GraphConnection, SessionConfig
 from eltool.graph_client import GraphError, Neo4jGraphClient, load_neo4j_settings
 from eltool.hosting import hosted_mode
@@ -42,13 +44,20 @@ def connection_from_settings(settings: dict) -> GraphConnection:
     """Map the load_neo4j_settings() dict (incl. its schema block) to a GraphConnection."""
     known = set(GraphConnection.model_fields) - {"uri", "user", "password", "database"}
     schema = settings.get("schema") or {}
-    return GraphConnection(
-        uri=settings["uri"],
-        user=settings.get("user") or "neo4j",
-        password=settings.get("password") or "",
-        database=settings.get("database") or None,
-        **{k: v for k, v in schema.items() if k in known},
-    )
+    extra = {k: v for k, v in schema.items() if k in known}
+    for k in ("rel_include", "rel_exclude"):
+        if extra.get(k) is None:
+            extra.pop(k, None)
+    try:
+        return GraphConnection(
+            uri=settings["uri"],
+            user=settings.get("user") or "neo4j",
+            password=settings.get("password") or "",
+            database=settings.get("database") or None,
+            **extra,
+        )
+    except ValidationError as e:
+        raise GraphError(f"Invalid Neo4j settings in neo4j.yaml: {e}") from e
 
 
 def resolve_graph_client(cfg: SessionConfig, pool: GraphClientPool) -> Neo4jGraphClient:

@@ -187,6 +187,7 @@ class Neo4jGraphClient:
             schema = GraphSchema(**{**known, **overrides})
         self.schema = schema.validated()
         self._driver = None
+        self._closed = False
 
     @classmethod
     def from_connection(cls, conn) -> "Neo4jGraphClient":
@@ -207,6 +208,8 @@ class Neo4jGraphClient:
 
     # ── connection ───────────────────────────────────────────────────────────
     def _driver_lazy(self):
+        if self._closed:
+            raise GraphError("graph client was closed")
         if self._driver is None:
             try:
                 from neo4j import GraphDatabase
@@ -237,6 +240,7 @@ class Neo4jGraphClient:
             raise GraphError(f"Cypher query failed: {e}") from e
 
     def close(self) -> None:
+        self._closed = True
         if self._driver is not None:
             try:
                 self._driver.close()

@@ -84,3 +84,74 @@ def test_hosted_plain_bolt_refused_on_connect(monkeypatch):
     c = Neo4jGraphClient.from_connection(GraphConnection(uri="bolt://10.0.0.5:7687"))
     with pytest.raises(GraphError):
         c._driver_lazy()
+
+
+def test_closed_client_refuses_to_reconnect(monkeypatch):
+    import neo4j
+
+    def fail(*a, **k):
+        raise AssertionError("driver must not be created")
+
+    monkeypatch.setattr(neo4j.GraphDatabase, "driver", fail)
+    c = Neo4jGraphClient.from_connection(GraphConnection(uri="neo4j+s://x"))
+    c.close()
+    with pytest.raises(GraphError, match="closed"):
+        c._driver_lazy()
+
+
+def _yaml(**over):
+    d = {"uri": "bolt://localhost:7687", "user": "neo4j", "password": "",
+         "database": None, "schema": {}, "source": None}
+    d.update(over)
+    return d
+
+
+def test_yaml_blank_rel_include_ok(monkeypatch):
+    monkeypatch.delenv("HELIX_HOSTED", raising=False)
+    monkeypatch.setattr("eltool.graph_pool.load_neo4j_settings",
+                        lambda: _yaml(schema={"rel_include": None, "rel_exclude": None}))
+    c = resolve_graph_client(_cfg(), GraphClientPool())
+    assert c.schema.rel_include == [] and c.schema.rel_exclude == []
+
+
+def test_yaml_schemeless_uri_is_graph_error(monkeypatch):
+    monkeypatch.delenv("HELIX_HOSTED", raising=False)
+    monkeypatch.setattr("eltool.graph_pool.load_neo4j_settings",
+                        lambda: _yaml(uri="localhost:7687"))
+    with pytest.raises(GraphError, match="neo4j.yaml"):
+        resolve_graph_client(_cfg(), GraphClientPool())
+
+
+# ── /api/graph/test ──────────────────────────────────────────────────────────
+from fastapi.testclient import TestClient  # noqa: E402
+from api.main import app  # noqa: E402
+
+
+def _post(graph):
+    return TestClient(app).post("/api/graph/test", json={"graph": graph}).json()
+
+
+def test_graph_test_bad_scheme():
+    r = _post({"uri": "http://x"})
+    assert r["ok"] is False and r["error"]
+
+
+def test_graph_test_ping_error_still_closes(monkeypatch):
+    closed = []
+
+    def ping(self):
+        raise GraphError("nope")
+
+    monkeypatch.setattr(Neo4jGraphClient, "ping", ping)
+    monkeypatch.setattr(Neo4jGraphClient, "close", lambda self: closed.append(1))
+    r = _post({"uri": "neo4j+s://x"})
+    assert r == {"ok": False, "error": "nope"}
+    assert closed == [1]
+
+
+def test_graph_test_success(monkeypatch):
+    closed = []
+    monkeypatch.setattr(Neo4jGraphClient, "ping", lambda self: 42)
+    monkeypatch.setattr(Neo4jGraphClient, "close", lambda self: closed.append(1))
+    assert _post({"uri": "neo4j+s://x"}) == {"ok": True, "nodes": 42}
+    assert closed == [1]
