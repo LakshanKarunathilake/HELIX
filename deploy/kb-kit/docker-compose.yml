@@ -34,8 +34,8 @@ services:
     volumes:
       - neo4j-data:/data
     ports:
-      - "7474:7474"
-      - "7687:7687"
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
     restart: unless-stopped
 
   # Public HTTPS address for the KB, no open ports needed.

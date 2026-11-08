@@ -11,6 +11,7 @@ def install_bearer_auth(app: Flask, token: str | None) -> None:
 
     A no-op when ``token`` is empty, so local use stays open.
     """
+    token = (token or "").strip()
     if not token:
         return
     expected = f"Bearer {token}".encode("utf-8")

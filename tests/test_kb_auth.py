@@ -21,6 +21,7 @@ def _app(token):
 
 def test_no_token_is_open():
     assert _app(None).post("/query").status_code == 200
+    assert _app("   ").post("/query").status_code == 200
     assert _app("").post("/query").status_code == 200
 
 

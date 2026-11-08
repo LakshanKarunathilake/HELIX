@@ -72,14 +72,26 @@ Returns `503 {"error": "lexical index not initialised"}` if lexical search is di
 
 Look up one concept by id. `<id>` is URL-escaped (composite ids may contain `|`).
 
-Response `200`: the entity record, an object with at least the same `id`, `label` and
-`aliases` information as a search result (the exact shape is whatever the index stores).
-`404 {"error": "'<id>' not found"}` if unknown. HELIX treats 404 as "no such entity".
+Response `200`: the raw index metadata for the concept, a JSON object. Note the keys differ
+from search results. HELIX reads these:
+
+| Key | Type | How HELIX uses it |
+| --- | --- | --- |
+| `entity_id` | string | Becomes the id. Falls back to the id that was requested. |
+| `primary_alias` | string | Becomes the label. Falls back to the first alias, then to the id. |
+| `all_aliases` | string[] | Alias list. Falls back to `aliases` (the server also adds `aliases` as a copy of `all_aliases`). |
+| `semantic_groups`, `semantic_types`, `definition` | string | Optional, empty string if missing. |
+
+Any other keys are ignored. `404 {"error": "'<id>' not found"}` means the id is not in the
+index. HELIX shows that as "not in the index" rather than an error. Other failures return
+`500 {"error": "..."}`.
 
 ### `GET /health`
 
 Public. `200` with `{"status": "ok", "index": {...}, "lexical": {...}|null, "cache": {...}}`
-when ready, `503 {"status": "not_ready"}` while the index is loading.
+when ready. `503 {"status": "not_ready"}` can appear if the index is not usable, but while the
+server first starts it loads the index before opening its port, so connection errors (a tunnel
+shows 502 or 530) during loading are normal.
 
 ### `POST /cache/clear`
 

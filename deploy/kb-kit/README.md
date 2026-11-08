@@ -28,7 +28,8 @@ Edit `.env`:
 docker compose --profile tunnel up -d
 ```
 
-The first start loads the index, which can take a few minutes. Check it:
+The first start loads the index, which can take a few minutes. Errors or a failed connection
+during that time are expected. Watch progress with `docker compose logs -f kb`, then check:
 
 ```
 curl https://<tunnel-host>/health
@@ -62,6 +63,8 @@ docker compose --profile tunnel up -d --build
 ## Optional: Neo4j graph
 
 `docker compose --profile graph up -d` starts Neo4j Community (set `NEO4J_PASSWORD` first).
+Its ports are published on this machine only (`127.0.0.1`). To reach it from the internet you
+must expose Bolt on purpose, with TLS, as described below.
 
 Cloudflare Tunnel cannot carry Bolt (Neo4j's protocol) for a server-side client, so the tunnel
 above will not work for Neo4j. Pick one:
