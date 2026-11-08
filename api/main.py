@@ -16,7 +16,6 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote
 from typing import Any
 
 import pandas as pd
@@ -36,7 +35,8 @@ from eltool import feedback as fb
 from eltool.provenance import classify_method
 from eltool.hosting import cors_origins
 from eltool.graph_client import GraphError, Neo4jGraphClient, load_neo4j_settings
-from eltool.kb_client import KBClient
+from eltool.hosting import UnsafeURLError
+from eltool.kb_client import KBClient, entity_url, fetch_entity
 from eltool.llm_reranker import LLMRerankError, LLMReranker
 from eltool.metrics import metrics
 from eltool.session import (
@@ -335,14 +335,10 @@ def get_row(name: str, idx: int):
     if cfg.debug_show_gold:
         debug_gold = _lookup_gold(str(row.get("mention_uid", "")).strip())
         if debug_gold and cfg.kbs:
-            base = cfg.kbs[0].endpoint_url
+            gold_kb = cfg.kbs[0]
 
             def _kb_entity(cid: str):
-                r = requests.get(_entity_url(base, cid), timeout=10)
-                if r.status_code == 404:
-                    return None
-                r.raise_for_status()
-                return r.json()
+                return fetch_entity(gold_kb, cid)
 
             debug_gold_info = build_gold_report(debug_gold, _kb_entity)
 
@@ -564,17 +560,7 @@ def _derived_url(base: str, suffix: str) -> str:
     return base.rstrip("/") + suffix
 
 
-def _entity_url(base: str, entity_id: str) -> str:
-    """The KB's by-id lookup route, derived from its configured /query URL.
-
-    The id is escaped (composite dictionary ids contain '|') and stripped of
-    path separators so it cannot steer the request off the /entity route.
-    """
-    root = base.rstrip("/")
-    if root.endswith("/query"):
-        root = root[: -len("/query")]
-    safe = quote(str(entity_id).replace("/", "").replace("..", ""), safe="")
-    return f"{root}/entity/{safe}"
+_entity_url = entity_url
 
 
 def _pick_best(dense: list, lexical: list, entity_type: str, threshold: float):
@@ -622,17 +608,18 @@ def lookup_entity(name: str, kb_name: str, entity_id: str):
         raise HTTPException(400, "Empty entity id")
 
     try:
-        resp = requests.get(_entity_url(kb.endpoint_url, eid), timeout=10)
+        ent = fetch_entity(kb, eid)
+    except UnsafeURLError as exc:
+        raise HTTPException(400, str(exc))
     except requests.RequestException as exc:
         raise HTTPException(502, f"KB unreachable: {exc}")
+    except ValueError as exc:
+        raise HTTPException(502, f"KB error: {exc}")
 
-    if resp.status_code == 404:
+    if ent is None:
         return {"found": False, "id": eid,
                 "message": f"'{eid}' is not in the {kb_name} index."}
-    if not resp.ok:
-        raise HTTPException(502, f"KB error {resp.status_code}: {resp.text[:200]}")
 
-    ent = resp.json()
     aliases = ent.get("all_aliases") or ent.get("aliases") or []
     return {
         "found": True,
