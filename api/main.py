@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from eltool.config import KBConfig, SessionConfig
 from eltool import feedback as fb
 from eltool.provenance import classify_method
+from eltool.hosting import cors_origins
 from eltool.graph_client import GraphError, Neo4jGraphClient, load_neo4j_settings
 from eltool.kb_client import KBClient
 from eltool.llm_reranker import LLMRerankError, LLMReranker
@@ -55,7 +56,7 @@ _WRITE_LOCK = threading.Lock()
 app = FastAPI(title="ELTool API", version="1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
 )
