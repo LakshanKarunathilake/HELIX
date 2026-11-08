@@ -30,7 +30,7 @@ from pydantic import BaseModel, ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from eltool.config import GraphConnection, KBConfig, SessionConfig
+from eltool.config import SLUG_RE, GraphConnection, KBConfig, SessionConfig
 from eltool import feedback as fb
 from eltool.provenance import classify_method
 from eltool.hosting import cors_origins
@@ -129,8 +129,10 @@ class CreateSessionRequest(BaseModel):
 def create_session(req: CreateSessionRequest):
     try:
         kbs = [KBConfig(**k) for k in req.kbs]
-    except (ValidationError, Exception) as e:
-        raise HTTPException(400, str(e))
+    except ValidationError as e:
+        raise HTTPException(400, _safe_validation_error(e))
+    except Exception as e:
+        raise HTTPException(400, f"Invalid KB config ({type(e).__name__})")
 
     sess_path = session_dir(req.session_name)
     sess_path.mkdir(parents=True, exist_ok=True)
@@ -176,7 +178,7 @@ def create_session(req: CreateSessionRequest):
             debug_show_gold=req.debug_show_gold,
         )
     except ValidationError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, _safe_validation_error(e))
 
     cfg.save(session_config_path(req.session_name))
     df, _ = load_input(dest, req.delimiter)
@@ -201,8 +203,11 @@ def update_session(name: str, body: dict = Body(...)):
         cfg.save(session_config_path(name))
         df, _ = load_input(Path(cfg.input_path), cfg.delimiter)
         init_output(output_csv_path(name), df, [k.name for k in cfg.kbs], cfg.annotator)
-    except (ValidationError, Exception) as e:
-        raise HTTPException(400, str(e))
+    except ValidationError as e:
+        raise HTTPException(400, _safe_validation_error(e))
+    except Exception as e:
+        # Never echo str(e) here: it may embed the merged body (secrets).
+        raise HTTPException(400, f"Could not save session ({type(e).__name__})")
     return {"ok": True}
 
 
@@ -1067,7 +1072,7 @@ class TestKBRequest(BaseModel):
 
 def _existing_or_none(session_name: str | None) -> SessionConfig | None:
     """The named session's config, or None if absent/invalid (never a 404)."""
-    if not session_name:
+    if not session_name or not SLUG_RE.match(session_name):
         return None
     try:
         return _load_cfg(session_name)
