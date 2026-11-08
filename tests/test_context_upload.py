@@ -90,7 +90,9 @@ def test_encrypted_rejected(tmp_path):
         extract_context_zip(z, tmp_path / "out")
 
 
-def test_lying_declared_size_rejected(tmp_path):
+def test_inflated_size_header_rejected(tmp_path):
+    # A lying header is caught by zipfile's own size/CRC checks (the in-code
+    # over-read check is only a backstop).
     z = _zip(tmp_path / "c.zip", [("a.txt", "x" * 100)])
     raw = bytearray(z.read_bytes())
     # shrink declared uncompressed size (stored, so csize == size) in both headers
@@ -212,3 +214,94 @@ def test_info_endpoint(client, monkeypatch):
     assert client.get("/api/info").json() == {"hosted": False}
     monkeypatch.setenv("HELIX_HOSTED", "1")
     assert client.get("/api/info").json() == {"hosted": True}
+
+
+# ── fix round 1 ──────────────────────────────────────────────────────────────
+
+def test_read_context_confined(tmp_path):
+    from api.main import _read_context
+    folder = tmp_path / "ctx"
+    folder.mkdir()
+    (folder / "abc.txt").write_text("ABC")
+    (folder / "ok.txt").write_text("OK")
+    (tmp_path / "x").write_text("SECRET")
+    (tmp_path / "x.txt").write_text("SECRET")
+    assert _read_context(folder, "/etc/passwd") is None
+    assert _read_context(folder, "../x") is None
+    assert _read_context(folder, "a*") is None
+    assert _read_context(folder, "ok") == "OK"
+
+
+def test_row_context_traversal_not_served(client, tmp_path):
+    client.post("/api/sessions/s/context",
+                files={"file": ("c.zip", _zbytes([("d1.txt", "fine")]))})
+    sdir = tmp_path / "sessions" / "s"
+    (sdir / "outside.txt").write_text("SECRET")
+    pd.DataFrame({"entity_text": ["lung"], "document_id": ["../outside"]}).to_csv(
+        sdir / "input.csv", index=False)
+    row = client.get("/api/sessions/s/rows/0").json()
+    assert row["context_text"] is None
+
+
+def test_corrupt_deflate_is_400_and_clean(client, tmp_path):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("d1.txt", "hello world " * 500)
+    raw = bytearray(buf.getvalue())
+    for k in range(40, 60):  # corrupt the start of the deflate stream
+        raw[k] ^= 0xFF
+    r = client.post("/api/sessions/s/context", files={"file": ("c.zip", bytes(raw))})
+    assert r.status_code == 400
+    sdir = tmp_path / "sessions" / "s"
+    assert [p.name for p in sdir.iterdir() if p.name.startswith(".ctx")] == []
+    assert list((tmp_path / "up").iterdir()) == []
+
+
+def test_swap_failure_restores_old_dest(tmp_path, monkeypatch):
+    from pathlib import Path
+    dest = tmp_path / "out"
+    dest.mkdir()
+    (dest / "old.txt").write_text("old")
+    z = _zip(tmp_path / "c.zip", [("n.txt", "N")])
+    real = Path.rename
+
+    def flaky(self, target):
+        if self.name.startswith(".ctx-") and not self.name.startswith(".ctx-old-"):
+            raise OSError("boom")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "rename", flaky)
+    with pytest.raises(OSError):
+        extract_context_zip(z, dest)
+    monkeypatch.undo()
+    assert (dest / "old.txt").read_text() == "old"
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".ctx")] == []
+
+
+def test_write_oserror_propagates_not_400(tmp_path, monkeypatch):
+    z = _zip(tmp_path / "c.zip", [("n.txt", "N")])
+    import builtins
+    real_open = builtins.open
+
+    def bad_open(path, mode="r", *a, **k):
+        if "w" in mode and str(path).endswith("n.txt"):
+            raise OSError(28, "No space left on device")
+        return real_open(path, mode, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", bad_open)
+    with pytest.raises(OSError) as ei:
+        extract_context_zip(z, tmp_path / "out")
+    assert not isinstance(ei.value, ContextUploadError)
+
+
+def test_hosted_create_bad_folder_leaves_no_session_dir(client, monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIX_HOSTED", "1")
+    up = tmp_path / "up" / "in.csv"
+    up.write_text("entity_text,document_id\nlung,d1\n")
+    r = client.post("/api/sessions", json={
+        "session_name": "new", "annotator": "a", "tmp_path": str(up),
+        "original_filename": "in.csv", "delimiter": ",", "label_column": "entity_text",
+        "context_folder": "/etc"})
+    assert r.status_code == 400
+    assert not (tmp_path / "sessions" / "new").exists()
+    assert up.exists()

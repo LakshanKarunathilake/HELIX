@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import re
 import shutil
+import lzma
 import tempfile
+import uuid
 import zipfile
+import zlib
 from pathlib import Path, PurePosixPath
 
 
@@ -13,6 +16,8 @@ class ContextUploadError(ValueError):
     """The uploaded context archive is unusable or unsafe."""
 
 
+_ZIP_READ_ERRORS = (zlib.error, EOFError, zipfile.BadZipFile, NotImplementedError,
+                    lzma.LZMAError, RuntimeError, ValueError)
 _DRIVE_RE = re.compile(r"^[A-Za-z]:")
 
 
@@ -80,23 +85,43 @@ def extract_context_zip(
         try:
             for info, base in wanted:
                 written = 0
-                with zf.open(info) as src, open(tmp / base, "wb") as out:
+                try:
+                    src = zf.open(info)
+                except _ZIP_READ_ERRORS as e:
+                    raise ContextUploadError(f"could not read {base} in the zip") from e
+                with src, open(tmp / base, "wb") as out:
                     while True:
-                        chunk = src.read(65536)
+                        try:
+                            chunk = src.read(65536)
+                        except _ZIP_READ_ERRORS as e:
+                            raise ContextUploadError(
+                                f"could not read {base} in the zip") from e
                         if not chunk:
                             break
                         written += len(chunk)
+                        # Backstop: ZipExtFile already caps reads and checks the CRC.
                         if written > info.file_size:
                             raise ContextUploadError(
                                 f"{base} is larger than its declared size")
-                        out.write(chunk)
-            if dest.exists():
-                shutil.rmtree(dest)
-            tmp.rename(dest)
-        except BaseException as e:
+                        out.write(chunk)  # filesystem errors propagate (not zip errors)
+            _swap(tmp, dest)
+        except BaseException:
             shutil.rmtree(tmp, ignore_errors=True)
-            if isinstance(e, (zipfile.BadZipFile, RuntimeError, OSError)) and not isinstance(
-                    e, ContextUploadError):
-                raise ContextUploadError("could not read the zip file") from e
             raise
     return len(wanted)
+
+
+def _swap(tmp: Path, dest: Path) -> None:
+    """Replace ``dest`` with ``tmp``; restore the old dest if the swap fails."""
+    old: Path | None = None
+    if dest.exists():
+        old = dest.parent / f".ctx-old-{uuid.uuid4().hex}"
+        dest.rename(old)
+    try:
+        tmp.rename(dest)
+    except BaseException:
+        if old is not None:
+            old.rename(dest)
+        raise
+    if old is not None:
+        shutil.rmtree(old, ignore_errors=True)

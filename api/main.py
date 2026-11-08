@@ -6,6 +6,7 @@ Run from the ELTool root:
 """
 from __future__ import annotations
 
+import glob
 import io
 import json
 import logging
@@ -24,6 +25,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Body
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ValidationError
@@ -155,6 +157,10 @@ def create_session(req: CreateSessionRequest):
     except Exception as e:
         raise HTTPException(400, f"Invalid KB config ({type(e).__name__})")
 
+    _check_context_folder(req.context_folder, req.session_name)
+    if req.context_folder and not Path(req.context_folder).is_dir():
+        raise HTTPException(400, f"Context folder not found: {req.context_folder}")
+
     sess_path = session_dir(req.session_name)
     sess_path.mkdir(parents=True, exist_ok=True)
 
@@ -163,10 +169,6 @@ def create_session(req: CreateSessionRequest):
         raise HTTPException(400, "Uploaded file not found — please re-upload.")
     dest = input_copy_path(req.session_name, req.original_filename)
     src.rename(dest)
-
-    _check_context_folder(req.context_folder, req.session_name)
-    if req.context_folder and not Path(req.context_folder).is_dir():
-        raise HTTPException(400, f"Context folder not found: {req.context_folder}")
 
     try:
         cfg = SessionConfig(
@@ -251,12 +253,18 @@ async def upload_context(name: str, file: UploadFile = File(...)):
                     raise HTTPException(413, "Context zip is larger than 50 MB.")
                 out.write(chunk)
         dest = session_dir(name) / "context"
+
+        def _finish() -> int:
+            n = extract_context_zip(tmp, dest)
+            cfg.context_folder = str(dest)
+            cfg.save(session_config_path(name))
+            return n
+
         try:
-            count = extract_context_zip(tmp, dest)
+            # Blocking extract/writes run off the event loop.
+            count = await run_in_threadpool(_finish)
         except ContextUploadError as e:
             raise HTTPException(400, str(e))
-        cfg.context_folder = str(dest)
-        cfg.save(session_config_path(name))
         return {"files": count}
     finally:
         tmp.unlink(missing_ok=True)
@@ -354,6 +362,24 @@ def _lookup_gold(uid: str) -> str | None:
         return None
 
 
+def _read_context(folder: Path, doc_id: str) -> str | None:
+    """Read the context text for doc_id, never leaving ``folder``."""
+    root = folder.resolve()
+    # Try <doc_id>.txt, then <doc_id> exactly, then any extension
+    try:
+        globbed = list(folder.glob(f"{glob.escape(doc_id)}.*"))
+    except (NotImplementedError, ValueError, OSError):
+        globbed = []  # e.g. absolute doc_id: not a valid relative pattern
+    for candidate in [folder / f"{doc_id}.txt", folder / doc_id, *globbed]:
+        try:
+            resolved = candidate.resolve()
+            if resolved.is_relative_to(root) and resolved.is_file():
+                return resolved.read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            continue
+    return None
+
+
 @app.get("/api/sessions/{name}/rows/{idx}")
 def get_row(name: str, idx: int):
     cfg = _load_cfg(name)
@@ -369,13 +395,7 @@ def get_row(name: str, idx: int):
         try:
             doc_id = str(row.get(cfg.doc_id_col, "")).strip()
             if doc_id:
-                folder = Path(cfg.context_folder)
-                # Try <doc_id>.txt, then <doc_id> exactly, then any extension
-                for candidate in [folder / f"{doc_id}.txt", folder / doc_id,
-                                   *list(folder.glob(f"{doc_id}.*"))]:
-                    if Path(candidate).is_file():
-                        context_text = Path(candidate).read_text(encoding="utf-8", errors="replace")
-                        break
+                context_text = _read_context(Path(cfg.context_folder), doc_id)
         except Exception as exc:
             logger.warning("Context lookup failed for row %d: %s", idx, exc)
     if cfg.span_col:
