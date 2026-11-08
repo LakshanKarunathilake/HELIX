@@ -69,8 +69,11 @@ def _require_public(host: str) -> None:
     if not addrs:
         raise UnsafeURLError(f"Host '{host}' did not resolve")
     for a in addrs:
-        if (a.is_private or a.is_loopback or a.is_link_local or a.is_reserved
-                or a.is_multicast or a.is_unspecified):
+        if a.version == 6 and a.ipv4_mapped is not None:
+            a = a.ipv4_mapped
+        # is_global excludes private, loopback, link-local, reserved, CGNAT
+        # (100.64.0.0/10) and the other IANA special-purpose ranges.
+        if not a.is_global or a.is_multicast:
             raise UnsafeURLError(f"Host '{host}' resolves to a non-public address")
 
 

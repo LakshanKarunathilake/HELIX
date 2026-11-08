@@ -110,3 +110,36 @@ def test_cors_origins(monkeypatch):
     assert cors_origins() == []
     monkeypatch.setenv("HELIX_CORS_ORIGINS", "https://a.org, https://b.org")
     assert cors_origins() == ["https://a.org", "https://b.org"]
+
+
+# ── final review I1: is_global, odd URL spellings ───────────────────────────
+
+@pytest.mark.parametrize("url", [
+    "https://100.100.100.200/latest/meta-data",   # CGNAT: Alibaba metadata, Tailscale
+    "https://100.64.0.1/",
+    "https://[::ffff:127.0.0.1]/q",               # IPv4-mapped loopback
+    "https://[::ffff:169.254.169.254]/q",
+    "https://192.0.0.8/",                         # IETF protocol assignments
+    "https://198.18.0.1/",                        # benchmarking
+    "https://224.0.0.1/",                         # multicast
+    "HTTPS://127.0.0.1/q",                        # uppercase scheme
+    "https://evil@127.0.0.1/q",                   # userinfo
+    "https://kb.example.org:99999/q",             # out-of-range port
+])
+def test_hosted_rejects_non_global(hosted, monkeypatch, url):
+    _resolve_to(monkeypatch, "93.184.216.34")
+    with pytest.raises(UnsafeURLError):
+        check_outbound_url(url)
+
+
+def test_hosted_rejects_decimal_loopback(hosted):
+    # Not an ip_address() literal, so it goes through the real resolver,
+    # which maps it to 127.0.0.1.
+    with pytest.raises(UnsafeURLError):
+        check_outbound_url("https://2130706433/q")
+
+
+def test_hosted_rejects_cgnat_by_resolution(hosted, monkeypatch):
+    _resolve_to(monkeypatch, "100.100.100.200")
+    with pytest.raises(UnsafeURLError):
+        check_outbound_url("https://metadata.example.org/")
