@@ -113,7 +113,7 @@ export function Configure() {
     setGraphTesting(true)
     setGraphTest(null)
     try {
-      setGraphTest(await api.testGraph(g, isEdit ? sessionName : undefined))
+      setGraphTest(await api.testGraph(stripGraphFlags(g), isEdit ? sessionName : undefined))
     } catch (err: any) {
       setGraphTest({ ok: false, error: err.message })
     } finally {
@@ -162,7 +162,7 @@ export function Configure() {
           annotator,
           label_column: labelCol,
           info_columns: infoCols,
-          kbs,
+          kbs: kbs.map(stripKbFlags),
           context_folder: contextFolder.trim() || null,
           doc_id_col: docIdCol || null,
           span_col: spanCol || null,
@@ -177,7 +177,7 @@ export function Configure() {
           llm_prompt: llmPrompt.trim() || null,
           llm_api_key: llmApiKey || null,   // blank = keep existing (server-side)
           enable_graph: enableGraph,
-          graph: graph?.uri?.trim() ? graph : null,
+          graph: graph?.uri?.trim() ? stripGraphFlags(graph) : null,
           collect_feedback: collectFeedback,
           debug_show_gold: debugShowGold,
         }
@@ -192,7 +192,7 @@ export function Configure() {
           delimiter: parsed!.delimiter,
           label_column: labelCol,
           info_columns: infoCols,
-          kbs,
+          kbs: kbs.map(stripKbFlags),
           context_folder: contextFolder.trim() || null,
           doc_id_col: docIdCol || null,
           span_col: spanCol || null,
@@ -207,7 +207,7 @@ export function Configure() {
           llm_prompt: llmPrompt.trim() || null,
           llm_api_key: llmApiKey || null,
           enable_graph: enableGraph,
-          graph: graph?.uri?.trim() ? graph : null,
+          graph: graph?.uri?.trim() ? stripGraphFlags(graph) : null,
           collect_feedback: collectFeedback,
           debug_show_gold: debugShowGold,
         })
@@ -514,6 +514,7 @@ export function Configure() {
                 type="password"
                 autoComplete="new-password"
                 value={g.password}
+                placeholder={g.password_set ? 'stored — leave blank to keep' : ''}
                 onChange={e => setG({ password: e.target.value })}
               />
             </div>
@@ -787,6 +788,7 @@ export function Configure() {
             kb={kb}
             index={i}
             sampleLabel={labelCol}
+            sessionName={isEdit ? sessionName : undefined}
             onChange={patch => updateKB(i, patch)}
             onRemove={() => removeKB(i)}
           />
@@ -867,13 +869,24 @@ function Section({ title, children, action }: { title: string; children: React.R
   )
 }
 
+// UI-only flags must not be sent back to the server.
+function stripKbFlags(kb: KBConfig): KBConfig {
+  const { headers_set: _h, ...rest } = kb
+  return rest as KBConfig
+}
+function stripGraphFlags(g: GraphConnection): GraphConnection {
+  const { password_set: _p, ...rest } = g
+  return rest as GraphConnection
+}
+
 // ── KB form ──────────────────────────────────────────────────────────────────
 
 function KBForm({
-  kb, index, sampleLabel, onChange, onRemove,
+  kb, index, sampleLabel, onChange, onRemove, sessionName,
 }: {
   kb: KBConfig; index: number; sampleLabel: string
   onChange: (p: Partial<KBConfig>) => void; onRemove: () => void
+  sessionName?: string
 }) {
   const [open, setOpen] = useState(index === 0)
   const [testing, setTesting] = useState(false)
@@ -882,7 +895,7 @@ function KBForm({
   async function handleTest() {
     setTesting(true); setTestResult(null)
     try {
-      const r = await api.testKB(kb, sampleLabel || 'test')
+      const r = await api.testKB(stripKbFlags(kb), sampleLabel || 'test', sessionName)
       console.log('test result:', r)
       setTestResult(r.ok
         ? { ok: true, msg: `${r.candidates?.length ?? 0} candidates returned`, cands: r.candidates }
@@ -941,7 +954,7 @@ function KBForm({
             </div>
             <div>
               <label className="label">headers (JSON)</label>
-              <input className="input" value={kb.headers} onChange={e => onChange({ headers: e.target.value })} placeholder="{}" />
+              <input className="input" value={kb.headers} onChange={e => onChange({ headers: e.target.value })} placeholder={kb.headers_set ? 'stored — leave blank to keep' : '{}'} />
             </div>
           </div>
 

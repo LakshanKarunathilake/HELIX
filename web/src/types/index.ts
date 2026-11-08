@@ -9,6 +9,7 @@ export interface KBConfig {
   label_field: string
   score_field: string
   headers: string
+  headers_set?: boolean   // UI-only: server holds stored headers (write-only)
   enable_dense: boolean
   enable_lexical: boolean
 }
@@ -17,6 +18,7 @@ export interface GraphConnection {
   uri: string
   user: string
   password: string
+  password_set?: boolean   // UI-only: server holds a stored password (write-only)
   database?: string | null
   node_label: string
   id_prop: string

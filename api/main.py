@@ -37,6 +37,7 @@ from eltool.hosting import cors_origins
 from eltool.graph_client import GraphError, Neo4jGraphClient, load_neo4j_settings
 from eltool.graph_pool import GraphClientPool, resolve_graph_client
 from eltool.hosting import UnsafeURLError
+from eltool.secrets import fill_graph_secret, fill_kb_secret, mask_session, merge_secrets
 from eltool.kb_client import KBClient, entity_url, fetch_entity
 from eltool.llm_reranker import LLMRerankError, LLMReranker
 from eltool.metrics import metrics
@@ -186,21 +187,15 @@ def create_session(req: CreateSessionRequest):
 @app.get("/api/sessions/{name}")
 def get_session(name: str):
     cfg = _load_cfg(name)
-    d = cfg.model_dump()
-    # Never expose the stored API key to the browser; report only whether one is set.
-    d["llm_api_key_set"] = bool(d.get("llm_api_key"))
-    d["llm_api_key"] = ""
-    return d
+    # Secrets (LLM key, KB headers, Neo4j password) are write-only: masked here.
+    return mask_session(cfg)
 
 
 @app.put("/api/sessions/{name}")
 def update_session(name: str, body: dict = Body(...)):
     existing = _load_cfg(name)
-    body = dict(body)
-    body.pop("llm_api_key_set", None)  # UI-only flag, not a config field
-    # A blank key from the UI means "keep whatever is stored" (it was masked on GET).
-    if not (body.get("llm_api_key") or "").strip():
-        body["llm_api_key"] = existing.llm_api_key
+    # Blank secrets keep the stored value while the address is unchanged.
+    body = merge_secrets(body, existing)
     try:
         cfg = SessionConfig(**body)
         cfg.save(session_config_path(name))
@@ -801,16 +796,17 @@ _GRAPH_POOL = GraphClientPool()
 
 class GraphTestRequest(BaseModel):
     graph: dict[str, Any]
-    session_name: str | None = None   # reserved: test with a saved secret (later task)
+    session_name: str | None = None   # reuse that session's stored password if unchanged
 
 
 @app.post("/api/graph/test")
 def graph_test(req: GraphTestRequest):
     """Check a Neo4j connection before saving it. Never raises; returns ok/error."""
     try:
-        conn = GraphConnection(**req.graph)
+        graph = fill_graph_secret(req.graph, _existing_or_none(req.session_name))
+        conn = GraphConnection(**graph)
     except ValidationError as e:
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": _safe_validation_error(e)}
     client = None
     try:
         client = Neo4jGraphClient.from_connection(conn)
@@ -1066,12 +1062,35 @@ def document_mentions(name: str, idx: int = -1, doc_id: str = ""):
 class TestKBRequest(BaseModel):
     kb_config: dict[str, Any]
     label: str = "test"
+    session_name: str | None = None
+
+
+def _existing_or_none(session_name: str | None) -> SessionConfig | None:
+    """The named session's config, or None if absent/invalid (never a 404)."""
+    if not session_name:
+        return None
+    try:
+        return _load_cfg(session_name)
+    except Exception:
+        return None
+
+
+def _safe_validation_error(e: ValidationError) -> str:
+    """Format a validation error without echoing input values (they may be secrets)."""
+    return "; ".join(
+        f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}"
+        for err in e.errors(include_input=False, include_url=False)
+    )
 
 
 @app.post("/api/kb/test")
 def test_kb(req: TestKBRequest):
     try:
-        kb_cfg = KBConfig(**req.kb_config)
+        try:
+            kb_dict = fill_kb_secret(req.kb_config, _existing_or_none(req.session_name))
+            kb_cfg = KBConfig(**kb_dict)
+        except ValidationError as e:
+            return {"ok": False, "error": _safe_validation_error(e)}
         cands = KBClient(kb_cfg).query(req.label)
         return {"ok": True, "candidates": _serialize_candidates(cands)}
     except Exception as e:

@@ -229,11 +229,11 @@ export const optimizeDocument = (name: string, idx: number, kb_name: string) =>
 
 // ── KB test ───────────────────────────────────────────────────────────────────
 
-export const testKB = (kb_config: KBConfig, label: string) =>
+export const testKB = (kb_config: KBConfig, label: string, sessionName?: string) =>
   req<{ ok: boolean; candidates?: Candidate[]; error?: string }>('/kb/test', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ kb_config, label }),
+    body: JSON.stringify({ kb_config, label, session_name: sessionName ?? null }),
   })
 
 // ── Neo4j connection test ──────────────────────────────────────────────────────
