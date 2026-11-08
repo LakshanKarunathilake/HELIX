@@ -1,0 +1,51 @@
+# HELIX KB kit - run your own KB search server and share it over the internet.
+# See README.md. Copy .env.example to .env and fill it in first.
+#
+#   docker compose --profile tunnel up -d          # KB + Cloudflare Tunnel
+#   docker compose up -d                           # KB only (local)
+#   docker compose --profile graph up -d           # also start Neo4j
+
+services:
+  kb:
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile.kb
+    environment:
+      KB_HOST: 0.0.0.0
+      KB_PORT: "8765"
+      KB_INDEX_PATH: /data/index/${INDEX_PREFIX}
+      KB_ADAPTER_PATH: /data/adapter
+      KB_AUTH_TOKEN: ${KB_AUTH_TOKEN:-}
+      KMP_DUPLICATE_LIB_OK: "TRUE"
+    volumes:
+      - ${INDEX_HOST_DIR}:/data/index:ro
+      - ${ADAPTER_HOST_DIR}:/data/adapter:ro
+      - ../../kb/config.yaml:/app/kb/config.yaml:ro
+    ports:
+      - "127.0.0.1:8765:8765"
+    restart: unless-stopped
+
+  # Optional graph database. See README for how to reach it from the internet.
+  neo4j:
+    image: neo4j:5-community
+    profiles: [graph]
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-please-change}
+    volumes:
+      - neo4j-data:/data
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    restart: unless-stopped
+
+  # Public HTTPS address for the KB, no open ports needed.
+  cloudflared:
+    image: cloudflare/cloudflared:2024.10.0
+    profiles: [tunnel]
+    command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN}
+    depends_on:
+      - kb
+    restart: unless-stopped
+
+volumes:
+  neo4j-data:
