@@ -1,4 +1,4 @@
-import type { Candidate, DocumentMentions, FeedbackOptions, GraphData, KBConfig, LLMRerank, PanelName, ParsedFile, Progress, Reflection, RowData, SessionConfig } from '@/types'
+import type { Candidate, DocumentMentions, FeedbackOptions, GraphConnection, GraphData, KBConfig, LLMRerank, PanelName, ParsedFile, Progress, Reflection, RowData, SessionConfig } from '@/types'
 
 const BASE = '/api'
 
@@ -47,6 +47,7 @@ export const createSession = (body: {
   llm_prompt?: string | null
   llm_api_key?: string | null
   enable_graph?: boolean
+  graph?: GraphConnection | null
   collect_feedback?: boolean
   debug_show_gold?: boolean
 }) =>
@@ -233,6 +234,15 @@ export const testKB = (kb_config: KBConfig, label: string) =>
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ kb_config, label }),
+  })
+
+// ── Neo4j connection test ──────────────────────────────────────────────────────
+
+export const testGraph = (graph: GraphConnection, sessionName?: string) =>
+  req<{ ok: boolean; nodes?: number; error?: string }>('/graph/test', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ graph, session_name: sessionName ?? null }),
   })
 
 // ── export & per-step snapshots ────────────────────────────────────────────────

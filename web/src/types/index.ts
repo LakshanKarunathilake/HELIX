@@ -13,6 +13,34 @@ export interface KBConfig {
   enable_lexical: boolean
 }
 
+export interface GraphConnection {
+  uri: string
+  user: string
+  password: string
+  database?: string | null
+  node_label: string
+  id_prop: string
+  rel_type: string
+  rel_prop: string
+  name_prop: string
+  rel_include: string[]
+  rel_exclude: string[]
+}
+
+export const DEFAULT_GRAPH: GraphConnection = {
+  uri: '',
+  user: 'neo4j',
+  password: '',
+  database: null,
+  node_label: 'Concept',
+  id_prop: 'cui',
+  rel_type: 'RELATES_TO',
+  rel_prop: 'rel',
+  name_prop: 'concept',
+  rel_include: [],
+  rel_exclude: [],
+}
+
 export interface SessionConfig {
   session_name: string
   annotator: string
@@ -40,6 +68,7 @@ export interface SessionConfig {
   llm_api_key?: string | null
   llm_api_key_set?: boolean   // read-only flag from GET (key itself is masked)
   enable_graph?: boolean
+  graph?: GraphConnection | null
 }
 
 export interface LLMRerank {

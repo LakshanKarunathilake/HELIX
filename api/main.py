@@ -30,11 +30,12 @@ from pydantic import BaseModel, ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from eltool.config import KBConfig, SessionConfig
+from eltool.config import GraphConnection, KBConfig, SessionConfig
 from eltool import feedback as fb
 from eltool.provenance import classify_method
 from eltool.hosting import cors_origins
 from eltool.graph_client import GraphError, Neo4jGraphClient, load_neo4j_settings
+from eltool.graph_pool import GraphClientPool, resolve_graph_client
 from eltool.hosting import UnsafeURLError
 from eltool.kb_client import KBClient, entity_url, fetch_entity
 from eltool.llm_reranker import LLMRerankError, LLMReranker
@@ -114,6 +115,7 @@ class CreateSessionRequest(BaseModel):
     llm_prompt: str | None = None
     llm_api_key: str | None = None
     enable_graph: bool = False
+    graph: dict[str, Any] | None = None
     graph_pin_threshold: float = 0.90
     graph_switch_margin: float = 0.10
     enable_auto_select: bool = True
@@ -164,6 +166,7 @@ def create_session(req: CreateSessionRequest):
             llm_prompt=req.llm_prompt,
             llm_api_key=req.llm_api_key,
             enable_graph=req.enable_graph,
+            graph=req.graph,
             graph_pin_threshold=req.graph_pin_threshold,
             graph_switch_margin=req.graph_switch_margin,
             enable_auto_select=req.enable_auto_select,
@@ -791,24 +794,34 @@ def get_candidates(name: str, req: CandidateRequest):
 
 # ── graph neighborhood (Neo4j) ────────────────────────────────────────────────
 
-# Graph clients are reused across requests. Connection + schema come from the
-# neo4j.yaml config file (or env fallback); cache is keyed on those resolved
-# values so editing the file and reloading picks up the change.
-_GRAPH_CLIENTS: dict[tuple, Neo4jGraphClient] = {}
+# Graph clients are pooled per connection (session.graph, or the server
+# neo4j.yaml for legacy local sessions); see eltool/graph_pool.py.
+_GRAPH_POOL = GraphClientPool()
 
 
-def _get_graph_client() -> Neo4jGraphClient:
-    s = load_neo4j_settings()
-    sc = s["schema"]
-    key = (
-        s["uri"], s["user"], s["password"], s["database"] or "",
-        sc.get("node_label", ""), sc.get("id_prop", ""), sc.get("rel_type", ""),
-        sc.get("rel_prop", ""), sc.get("name_prop", ""),
-        tuple(sc.get("rel_include") or []), tuple(sc.get("rel_exclude") or []),
-    )
-    if key not in _GRAPH_CLIENTS:
-        _GRAPH_CLIENTS[key] = Neo4jGraphClient()
-    return _GRAPH_CLIENTS[key]
+class GraphTestRequest(BaseModel):
+    graph: dict[str, Any]
+    session_name: str | None = None   # reserved: test with a saved secret (later task)
+
+
+@app.post("/api/graph/test")
+def graph_test(req: GraphTestRequest):
+    """Check a Neo4j connection before saving it. Never raises; returns ok/error."""
+    try:
+        conn = GraphConnection(**req.graph)
+    except ValidationError as e:
+        return {"ok": False, "error": str(e)}
+    client = None
+    try:
+        client = Neo4jGraphClient.from_connection(conn)
+        return {"ok": True, "nodes": client.ping()}
+    except GraphError as e:
+        return {"ok": False, "error": str(e)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    finally:
+        if client is not None:
+            client.close()
 
 
 class GraphCandidateRequest(BaseModel):
@@ -823,7 +836,7 @@ def graph_candidates(name: str, req: GraphCandidateRequest):
     if not cfg.enable_graph:
         return {"nodes": [], "edges": [], "enabled": False}
     try:
-        result = _get_graph_client().candidate_graph(req.ids, req.neighbor_limit)
+        result = resolve_graph_client(cfg, _GRAPH_POOL).candidate_graph(req.ids, req.neighbor_limit)
         return {**result.to_dict(), "enabled": True}
     except GraphError as e:
         logger.warning("Graph candidate query failed: %s", e)
@@ -841,7 +854,7 @@ def graph_document(name: str, req: GraphDocumentRequest):
     if not cfg.enable_graph:
         return {"nodes": [], "edges": [], "enabled": False}
     try:
-        result = _get_graph_client().document_graph(req.cuis)
+        result = resolve_graph_client(cfg, _GRAPH_POOL).document_graph(req.cuis)
         return {**result.to_dict(), "enabled": True}
     except GraphError as e:
         logger.warning("Graph document query failed: %s", e)
@@ -901,7 +914,7 @@ def graph_optimize(name: str, req: GraphOptimizeRequest):
         mention_candidates.append((int(i), [(c.id, c.score) for c in fused[:top_n]]))
 
     try:
-        result = _get_graph_client().optimize_selection(mention_candidates, pin_threshold=cfg.graph_pin_threshold, switch_margin=cfg.graph_switch_margin)
+        result = resolve_graph_client(cfg, _GRAPH_POOL).optimize_selection(mention_candidates, pin_threshold=cfg.graph_pin_threshold, switch_margin=cfg.graph_switch_margin)
         metrics.record_graph(
             name, doc=doc_id, mentions=len(mention_candidates),
             nodes=result.get("nodes_queried", 0), edges=result.get("edges_found", 0),
@@ -940,9 +953,13 @@ def graph_optimize_all(name: str, skip_annotated: bool = True):
     docs_done = 0
     edges_before_total = edges_after_total = 0
 
+    try:
+        gc = resolve_graph_client(cfg, _GRAPH_POOL)
+    except GraphError as e:
+        return {"enabled": True, "error": str(e)}
+
     with _WRITE_LOCK:
         out_df = init_output(out_path, df, [k.name for k in cfg.kbs], cfg.annotator)
-        gc = _get_graph_client()
 
         for doc_id, group in df.groupby(df[cfg.doc_id_col].astype(str).str.strip()):
             if not str(doc_id).strip():

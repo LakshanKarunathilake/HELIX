@@ -6,8 +6,8 @@ import {
   FlaskConical, CheckCircle2, XCircle, Loader2, ArrowRight, Zap,
 } from 'lucide-react'
 import * as api from '@/api/client'
-import type { Candidate, KBConfig, ParsedFile, SessionConfig } from '@/types'
-import { DEFAULT_KB } from '@/types'
+import type { Candidate, GraphConnection, KBConfig, ParsedFile, SessionConfig } from '@/types'
+import { DEFAULT_GRAPH, DEFAULT_KB } from '@/types'
 import { CandidateCard } from '@/components/CandidateCard'
 import { AutoAnnotateModal } from '@/components/AutoAnnotateModal'
 import { MetricsModal } from '@/components/MetricsModal'
@@ -54,6 +54,9 @@ export function Configure() {
   const [defaultPrompt, setDefaultPrompt] = useState('')
   // Neo4j graph
   const [enableGraph, setEnableGraph] = useState(false)
+  const [graph, setGraph] = useState<GraphConnection | null>(null)
+  const [graphTesting, setGraphTesting] = useState(false)
+  const [graphTest, setGraphTest] = useState<{ ok: boolean; nodes?: number; error?: string } | null>(null)
   const [collectFeedback, setCollectFeedback] = useState(false)
   const [debugShowGold, setDebugShowGold] = useState(false)
 
@@ -99,7 +102,24 @@ export function Configure() {
     if (existingCfg.llm_prompt) setLlmPrompt(existingCfg.llm_prompt)
     setLlmApiKeySet(!!existingCfg.llm_api_key_set)
     if (existingCfg.enable_graph != null) setEnableGraph(existingCfg.enable_graph)
+    if (existingCfg.graph) setGraph({ ...DEFAULT_GRAPH, ...existingCfg.graph })
   }, [existingCfg])
+
+  const g: GraphConnection = graph ?? DEFAULT_GRAPH
+  const setG = (patch: Partial<GraphConnection>) => setGraph({ ...g, ...patch })
+  const csv = (v: string) => v.split(',').map(x => x.trim()).filter(Boolean)
+
+  async function handleTestGraph() {
+    setGraphTesting(true)
+    setGraphTest(null)
+    try {
+      setGraphTest(await api.testGraph(g, isEdit ? sessionName : undefined))
+    } catch (err: any) {
+      setGraphTest({ ok: false, error: err.message })
+    } finally {
+      setGraphTesting(false)
+    }
+  }
 
   // ── file upload ──────────────────────────────────────────────────────────
   const [uploading, setUploading] = useState(false)
@@ -157,6 +177,7 @@ export function Configure() {
           llm_prompt: llmPrompt.trim() || null,
           llm_api_key: llmApiKey || null,   // blank = keep existing (server-side)
           enable_graph: enableGraph,
+          graph: graph?.uri?.trim() ? graph : null,
           collect_feedback: collectFeedback,
           debug_show_gold: debugShowGold,
         }
@@ -186,6 +207,7 @@ export function Configure() {
           llm_prompt: llmPrompt.trim() || null,
           llm_api_key: llmApiKey || null,
           enable_graph: enableGraph,
+          graph: graph?.uri?.trim() ? graph : null,
           collect_feedback: collectFeedback,
           debug_show_gold: debugShowGold,
         })
@@ -468,11 +490,105 @@ export function Configure() {
           </label>
           <p className="text-xs text-gray-400">
             Show how a mention's candidates connect to each other and their neighbors, pulled from your
-            Neo4j graph. Connection + schema are read from{' '}
-            <code className="bg-gray-100 rounded px-1">neo4j.yaml</code> on the server
-            (copy <code className="bg-gray-100 rounded px-1">neo4j.example.yaml</code>); env vars are a fallback.
-            Default schema: <code className="bg-gray-100 rounded px-1">(:Concept {'{'}cui{'}'})-[:RELATES_TO {'{'}rel{'}'}]-(:Concept)</code>.
+            Neo4j graph. Leave URI empty to use the server's <code className="bg-gray-100 rounded px-1">neo4j.yaml</code>{' '}
+            (local installs only).
           </p>
+          <div className="grid grid-cols-2 gap-3 mt-3">
+            <div className="col-span-2">
+              <label className="label">URI</label>
+              <input
+                className="input font-mono text-sm"
+                placeholder="neo4j+s://host:7687"
+                value={g.uri}
+                onChange={e => setG({ uri: e.target.value })}
+              />
+            </div>
+            <div>
+              <label className="label">User</label>
+              <input className="input" value={g.user} onChange={e => setG({ user: e.target.value })} />
+            </div>
+            <div>
+              <label className="label">Password</label>
+              <input
+                className="input"
+                type="password"
+                autoComplete="new-password"
+                value={g.password}
+                onChange={e => setG({ password: e.target.value })}
+              />
+            </div>
+            <div className="col-span-2">
+              <label className="label">Database (optional)</label>
+              <input
+                className="input"
+                value={g.database ?? ''}
+                onChange={e => setG({ database: e.target.value || null })}
+              />
+            </div>
+          </div>
+          <details className="mt-3">
+            <summary className="text-xs font-semibold text-gray-500 cursor-pointer">Schema</summary>
+            <div className="grid grid-cols-2 gap-3 mt-2">
+              <div>
+                <label className="label">Node label</label>
+                <input className="input" value={g.node_label} onChange={e => setG({ node_label: e.target.value })} />
+              </div>
+              <div>
+                <label className="label">ID property</label>
+                <input className="input" value={g.id_prop} onChange={e => setG({ id_prop: e.target.value })} />
+              </div>
+              <div>
+                <label className="label">Relationship type</label>
+                <input className="input" value={g.rel_type} onChange={e => setG({ rel_type: e.target.value })} />
+              </div>
+              <div>
+                <label className="label">Relation property</label>
+                <input className="input" value={g.rel_prop} onChange={e => setG({ rel_prop: e.target.value })} />
+              </div>
+              <div className="col-span-2">
+                <label className="label">Name property</label>
+                <input className="input" value={g.name_prop} onChange={e => setG({ name_prop: e.target.value })} />
+              </div>
+              <div>
+                <label className="label">Include relations (comma-separated)</label>
+                <input
+                  className="input"
+                  key={'i' + g.rel_include.join('~')}
+                  defaultValue={g.rel_include.join(', ')}
+                  onBlur={e => setG({ rel_include: csv(e.target.value) })}
+                />
+              </div>
+              <div>
+                <label className="label">Exclude relations (comma-separated)</label>
+                <input
+                  className="input"
+                  key={'e' + g.rel_exclude.join('~')}
+                  defaultValue={g.rel_exclude.join(', ')}
+                  onBlur={e => setG({ rel_exclude: csv(e.target.value) })}
+                />
+              </div>
+            </div>
+          </details>
+          <div className="flex items-center gap-3 mt-3">
+            <button
+              type="button"
+              className="btn-secondary text-xs"
+              onClick={handleTestGraph}
+              disabled={graphTesting || !g.uri.trim()}
+            >
+              {graphTesting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FlaskConical className="w-3.5 h-3.5" />}
+              Test connection
+            </button>
+            {graphTest && (graphTest.ok ? (
+              <span className="text-xs text-green-600 flex items-center gap-1">
+                <CheckCircle2 className="w-3.5 h-3.5" /> Connected: {graphTest.nodes} nodes
+              </span>
+            ) : (
+              <span className="text-xs text-red-600 flex items-center gap-1">
+                <XCircle className="w-3.5 h-3.5" /> {graphTest.error}
+              </span>
+            ))}
+          </div>
         </div>
 
         <div className="border-t border-gray-100 pt-4 mt-2">
