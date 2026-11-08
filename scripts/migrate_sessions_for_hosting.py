@@ -3,13 +3,16 @@
 
 Never modifies ``--src``. Warnings never contain secret values (LLM keys, KB
 headers, graph passwords); they only name the session and the kind of secret.
+
+Files are copied under --dest, but the paths written into session.json use
+--server-root (default /app/sessions), the location the server will mount them at.
 """
 from __future__ import annotations
 
 import argparse
 import shutil
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -26,7 +29,24 @@ def _copy_context(folder: Path, target: Path) -> None:
             shutil.copy2(p, target / p.name)
 
 
-def _migrate_one(name: str, sdir: Path, dest_dir: Path, kb_map: dict[str, str]) -> list[str]:
+def _match_prefix(url: str, kb_map: dict[str, str]) -> str | None:
+    """Longest key that prefixes url and ends at a boundary (end, / ? #)."""
+    best = None
+    for old in kb_map:
+        if url.startswith(old) and (len(url) == len(old) or url[len(old)] in "/?#"):
+            if best is None or len(old) > len(best):
+                best = old
+    return best
+
+
+def _origin(url: str) -> str:
+    u = urlparse(url)
+    host = u.hostname or ""
+    return f"{u.scheme}://{host}" + (f":{u.port}" if u.port else "")
+
+
+def _migrate_one(name: str, sdir: Path, dest_dir: Path, kb_map: dict[str, str],
+                 server_root: str) -> list[str]:
     warnings: list[str] = []
     sj = dest_dir / "session.json"
     try:
@@ -43,23 +63,22 @@ def _migrate_one(name: str, sdir: Path, dest_dir: Path, kb_map: dict[str, str]) 
             shutil.copy2(old, new_input)
         else:
             warnings.append(f"session {name}: input file {basename} not found")
-    cfg.input_path = str(new_input)
+    cfg.input_path = str(PurePosixPath(server_root) / name / basename)
 
     for kb in cfg.kbs:
-        for old_prefix, new_prefix in kb_map.items():
-            if kb.endpoint_url.startswith(old_prefix):
-                kb.endpoint_url = new_prefix + kb.endpoint_url[len(old_prefix):]
-                break
+        old_prefix = _match_prefix(kb.endpoint_url, kb_map)
+        if old_prefix is not None:
+            kb.endpoint_url = kb_map[old_prefix] + kb.endpoint_url[len(old_prefix):]
         else:
             warnings.append(
-                f"session {name}: KB {kb.name} endpoint {kb.endpoint_url} has no --kb-map entry"
+                f"session {name}: KB {kb.name} endpoint {_origin(kb.endpoint_url)} has no --kb-map entry"
             )
 
     if cfg.context_folder:
         folder = Path(cfg.context_folder)
         if folder.is_dir():
             _copy_context(folder, dest_dir / "context")
-            cfg.context_folder = str(dest_dir / "context")
+            cfg.context_folder = str(PurePosixPath(server_root) / name / "context")
         else:
             warnings.append(f"session {name}: context folder not found, context_folder cleared")
             cfg.context_folder = None
@@ -83,7 +102,8 @@ def _migrate_one(name: str, sdir: Path, dest_dir: Path, kb_map: dict[str, str]) 
     return warnings
 
 
-def migrate(src: Path, dest: Path, kb_map: dict[str, str]) -> list[str]:
+def migrate(src: Path, dest: Path, kb_map: dict[str, str],
+            server_root: str = "/app/sessions") -> list[str]:
     src, dest = Path(src), Path(dest)
     if dest.exists():
         raise FileExistsError(str(dest))
@@ -91,7 +111,7 @@ def migrate(src: Path, dest: Path, kb_map: dict[str, str]) -> list[str]:
     warnings: list[str] = []
     for sdir in sorted(src.iterdir()):
         if sdir.is_dir() and (sdir / "session.json").is_file():
-            warnings += _migrate_one(sdir.name, sdir, dest / sdir.name, kb_map)
+            warnings += _migrate_one(sdir.name, sdir, dest / sdir.name, kb_map, server_root)
     return warnings
 
 
@@ -110,6 +130,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--src", required=True, type=Path)
     ap.add_argument("--dest", required=True, type=Path)
     ap.add_argument("--kb-map", action="append", default=[], metavar="OLD=NEW")
+    ap.add_argument("--server-root", default="/app/sessions",
+                    help="sessions root on the server, used for paths written into session.json "
+                         "(default: /app/sessions)")
     args = ap.parse_args(argv)
     try:
         kb_map = parse_kb_map(args.kb_map)
@@ -118,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.src.is_dir():
         ap.error(f"--src {args.src} is not a directory")
     try:
-        warnings = migrate(args.src, args.dest, kb_map)
+        warnings = migrate(args.src, args.dest, kb_map, args.server_root)
     except FileExistsError:
         ap.error(f"--dest {args.dest} already exists")
     for w in warnings:

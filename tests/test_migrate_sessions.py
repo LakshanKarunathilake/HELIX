@@ -60,7 +60,7 @@ def test_rewrites_paths_and_endpoints(tmp_path):
     make_session(src, "s1")
     warnings = mig.migrate(src, dest, {"http://127.0.0.1:8765": "https://kb.example.org"})
     cfg = SessionConfig.load(dest / "s1" / "session.json")
-    assert cfg.input_path == str(dest / "s1" / "input_s1.tsv")
+    assert cfg.input_path == "/app/sessions/s1/input_s1.tsv"
     assert (dest / "s1" / "input_s1.tsv").exists()
     assert cfg.kbs[0].endpoint_url == "https://kb.example.org/query"
     assert warnings == ["session s1: stores KB request headers"]
@@ -77,7 +77,7 @@ def test_copies_context_texts(tmp_path):
     make_session(src, "s1", ctx=ctx)
     mig.migrate(src, dest, {"http://127.0.0.1:8765": "https://kb.example.org"})
     cfg = SessionConfig.load(dest / "s1" / "session.json")
-    assert cfg.context_folder == str(dest / "s1" / "context")
+    assert cfg.context_folder == "/app/sessions/s1/context"
     c = dest / "s1" / "context"
     assert (c / "123.txt").read_text() == "hello"
     assert (c / "456").read_text() == "bare"
@@ -169,3 +169,36 @@ def test_bad_kb_map_is_cli_error(tmp_path):
 
 def test_kb_map_splits_on_first_equals(tmp_path):
     assert mig.parse_kb_map(["http://a:1=https://b/?x=y"]) == {"http://a:1": "https://b/?x=y"}
+
+
+def test_server_root_explicit(tmp_path):
+    ctx = tmp_path / "ctx"
+    ctx.mkdir()
+    (ctx / "1.txt").write_text("t")
+    src, dest = tmp_path / "src", tmp_path / "dest"
+    make_session(src, "s1", ctx=ctx)
+    mig.migrate(src, dest, {}, server_root="/srv/h")
+    cfg = SessionConfig.load(dest / "s1" / "session.json")
+    assert cfg.input_path == "/srv/h/s1/input_s1.tsv"
+    assert cfg.context_folder == "/srv/h/s1/context"
+    assert (dest / "s1" / "context" / "1.txt").exists()
+
+
+def test_kb_map_boundary_and_longest(tmp_path):
+    src, dest = tmp_path / "src", tmp_path / "dest"
+    make_session(src, "s1", endpoints=("http://127.0.0.1:8765/query",))
+    w = mig.migrate(src, dest, {"http://127.0.0.1:876": "https://bad"})
+    assert any("no --kb-map" in x for x in w)
+    assert SessionConfig.load(dest / "s1" / "session.json").kbs[0].endpoint_url == "http://127.0.0.1:8765/query"
+    dest2 = tmp_path / "dest2"
+    mig.migrate(src, dest2, {"http://127.0.0.1:8765": "https://short",
+                             "http://127.0.0.1:8765/query": "https://long/q"})
+    assert SessionConfig.load(dest2 / "s1" / "session.json").kbs[0].endpoint_url == "https://long/q"
+
+
+def test_unmapped_warning_hides_url_credentials(tmp_path):
+    src, dest = tmp_path / "src", tmp_path / "dest"
+    make_session(src, "s1", endpoints=("https://user:tok@kb.org/query?key=secret",))
+    w = "\n".join(mig.migrate(src, dest, {}))
+    assert "https://kb.org" in w
+    assert "tok" not in w and "secret" not in w
