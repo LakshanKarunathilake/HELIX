@@ -164,14 +164,16 @@ export const getCandidates = (
   enable_lexical: boolean,
   context?: string | null,
 ) =>
-  req<{ dense_candidates: Candidate[]; lexical_candidates: Candidate[]; llm: LLMRerank | null }>(
+  req<{ dense_candidates: Candidate[]; lexical_candidates: Candidate[]; llm: LLMRerank | null
+         error?: string | null }>(
     `/sessions/${name}/candidates`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ label, kb_name, enable_dense, enable_lexical, context }),
     },
-  ).then(r => ({ dense: r.dense_candidates, lexical: r.lexical_candidates, llm: r.llm }))
+  ).then(r => ({ dense: r.dense_candidates, lexical: r.lexical_candidates, llm: r.llm,
+                 error: r.error ?? null }))
 
 // ── entity lookup (manual id entry) ───────────────────────────────────────────
 

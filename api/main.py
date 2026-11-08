@@ -35,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from eltool.config import SLUG_RE, GraphConnection, KBConfig, SessionConfig
 from eltool import feedback as fb
 from eltool.provenance import classify_method
-from eltool.hosting import cors_origins, hosted_mode
+from eltool.hosting import check_neo4j_uri, check_outbound_url, cors_origins, hosted_mode
 from eltool.context_upload import ContextUploadError, extract_context_zip
 from eltool.graph_client import GraphError, Neo4jGraphClient, load_neo4j_settings
 from eltool.graph_pool import GraphClientPool, resolve_graph_client
@@ -77,17 +77,56 @@ def get_info():
     return {"hosted": hosted_mode()}
 
 
+def _require_session_name(name: str) -> str:
+    """A session name from the URL path must be a slug, so it can never name
+    '..', '.' or anything outside the sessions folder."""
+    if not isinstance(name, str) or not SLUG_RE.fullmatch(name):
+        raise HTTPException(404, "Session not found")
+    return name
+
+
 def _check_context_folder(folder: str | None, name: str) -> None:
     """Hosted mode: only the session's own uploaded context folder is allowed."""
     if not folder or not hosted_mode():
         return
     try:
-        inside = Path(folder).resolve().is_relative_to(session_dir(name).resolve())
-    except (OSError, ValueError):
-        inside = False
-    if not inside:
+        ok = Path(folder).resolve() == (session_dir(name) / "context").resolve()
+    except (OSError, ValueError, RuntimeError):
+        ok = False
+    if not ok:
         raise HTTPException(
             400, "In hosted mode, upload context texts instead of naming a server folder.")
+
+
+def _check_confined(cfg: SessionConfig, name: str) -> None:
+    """Hosted mode backstop: a session only reads files inside its own folder."""
+    if not hosted_mode():
+        return
+    try:
+        ok = Path(cfg.input_path).resolve().is_relative_to(session_dir(name).resolve())
+    except (OSError, ValueError, RuntimeError):
+        ok = False
+    if not ok:
+        raise HTTPException(400, "This session's input file is outside its session folder.")
+    _check_context_folder(cfg.context_folder, name)
+
+
+def _check_hosted_urls(cfg: SessionConfig) -> None:
+    """Hosted mode: refuse KB, Neo4j and LLM addresses the outbound guard blocks,
+    at save time, so the creator sees why instead of an empty candidate list."""
+    if not hosted_mode():
+        return
+    checks = [(f"kbs[{i}].endpoint_url", check_outbound_url, kb.endpoint_url)
+              for i, kb in enumerate(cfg.kbs)]
+    if cfg.graph is not None:
+        checks.append(("graph.uri", check_neo4j_uri, cfg.graph.uri))
+    if cfg.llm_base_url:
+        checks.append(("llm_base_url", check_outbound_url, cfg.llm_base_url))
+    for field, check, url in checks:
+        try:
+            check(url)
+        except UnsafeURLError as e:
+            raise HTTPException(400, f"{field}: {e}")
 
 
 # ── sessions ────────────────────────────────────────────────────────────────
@@ -150,6 +189,24 @@ class CreateSessionRequest(BaseModel):
 
 @app.post("/api/sessions")
 def create_session(req: CreateSessionRequest):
+    # Everything is validated before the first side effect (mkdir / move).
+    if not SLUG_RE.fullmatch(req.session_name):
+        raise HTTPException(400, "session_name must contain only letters, digits, '-' or '_'.")
+    # tmp_path must be a file parse-file wrote: a direct child of the upload dir.
+    try:
+        src = Path(req.tmp_path).resolve()
+        is_upload = src.parent == _TMP.resolve() and src.is_file()
+    except (OSError, ValueError, RuntimeError):
+        is_upload = False
+    if not is_upload:
+        raise HTTPException(400, "Uploaded file not found — please re-upload.")
+    filename = Path(req.original_filename).name
+    if filename in ("", ".", ".."):
+        raise HTTPException(400, "Invalid original file name.")
+    sess_path = session_dir(req.session_name)
+    if hosted_mode() and sess_path.exists():
+        raise HTTPException(409, f"A session named '{req.session_name}' already exists.")
+
     try:
         kbs = [KBConfig(**k) for k in req.kbs]
     except ValidationError as e:
@@ -161,15 +218,7 @@ def create_session(req: CreateSessionRequest):
     if req.context_folder and not Path(req.context_folder).is_dir():
         raise HTTPException(400, f"Context folder not found: {req.context_folder}")
 
-    sess_path = session_dir(req.session_name)
-    sess_path.mkdir(parents=True, exist_ok=True)
-
-    src = Path(req.tmp_path)
-    if not src.exists():
-        raise HTTPException(400, "Uploaded file not found — please re-upload.")
-    dest = input_copy_path(req.session_name, req.original_filename)
-    src.rename(dest)
-
+    dest = input_copy_path(req.session_name, filename)
     try:
         cfg = SessionConfig(
             session_name=req.session_name,
@@ -203,7 +252,12 @@ def create_session(req: CreateSessionRequest):
         )
     except ValidationError as e:
         raise HTTPException(400, _safe_validation_error(e))
+    _check_hosted_urls(cfg)
 
+    sess_path.mkdir(parents=True, exist_ok=True)
+    # shutil.move, not rename: the upload dir and the sessions volume can be
+    # different filesystems (Docker), where rename fails with EXDEV.
+    shutil.move(str(src), str(dest))
     cfg.save(session_config_path(req.session_name))
     df, _ = load_input(dest, req.delimiter)
     init_output(output_csv_path(req.session_name), df, [k.name for k in kbs], req.annotator)
@@ -222,9 +276,19 @@ def update_session(name: str, body: dict = Body(...)):
     existing = _load_cfg(name)
     # Blank secrets keep the stored value while the address is unchanged.
     body = merge_secrets(body, existing)
+    # The input file and the name are fixed at creation; a PUT cannot repoint
+    # the session at another file (or another session's folder).
+    body["session_name"] = name
+    body["input_path"] = existing.input_path
     _check_context_folder(body.get("context_folder"), name)
     try:
         cfg = SessionConfig(**body)
+    except ValidationError as e:
+        raise HTTPException(400, _safe_validation_error(e))
+    except Exception as e:
+        raise HTTPException(400, f"Could not save session ({type(e).__name__})")
+    _check_hosted_urls(cfg)
+    try:
         cfg.save(session_config_path(name))
         df, _ = load_input(Path(cfg.input_path), cfg.delimiter)
         init_output(output_csv_path(name), df, [k.name for k in cfg.kbs], cfg.annotator)
@@ -278,7 +342,7 @@ def llm_default_prompt():
 
 @app.delete("/api/sessions/{name}")
 def delete_session(name: str):
-    path = session_dir(name)
+    path = session_dir(_require_session_name(name))
     if not path.exists():
         raise HTTPException(404, "Session not found")
     shutil.rmtree(path)
@@ -777,6 +841,13 @@ _RERANKERS: dict[tuple, LLMReranker] = {}
 
 def _get_reranker(model: str, top_n: int, prompt: str | None, api_key: str | None,
                   provider: str = "anthropic", base_url: str | None = None) -> LLMReranker:
+    if base_url and hosted_mode():
+        # Same outbound guard as KB URLs; a blocked URL degrades like any
+        # other re-rank failure instead of a 500.
+        try:
+            check_outbound_url(base_url)
+        except UnsafeURLError as e:
+            raise LLMRerankError(f"llm_base_url: {e}") from e
     key = (provider, base_url or "", model, top_n, prompt or "", api_key or "")
     if key not in _RERANKERS:
         _RERANKERS[key] = LLMReranker(
@@ -806,18 +877,25 @@ class CandidateRequest(BaseModel):
 
 @app.post("/api/sessions/{name}/candidates")
 def get_candidates(name: str, req: CandidateRequest):
+  _require_session_name(name)
   with metrics.timer("candidates", name, kb=req.kb_name, mlen=len(req.label or "")):
     cfg = _load_cfg(name)
     kb_cfg = next((k for k in cfg.kbs if k.name == req.kb_name), None)
     if not kb_cfg:
         raise HTTPException(404, f"KB '{req.kb_name}' not found")
     dense_cands, lexical_cands = [], []
+    # Set when the outbound URL guard blocks this KB, so the annotator sees why
+    # there are no candidates (the message names the host, never headers).
+    kb_error: str | None = None
 
     if req.enable_dense:
         try:
             dense_cfg = KBConfig(**{**kb_cfg.model_dump(), "endpoint_url": _derived_url(kb_cfg.endpoint_url, "/dense")})
             with metrics.timer("retrieval.dense", name, kb=req.kb_name):
                 dense_cands = KBClient(dense_cfg).query(req.label)
+        except UnsafeURLError as e:
+            logger.warning("Dense search blocked for KB '%s': %s", req.kb_name, e)
+            kb_error = f"KB '{req.kb_name}' blocked: {e}"
         except Exception as e:
             logger.warning("Dense search failed for KB '%s': %s", req.kb_name, e)
 
@@ -826,6 +904,9 @@ def get_candidates(name: str, req: CandidateRequest):
             lex_cfg = KBConfig(**{**kb_cfg.model_dump(), "endpoint_url": _derived_url(kb_cfg.endpoint_url, "/lexical")})
             with metrics.timer("retrieval.lexical", name, kb=req.kb_name):
                 lexical_cands = KBClient(lex_cfg).query(req.label)
+        except UnsafeURLError as e:
+            logger.warning("Lexical search blocked for KB '%s': %s", req.kb_name, e)
+            kb_error = f"KB '{req.kb_name}' blocked: {e}"
         except Exception as e:
             msg = str(e)
             if "503" in msg or "lexical index not initialised" in msg.lower():
@@ -860,6 +941,7 @@ def get_candidates(name: str, req: CandidateRequest):
         "dense_candidates":   _serialize_candidates(dense_cands),
         "lexical_candidates": _serialize_candidates(lexical_cands),
         "llm": llm,
+        "error": kb_error,
     }
 
 
@@ -1143,7 +1225,7 @@ class TestKBRequest(BaseModel):
 
 def _existing_or_none(session_name: str | None) -> SessionConfig | None:
     """The named session's config, or None if absent/invalid (never a 404)."""
-    if not session_name or not SLUG_RE.match(session_name):
+    if not session_name or not SLUG_RE.fullmatch(session_name):
         return None
     try:
         return _load_cfg(session_name)
@@ -1263,6 +1345,7 @@ def list_snapshots(name: str):
 @app.get("/api/sessions/{name}/export")
 def export_csv(name: str, stage: str = ""):
     """Download the final output, or a per-step snapshot via ?stage=retrieval|graph."""
+    _require_session_name(name)
     if stage:
         if not _STAGE_RE.match(stage):
             raise HTTPException(400, "Invalid stage name.")
@@ -1283,7 +1366,9 @@ def export_csv(name: str, stage: str = ""):
 # ── helper ────────────────────────────────────────────────────────────────────
 
 def _load_cfg(name: str) -> SessionConfig:
-    path = session_config_path(name)
+    path = session_config_path(_require_session_name(name))
     if not path.exists():
         raise HTTPException(404, "Session not found")
-    return SessionConfig.load(path)
+    cfg = SessionConfig.load(path)
+    _check_confined(cfg, name)
+    return cfg

@@ -61,7 +61,12 @@ def merge_secrets(body: dict, existing: SessionConfig) -> dict:
     body = dict(body)
     body.pop("llm_api_key_set", None)
     if _blank(body.get("llm_api_key")):
-        body["llm_api_key"] = existing.llm_api_key
+        # The stored key is reused only while it still goes to the same LLM.
+        same_llm = (
+            (body.get("llm_provider") or "anthropic") == (existing.llm_provider or "anthropic")
+            and (body.get("llm_base_url") or None) == (existing.llm_base_url or None)
+        )
+        body["llm_api_key"] = existing.llm_api_key if same_llm else None
     if isinstance(body.get("kbs"), list):
         body["kbs"] = [fill_kb_secret(k, existing) if isinstance(k, dict) else k
                        for k in body["kbs"]]

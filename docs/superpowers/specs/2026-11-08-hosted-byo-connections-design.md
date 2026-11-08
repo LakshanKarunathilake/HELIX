@@ -74,8 +74,12 @@ Graph clients are pooled per connection (at most 32; the least recently used is 
   `graph.password_set`.
 * `PUT` with a blank value keeps the stored one — but only while it would go to the same
   place: a KB's headers are kept only if a stored KB has the same `name` **and**
-  `endpoint_url`; the graph password only if `uri` and `user` are unchanged. Otherwise the
-  secret is dropped, so editing the address cannot send a stored secret to a new host.
+  `endpoint_url`; the graph password only if `uri` and `user` are unchanged; the LLM key
+  only if `llm_provider` and `llm_base_url` are unchanged. Otherwise the secret is dropped,
+  so editing the address cannot send a stored secret to a new host.
+* In hosted mode `llm_base_url` passes the same outbound URL guard as KB URLs, when the
+  session is created or saved and again when the reranker is built. The OpenAI-compatible
+  client does not follow redirects.
 * `/api/kb/test` and `/api/graph/test` accept an optional `session_name`, so a test of a
   saved KB or graph can use its stored secret.
 
