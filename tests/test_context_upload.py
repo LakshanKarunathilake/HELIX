@@ -305,3 +305,18 @@ def test_hosted_create_bad_folder_leaves_no_session_dir(client, monkeypatch, tmp
     assert r.status_code == 400
     assert not (tmp_path / "sessions" / "new").exists()
     assert up.exists()
+
+
+def test_corrupt_bzip2_is_400_and_clean(client, tmp_path):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_BZIP2) as zf:
+        zf.writestr("d1.txt", "hello world " * 500)
+    raw = bytearray(buf.getvalue())
+    i = raw.find(b"BZh")
+    for k in range(i + 10, i + 30):
+        raw[k] ^= 0xFF
+    r = client.post("/api/sessions/s/context", files={"file": ("c.zip", bytes(raw))})
+    assert r.status_code == 400
+    sdir = tmp_path / "sessions" / "s"
+    assert [p.name for p in sdir.iterdir() if p.name.startswith(".ctx")] == []
+    assert list((tmp_path / "up").iterdir()) == []

@@ -87,13 +87,13 @@ def extract_context_zip(
                 written = 0
                 try:
                     src = zf.open(info)
-                except _ZIP_READ_ERRORS as e:
+                except _ZIP_READ_ERRORS + (OSError,) as e:  # bz2 raises OSError on bad data
                     raise ContextUploadError(f"could not read {base} in the zip") from e
                 with src, open(tmp / base, "wb") as out:
                     while True:
                         try:
                             chunk = src.read(65536)
-                        except _ZIP_READ_ERRORS as e:
+                        except _ZIP_READ_ERRORS + (OSError,) as e:  # bz2 raises OSError on bad data
                             raise ContextUploadError(
                                 f"could not read {base} in the zip") from e
                         if not chunk:
