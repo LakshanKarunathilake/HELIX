@@ -87,6 +87,8 @@ cd web && npm install && cd ..
 `run.sh` launches all three services, streams their logs, and stops them together on
 `Ctrl+C`. (It auto-detects an activated conda env; run `./run.sh`, not `sh run.sh`.)
 
+To host HELIX for a team, see **[deploy/hosted/README.md](deploy/hosted/README.md)**; to share your own KB with a hosted instance, see **[deploy/kb-kit/README.md](deploy/kb-kit/README.md)**.
+
 ### Option C — three terminals
 
 ```bash
