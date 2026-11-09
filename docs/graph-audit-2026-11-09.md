@@ -23,7 +23,7 @@ buggy evaluation scripts exist only on `feature/type-scoped-baseline` (from `90c
 |---|---|---|---|---|
 | A | `eval/run_hint_analysis.py` `relation_fn` | Kind `"any"` returned True for pairs with **no** relation | Confirmed | **Fixed** (80cf0d1) + test |
 | B | `run_hint_analysis.relation_fn`, `run_graph_scoring.Rel.codes` | A concept counted as linked to **itself**: a composite id and its own part (`D056846|277600` vs `D056846`), or two ids sharing a CUI | Confirmed (bc5cdr-dis dataset index: 302 of 373 composite/part pairs) | **Fixed** + tests |
-| C | Tool, Neo4j MeSH graph (`id_prop: mesh`) | Composite / OMIM ids (`601367|D002544`) never match a node, which holds one MeSH code. They get zero support, never anchor, and always show as "isolated" | Confirmed (18% of disease top-1s; 0 of 402,563 nodes hold a `|`) | Open (needs a decision) |
+| C | Tool, Neo4j MeSH graph (`id_prop: mesh`) | Composite / OMIM ids (`601367|D002544`) never match a node, which holds one MeSH code. They get zero support, never anchor, and always show as "isolated" | Confirmed (18% of disease top-1s; 0 of 402,563 nodes hold a `|`) | **Fixed** (2026-11-10): matched through every part, see below |
 | D | `eval/run_medmentions_annotate.py` | Passed bare ids without scores, so every candidate tied at 0.0 and the gate never applied (ungated edge maximisation) | Confirmed | **Fixed**: scores now passed |
 | E | Tool: `/graph/optimize` + `DocumentReview.autoMatch` | Auto-match passes no `fixed`, so the optimiser starts from retrieval top-1. The UI then **saves over the annotator's manual corrections** (undo exists, but the overwrite is already saved) | Confirmed | Open (needs a decision) |
 | F | Tool: score gate | Lexical scores are RRF (≤0.033) while dense scores are cosine (~1), and fusion takes the max. In lexical-only sessions every candidate is within the margin and none reaches the pin, so the gate is a no-op | Confirmed | Open |
@@ -108,14 +108,73 @@ each way:
 **Action for the MeSH graph connection:**
 `rel_exclude: [sibling, allowed_qualifier, can_be_qualified_by]`.
 
+## C fixed: composite ids matched through every part (2026-11-10)
+
+**Where composites occur.** Both BC5CDR tracks, on the dataset dictionaries:
+- Disease: 26% of candidates (2 to 4 parts, e.g. `600510|C563184|C536648|274600`), and
+  15% of top-1 picks.
+- Chemical: 0.1%.
+- Gold: 256 disease and 17 chemical mentions are composite, e.g. `D010051|D001943` for
+  "ovarian and breast cancer".
+
+So both kinds of id are affected: alternative ids for one concept (OMIM|MeSH), and the
+concepts of a composite mention. The full UMLS/MeSH indexes and MedMentions have none.
+
+**A second kind of multiple match.** In the MeSH graph, 55,322 MeSH codes sit on more
+than one node (`D008579` on 26 CUI nodes). The Cypher already matched all of them, but
+returned duplicate edge rows. Now de-duplicated.
+
+**The fix** (`eltool/graph_client.py`: `id_parts`, `_IdMap`) applies to every query:
+`candidate_graph`, `document_graph`, `_names_for` and the optimiser's `_edges_among`.
+- Neo4j is queried with the whole id and each of its parts.
+- Node-level edges are mapped back to the original ids. A composite is linked to X
+  when any of its parts is.
+- Two ids that share a part are the same concept, so they are never linked to each other
+  (the tool-side counterpart of B).
+- The UI still sees the original ids. A composite's name joins its parts' names
+  ("Ovarian Neoplasms | Breast Neoplasms").
+- Ids without `|` produce byte-identical queries. The full-index results below are
+  unchanged, and MedMentions cannot be affected.
+
+**Effect on the real MeSH graph** (`graph/out/mesh` CSVs, sibling/qualifier excluded,
+Neo4j stubbed at the Cypher level, old client vs new):
+
+| Picks shown as "isolated" in the document graph | before | after |
+|---|---|---|
+| Disease dev, composite top-1 picks (639) | 100% | **40.7%** |
+| Disease test, composite top-1 picks (682) | 100% | **41.6%** |
+| Disease dev / test, composite **gold** ids (98 / 63) | 100% | **38.8% / 27.0%** |
+| Chemical dev / test, composite top-1 picks (50 / 10) | 100% | 90.0% / 70.0% |
+| Disease dev, all top-1 picks, dataset index | 56.6% | 44.6% |
+
+Bare OMIM ids (e.g. `194300`, 1.9% of disease candidates) have no MeSH node, so they still
+show as isolated. Mapping them would need an OMIM→MeSH crosswalk (MRCONSO SAB=OMIM).
+
+**Accuracy of the optimiser** (abbreviation pool, gated rule) is unchanged within noise:
+- Full index: identical.
+- Chemical dataset index: identical.
+- Disease test, dataset index: +7/−4 before vs +6/−5 after.
+  - 12 mentions are picked differently: 2 fixed, 3 broken, 7 moved between equivalent ids.
+  - All 3 breaks are a multi-concept composite (`D009410|D009422`) out-voting a single id,
+    because it collects links through both of its parts.
+  - Twelve mentions are too few to justify scoring composites differently, e.g. taking
+    each part's support separately and keeping the maximum. Revisit if it shows up in
+    annotation.
+- Disease dev, dataset index: at ceiling (99.69%, the dev dictionary contains the dev
+  names), so it cannot show a difference.
+
+So the fix is about correctness, not accuracy: composite candidates and accepted
+composite annotations now give and receive graph support, and are no longer always
+flagged "isolated".
+
 ## Open decisions
 
 1. **E: auto-match overwriting the annotator.** Fix before the C3 study sessions. Options:
    - pass the document's saved annotations as `fixed`, so they anchor but never move; or
    - only write back mentions the annotator hasn't touched (needs provenance: auto-selected
      vs human-confirmed).
-2. **C: composite ids.** Match a candidate to the graph through any of its id parts:
-   split on `|` for the query, and map the matched node back to the composite id.
+2. ~~**C: composite ids.**~~ Fixed 2026-11-10 (section above). Still open: an OMIM→MeSH
+   crosswalk for bare OMIM ids.
 3. **F: score gate on non-dense scores.** Disable the graph gate (or normalise scores) when
    a session's candidates aren't cosine-scaled, e.g. lexical-only.
 4. **Paper narrative.** The paper's graph numbers are not affected by A–D, but its

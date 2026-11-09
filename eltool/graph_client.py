@@ -42,6 +42,53 @@ def _norm_label(text: str) -> str:
     """Case/punctuation-insensitive mention text, to spot repeats of the same mention."""
     return " ".join(_NON_ALNUM.sub(" ", str(text or "").lower()).split())
 
+
+def id_parts(cid: Any) -> list[str]:
+    """Graph lookup keys of one candidate id, the whole id first.
+
+    Dictionary ids can be composite: ``601367|D002544`` lists alternative ids of one
+    concept (OMIM|MeSH), ``D010051|D001943`` the concepts of a composite mention.
+    A graph node holds a single code, so each part is looked up on its own; the
+    whole id is kept as a key too, for a graph that stores it as is.
+    """
+    whole = str(cid or "").strip()
+    parts = [p.strip() for p in whole.split("|") if p.strip()]
+    return list(dict.fromkeys([whole, *parts])) if len(parts) > 1 else ([whole] if whole else [])
+
+
+class _IdMap:
+    """Candidate ids <-> graph keys, for ids that match several nodes.
+
+    Neo4j is queried with every part of every id; the node-level rows are mapped
+    back to the original ids. Two ids that share a part are the same concept, so a
+    relation between them is not a link (an id must never support itself).
+    """
+
+    def __init__(self, ids):
+        self.ids = list(dict.fromkeys(str(i).strip() for i in ids if i and str(i).strip()))
+        self.parts = {i: set(id_parts(i)) for i in self.ids}
+        owners: dict[str, list[str]] = defaultdict(list)
+        for i in self.ids:
+            for p in id_parts(i):
+                owners[p].append(i)
+        self.owners = dict(owners)
+        self.keys = sorted(self.owners)
+
+    def same(self, a: str, b: str) -> bool:
+        return a == b or bool(self.parts.get(a, {a}) & self.parts.get(b, {b}))
+
+    def lift(self, rows) -> list[dict[str, Any]]:
+        """Node-level ``{source, target, rel}`` rows -> rows between original ids."""
+        out, seen = [], set()
+        for r in rows:
+            for a in self.owners.get(r["source"], ()):
+                for b in self.owners.get(r["target"], ()):
+                    key = (min(a, b), max(a, b), r.get("rel"))
+                    if not self.same(a, b) and key not in seen:
+                        seen.add(key)
+                        out.append({**r, "source": a, "target": b})
+        return out
+
 # Repo root = parent of the eltool package.
 _ROOT = Path(__file__).resolve().parent.parent
 
@@ -217,9 +264,11 @@ class Neo4jGraphClient:
 
     # ── individual level: candidate neighborhood ─────────────────────────────
     def candidate_graph(self, ids: list[str], neighbor_limit: int = 25) -> GraphResult:
-        """How the candidate CUIs connect to each other and to their 1-hop neighbors."""
-        ids = [str(i) for i in ids if i]
-        if not ids:
+        """How the candidate CUIs connect to each other and to their 1-hop neighbors.
+
+        Composite ids are matched through each of their parts (see ``id_parts``)."""
+        m = _IdMap(ids)
+        if not m.ids:
             return GraphResult()
         s = self.schema
         L, P, R, RP, N = s.node_label, s.id_prop, s.rel_type, s.rel_prop, s.name_prop
@@ -230,7 +279,7 @@ class Neo4jGraphClient:
             f"MATCH (a:{L})-[r:{R}]-(b:{L}) "
             f"WHERE a.{P} IN $ids AND b.{P} IN $ids AND a.{P} < b.{P}{rf} "
             f"RETURN DISTINCT a.{P} AS source, b.{P} AS target, r.{RP} AS rel",
-            ids=ids, **rparams,
+            ids=m.keys, **rparams,
         )
         # 1-hop neighbors of each candidate (excluding other candidates), capped.
         neigh = self._run(
@@ -240,28 +289,45 @@ class Neo4jGraphClient:
             f"WITH cid, n, r LIMIT $lim "
             f"RETURN cid AS source, n.{P} AS target, r.{RP} AS rel, "
             f"n.{N} AS target_name",
-            ids=ids, lim=neighbor_limit, **rparams,
+            ids=m.keys, lim=neighbor_limit, **rparams,
         )
-        return self._assemble(ids, among, neigh)
+        lifted_neigh = [{**r, "source": a} for r in neigh for a in m.owners.get(r["source"], ())]
+        return self._assemble(m.ids, m.lift(among), lifted_neigh)
 
     # ── names for a set of ids (so nodes show a human-readable label) ─────────
     def _names_for(self, ids: list[str]) -> dict[str, str]:
-        """id -> human-readable name (from the schema's name_prop). Empty if none."""
-        ids = [str(i) for i in ids if i]
-        if not ids:
+        """id -> human-readable name (from the schema's name_prop). Empty if none.
+
+        A composite id gets the names of its parts that have a node, joined by " | "."""
+        m = _IdMap(ids)
+        if not m.ids:
             return {}
         s = self.schema
         L, P, N = s.node_label, s.id_prop, s.name_prop
         rows = self._run(
             f"MATCH (n:{L}) WHERE n.{P} IN $ids RETURN n.{P} AS id, n.{N} AS name",
-            ids=ids,
+            ids=m.keys,
         )
-        return {r["id"]: r["name"] for r in rows if r.get("name")}
+        by_key: dict[str, str] = {}
+        for r in rows:                      # a code on several nodes: keep the first name
+            if r.get("name"):
+                by_key.setdefault(r["id"], r["name"])
+        out: dict[str, str] = {}
+        for i in m.ids:
+            keys = id_parts(i)
+            if keys[0] in by_key:
+                out[i] = by_key[keys[0]]
+            else:
+                names = list(dict.fromkeys(by_key[k] for k in keys[1:] if k in by_key))
+                if names:
+                    out[i] = " | ".join(names)
+        return out
 
     # ── document level: subgraph among accepted entities ─────────────────────
     def document_graph(self, cuis: list[str]) -> GraphResult:
         """Subgraph among the CUIs the human accepted across a document."""
-        cuis = [str(c) for c in cuis if c]
+        m = _IdMap(cuis)
+        cuis = m.ids
         if not cuis:
             return GraphResult()
         s = self.schema
@@ -271,9 +337,9 @@ class Neo4jGraphClient:
             f"MATCH (a:{L})-[r:{R}]-(b:{L}) "
             f"WHERE a.{P} IN $ids AND b.{P} IN $ids AND a.{P} < b.{P}{rf} "
             f"RETURN DISTINCT a.{P} AS source, b.{P} AS target, r.{RP} AS rel",
-            ids=cuis, **rparams,
+            ids=m.keys, **rparams,
         )
-        res = self._assemble(cuis, among, [])
+        res = self._assemble(cuis, m.lift(among), [])
         # human-readable names for the accepted nodes (the `among` query only returns ids)
         names = self._names_for(cuis)
         # connection count per accepted node → drives the "isolated pick" flag.
@@ -290,8 +356,12 @@ class Neo4jGraphClient:
 
     # ── automatic collective disambiguation ─────────────────────────────────
     def _edges_among(self, cuis: list[str]) -> list[tuple[str, str]]:
-        """Undirected edges (as ordered pairs) among the given CUIs."""
-        if not cuis:
+        """Undirected edges (as ordered pairs) among the given ids.
+
+        Composite ids are linked through any of their parts; ids sharing a part are
+        the same concept and never linked to each other."""
+        m = _IdMap(cuis)
+        if not m.ids:
             return []
         s = self.schema
         L, P, R = s.node_label, s.id_prop, s.rel_type
@@ -300,9 +370,10 @@ class Neo4jGraphClient:
             f"MATCH (a:{L})-[r:{R}]-(b:{L}) "
             f"WHERE a.{P} IN $ids AND b.{P} IN $ids AND a.{P} < b.{P}{rf} "
             f"RETURN DISTINCT a.{P} AS source, b.{P} AS target",
-            ids=cuis, **rparams,
+            ids=m.keys, **rparams,
         )
-        return [(r["source"], r["target"]) for r in rows]
+        return sorted({(min(r["source"], r["target"]), max(r["source"], r["target"]))
+                       for r in m.lift(rows)})
 
     def optimize_selection(
         self,
