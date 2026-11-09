@@ -94,11 +94,13 @@ class SessionConfig(BaseModel):
     # Neo4j graph neighborhood. Connection + schema live in neo4j.yaml (see
     # neo4j.example.yaml); this flag just turns the feature on for the session.
     enable_graph: bool = False
-    # Graph disambiguation only breaks ties: mentions whose top-1 retrieval score
-    # is >= pin_threshold are never moved; among the rest, only candidates within
-    # switch_margin of that mention's own top-1 score are eligible.
+    # Graph disambiguation only breaks ties: an exact tie at the top is always
+    # eligible; otherwise a mention whose top-1 retrieval score is >= pin_threshold
+    # is never moved, and only candidates within switch_margin of its top-1 score
+    # may win. 0.10 lost accuracy on every dataset (docs/graph-scoring-findings.md);
+    # sessions saved with 0.10 keep it.
     graph_pin_threshold: float = 0.90
-    graph_switch_margin: float = 0.10
+    graph_switch_margin: float = 0.02
     # Pilot study (Sec. 4.6). Naming a condition (e.g. "C1"/"C2"/"C3") turns on
     # per-decision provenance logging for this session and stamps every row with
     # the arm it belongs to. Empty = ordinary session, original column layout.

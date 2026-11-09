@@ -191,7 +191,8 @@ def relation_fn(kb: dict, kinds: str):
     memo: dict[tuple, bool] = {}
 
     def ok(rs):
-        return kinds == "any" or (kinds == "ro" and "RO" in rs) or (kinds == "hier" and rs & HIER)
+        # an empty set means no relation at all -- "any" must not count it as a link
+        return bool(rs) and (kinds == "any" or (kinds == "ro" and "RO" in rs) or (kinds == "hier" and bool(rs & HIER)))
 
     def related(a, b):
         key = (a, b) if a < b else (b, a)
@@ -234,7 +235,12 @@ def _span_text(text: str, span: str) -> str:
     return text[a:b]
 
 
-def analyze(args) -> None:
+def prepare(args) -> dict:
+    """Mentions of one split with their scoped pools, plus the KB slice and document grouping.
+
+    Shared by analyze and eval/run_graph_scoring.py. Each mention dict carries row, gold,
+    expanded, raw/base/abbrev pools ([(id, score)] in dense order) and top_base/top_abbrev.
+    """
     ds, split, k = args.dataset, args.split, args.k
     tag = index_tag(args.index, split)
     stem = f"{ds}.{tag}.{split}"
@@ -244,7 +250,6 @@ def analyze(args) -> None:
     cache = load_cache(ds, args.index, split)
     scope, cand_tuis, _ = build_scope(ds, rows, Path(args.umls_meta),
                                       Path(args.semgroups) if args.semgroups else None)
-
     tuis_of: dict[str, set] = {}
 
     def scoped(label, mtype):
@@ -265,9 +270,26 @@ def analyze(args) -> None:
         ms.append({"row": r, "gold": gold_ids(r["gold_cui"]), "expanded": e, "base": base,
                    "raw": [(cid, s) for cid, s, _ in cache.get(r["entity_text"], [])][:k],
                    "abbrev": scoped(e, r["entity_type"]) if e and e in cache else base})
-
     ids = set().union(*({c for c, _ in m["base"]} | {c for c, _ in m["abbrev"]} | m["gold"] for m in ms))
     kb = load_kb(ds, stem, ids, Path(args.umls_meta))
+    by_doc = defaultdict(list)
+    for i, m in enumerate(ms):
+        by_doc[m["row"]["document_id"]].append(i)
+    for pool in ("base", "abbrev"):
+        for m in ms:
+            m[f"top_{pool}"] = m[pool][0][0] if m[pool] else None
+    surfaces = [{norm(m["row"]["entity_text"]), norm(m["expanded"] or m["row"]["entity_text"])} for m in ms]
+    return {"ms": ms, "kb": kb, "by_doc": by_doc, "surfaces": surfaces, "tuis_of": tuis_of,
+            "unfetched": unfetched, "stem": stem, "tag": tag}
+
+
+def analyze(args) -> None:
+    ds, split, k = args.dataset, args.split, args.k
+    tag = index_tag(args.index, split)
+    stem = f"{ds}.{tag}.{split}"
+    prep = prepare(args)
+    ms, kb, by_doc, surfaces, tuis_of = (prep[x] for x in ("ms", "kb", "by_doc", "surfaces", "tuis_of"))
+    unfetched = prep["unfetched"]
     rels = {kind: relation_fn(kb, kind) for kind in ("any", "ro", "hier")}
     names, deg, cuis = kb["names"], kb["deg"], kb["cuis"]
 
@@ -278,13 +300,6 @@ def analyze(args) -> None:
     def degnorm(c):
         return math.log2(2 + sum(deg.get(x, 0) for x in cuis.get(c, ())))
 
-    by_doc = defaultdict(list)
-    for i, m in enumerate(ms):
-        by_doc[m["row"]["document_id"]].append(i)
-    for pool in ("base", "abbrev"):
-        for m in ms:
-            m[f"top_{pool}"] = m[pool][0][0] if m[pool] else None
-    surfaces = [{norm(m["row"]["entity_text"]), norm(m["expanded"] or m["row"]["entity_text"])} for m in ms]
     for doc, idxs in by_doc.items():
         for i in idxs:
             m = ms[i]

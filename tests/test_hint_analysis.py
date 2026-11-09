@@ -60,3 +60,12 @@ def test_mentions_sharing_text_do_not_anchor_each_other():
     surfaces = [{"cystic fibrosis"}, {"cf", "cystic fibrosis"}, {"lung"}, {"cystic fibrosis"}]
     assert independent_others(0, [0, 1, 2, 3], surfaces) == [2]
     assert independent_others(2, [0, 1, 2, 3], surfaces) == [0, 1, 3]
+
+
+def test_relation_fn_any_needs_an_actual_relation():
+    from eval.run_hint_analysis import relation_fn
+    kb = {"rel": {"C1": {"C3": {"RO"}}}, "cuis": {"A": {"C1"}, "B": {"C2"}, "C": {"C3"}}}
+    assert not relation_fn(kb, "any")("A", "B")      # no MRREL row between them
+    assert relation_fn(kb, "any")("A", "C")
+    assert relation_fn(kb, "ro")("C", "A")
+    assert not relation_fn(kb, "hier")("A", "C")

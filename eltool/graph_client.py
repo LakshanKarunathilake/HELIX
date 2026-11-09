@@ -35,6 +35,12 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_NON_ALNUM = re.compile(r"[^0-9a-z]+")
+
+
+def _norm_label(text: str) -> str:
+    """Case/punctuation-insensitive mention text, to spot repeats of the same mention."""
+    return " ".join(_NON_ALNUM.sub(" ", str(text or "").lower()).split())
 
 # Repo root = parent of the eltool package.
 _ROOT = Path(__file__).resolve().parent.parent
@@ -303,28 +309,40 @@ class Neo4jGraphClient:
         mention_candidates: list[tuple[int, list]],
         fixed: dict[int, str] | None = None,
         pin_threshold: float = 0.90,
-        switch_margin: float = 0.10,
-        iterations: int = 2,
+        switch_margin: float = 0.02,
+        iterations: int = 1,
+        labels: dict[int, str] | None = None,
     ) -> dict[str, Any]:
         """
-        Confidence-gated, confidence-ordered graph disambiguation.
+        Graph tie-breaking across a document -- the rule measured offline in
+        eval/run_graph_scoring.py (docs/graph-scoring-findings.md).
 
-        The graph should break *ties*, not overrule confident retrieval. So we
-        (a) never move a mention whose top-1 retrieval score is high
-        (``pin_threshold``); (b) for the remaining ambiguous mentions, only ever
-        switch among candidates within ``switch_margin`` of that mention's own
-        top-1 score; and (c) resolve mentions in order of decreasing confidence,
-        so reliable concepts anchor the graph before weaker ones are attached.
-        This maximises document-level graph coherence without destroying good
-        top-1 picks (see the paper's Algorithm).
+        The graph re-ranks only candidates retrieval cannot tell apart:
+
+        * an **exact tie** at the top (several ids share the top-1 score -- e.g. one
+          name shared by many CUIs) is always eligible, however high the score;
+          that is where nearly all of the measured gain is, so a confidence pin
+          must not block it;
+        * otherwise a mention is eligible only when its top-1 score is below
+          ``pin_threshold``, and only candidates within ``switch_margin`` of it may
+          win (wider margins lost accuracy on every dataset).
+
+        Graph support of a candidate = the number of distinct anchor concepts it
+        shares a relation with. Anchors are the other mentions' retrieval top-1 (or
+        the human's accepted id for ``fixed`` mentions), excluding mentions with the
+        same ``labels`` text: a repeat would only echo the mention's own top-1. A
+        candidate replaces the top-1 only with strictly more support. Hub weighting
+        and relation filtering were tested and not adopted (no robust gain).
 
         ``mention_candidates``: ``[(mention_idx, [(cui, score), ...]), ...]``,
         ranked by score descending. Bare ``[cui, ...]`` lists are accepted too
-        (treated as zero-confidence, i.e. fully optimisable).
+        (all score 0.0, i.e. one big tie: fully graph-decided).
         ``fixed``: mentions pinned to a CUI (already accepted by the human); they
-        anchor coherence but never move.
+        anchor but never move. ``iterations`` is accepted for compatibility; the
+        rule is a single pass against fixed anchors, so it is ignored.
         """
         fixed = dict(fixed or {})
+        labels = {k: _norm_label(v) for k, v in (labels or {}).items()}
 
         # normalise candidates to [(cui, score)], drop empties
         mc: list[tuple[int, list[tuple[str, float]]]] = []
@@ -348,7 +366,7 @@ class Neo4jGraphClient:
         if not universe or not order:
             return empty
 
-        # Neo4j edge query — the expensive part; measure it explicitly.
+        # Neo4j edge query -- the expensive part; measure it explicitly.
         _t0 = time.perf_counter()
         edge_pairs = self._edges_among(universe)
         query_ms = (time.perf_counter() - _t0) * 1000.0
@@ -357,16 +375,32 @@ class Neo4jGraphClient:
             adj[a].add(b)
             adj[b].add(a)
 
-        # baseline = retrieval top-1 for every mention
-        sel: dict[int, str] = dict(fixed)
-        for idx in order:
-            sel[idx] = candmap[idx][0][0]
-        initial = dict(sel)
+        # anchors: retrieval top-1 of every mention, the human's id for fixed ones
+        anchor_of: dict[int, str] = {**fixed, **{idx: candmap[idx][0][0] for idx in order}}
+        initial = {idx: candmap[idx][0][0] for idx in order}
+        sel = dict(initial)
 
-        # confidence = top-1 score; PIN confident mentions, order the rest
-        conf = {idx: candmap[idx][0][1] for idx in order}
-        pinned = {idx for idx in order if conf[idx] >= pin_threshold}
-        free = sorted((i for i in order if i not in pinned), key=lambda i: conf[i], reverse=True)
+        free: list[int] = []
+        for idx in order:
+            cands = candmap[idx]
+            top = cands[0][1]
+            tied = [cid for cid, sc in cands if sc == top]
+            if len(tied) > 1:
+                eligible = tied                                  # exact tie: always
+            elif top < pin_threshold:
+                eligible = [cid for cid, sc in cands if top - sc <= switch_margin]
+            else:
+                continue                                         # confident and unique
+            if len(eligible) < 2:
+                continue
+            free.append(idx)
+            mine = labels.get(idx)
+            anchors = {cid for j, cid in anchor_of.items()
+                       if j != idx and not (mine and labels.get(j) == mine)}
+            support = {cid: len((adj.get(cid, set()) & anchors) - {cid}) for cid in eligible}
+            best = max(eligible, key=lambda c: support[c])      # max keeps the first on ties
+            if support[best] > support[eligible[0]]:
+                sel[idx] = best
 
         def internal_edges(values) -> int:
             vals = list({v for v in values})
@@ -378,36 +412,17 @@ class Neo4jGraphClient:
                         c += 1
             return c
 
-        iters = 0
-        for _ in range(max(1, iterations)):
-            iters += 1
-            changed = False
-            for idx in free:                                   # confidence order
-                cands = candmap[idx]
-                top_score = cands[0][1]
-                rank = {cid: k for k, (cid, _) in enumerate(cands)}
-                # only near-ties are eligible — never trade score for a graph link
-                near = [cid for cid, sc in cands if top_score - sc <= switch_margin]
-                others = {sel[j] for j in sel if j != idx}
-                best = max(near, key=lambda c: (len(adj.get(c, set()) & others),
-                                                c == sel.get(idx), -rank[c]))
-                if best != sel.get(idx):
-                    sel[idx] = best
-                    changed = True
-            if not changed:
-                break
-
         return {
             "selections": {str(idx): sel[idx] for idx in order},
-            "edges_before": internal_edges(initial.values()),
-            "edges_after": internal_edges(sel.values()),
-            "changed": sum(1 for idx in order if sel[idx] != initial.get(idx)),
-            "pinned": len(pinned),               # confident mentions never moved
-            "free": len(free),                   # ambiguous mentions considered
+            "edges_before": internal_edges(list(initial.values()) + list(fixed.values())),
+            "edges_after": internal_edges(list(sel.values()) + list(fixed.values())),
+            "changed": sum(1 for idx in order if sel[idx] != initial[idx]),
+            "pinned": len(order) - len(free),    # mentions the graph may not move
+            "free": len(free),                   # mentions with a tie the graph may break
             "nodes_queried": len(universe),      # candidate CUIs sent to Neo4j
             "edges_found": len(edge_pairs),      # edges Neo4j returned among them
             "query_ms": round(query_ms, 2),      # Neo4j edge-query latency
-            "iterations": iters,
+            "iterations": 1,
         }
 
     # ── shared assembly ──────────────────────────────────────────────────────
