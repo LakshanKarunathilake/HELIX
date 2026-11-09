@@ -185,6 +185,11 @@ def load_kb(name: str, stem: str, ids: set[str], meta: Path) -> dict:
     return kb
 
 
+def same_concept(a: str, b: str, cuis: dict) -> bool:
+    """Same dictionary concept: equal, sharing a component id, or sharing a CUI."""
+    return a == b or bool(id_parts(a) & id_parts(b)) or bool(set(cuis.get(a, ())) & set(cuis.get(b, ())))
+
+
 def relation_fn(kb: dict, kinds: str):
     """related(id_a, id_b) over the ids' CUIs; kinds = 'any' | 'ro' | 'hier'."""
     rel, cuis = kb["rel"], kb["cuis"]
@@ -197,8 +202,13 @@ def relation_fn(kb: dict, kinds: str):
     def related(a, b):
         key = (a, b) if a < b else (b, a)
         if key not in memo:
-            memo[key] = any(ok(rel.get(x, {}).get(y, set()) | rel.get(y, {}).get(x, set()))
-                            for x in cuis.get(a, ()) for y in cuis.get(b, ()))
+            # one concept is never "related" to itself: a composite id and its own part
+            # ('D056846|277600' vs 'D056846'), or two ids sharing a CUI (OMIM + MeSH)
+            if same_concept(a, b, cuis):
+                memo[key] = False
+            else:
+                memo[key] = any(ok(rel.get(x, {}).get(y, set()) | rel.get(y, {}).get(x, set()))
+                                for x in cuis.get(a, ()) for y in cuis.get(b, ()))
         return memo[key]
     return related
 

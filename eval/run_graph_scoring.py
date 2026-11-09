@@ -42,7 +42,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from eval.run_hint_analysis import (BC5CDR_PUBTATOR, choose, hit, independent_others,  # noqa: E402
-                                    mcnemar, norm, prepare)
+                                    mcnemar, norm, prepare, same_concept)
 from eval.run_type_scoped_baseline import OUT, id_parts  # noqa: E402
 
 STRUCT = {"AQ", "QB", "XR", "RU", "DEL"}
@@ -129,7 +129,7 @@ class Rel:
         self.memo: dict[tuple, frozenset] = {}
 
     def codes(self, a: str, b: str) -> frozenset:
-        if a == b:
+        if same_concept(a, b, self.cuis):          # never a link to itself (composite part / shared CUI)
             return frozenset()
         key = (a, b) if a < b else (b, a)
         got = self.memo.get(key)

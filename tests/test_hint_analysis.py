@@ -69,3 +69,14 @@ def test_relation_fn_any_needs_an_actual_relation():
     assert relation_fn(kb, "any")("A", "C")
     assert relation_fn(kb, "ro")("C", "A")
     assert not relation_fn(kb, "hier")("A", "C")
+
+
+def test_relation_fn_never_links_a_concept_to_itself():
+    from eval.run_hint_analysis import relation_fn
+    # composite D1|O1 shares the OMIM part's CUI C9, which is related to C1 (D1's CUI)
+    kb = {"rel": {"C1": {"C9": {"RN"}}},
+          "cuis": {"D1": {"C1"}, "O1": {"C9"}, "D1|O1": {"C1", "C9"}, "X": {"C1"}, "D2": {"C9"}}}
+    rel = relation_fn(kb, "any")
+    assert not rel("D1", "D1|O1")       # composite vs its own part
+    assert not rel("D1", "X")           # distinct ids, same CUI
+    assert rel("D1", "D2")              # genuinely different concepts that are related

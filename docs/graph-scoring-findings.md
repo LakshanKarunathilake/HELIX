@@ -1,8 +1,9 @@
 # Graph scoring: what actually helps (2026-11-09)
 
 Offline study of the graph step, run on the type-scoped / abbreviation-expanded
-candidate pools (`eval/run_hint_analysis.py`) with UMLS 2025AA MRREL as the graph
-(SIB dropped). Everything is training-free: a mention gives text, span and type only.
+candidate pools (`eval/run_hint_analysis.py`) with UMLS 2025AA MRREL as the graph.
+2025AA has no SIB rows. An audit of all graph paths followed:
+docs/graph-audit-2026-11-09.md. Everything is training-free: a mention gives text, span and type only.
 
 Reproduce (needs the cached pools in `eval/out/typescope/`, no servers):
 
@@ -76,10 +77,12 @@ The names tie-break is not in the tool yet; it needs KB name counts per candidat
 
 ## 4. Not verified
 
-- **Live Neo4j graphs.** Neo4j wasn't running. The tool's graphs differ from MRREL:
-  - The MeSH database keeps `sibling` edges. These were never in the measured graph, so
-    `rel_exclude: [sibling]` in that session's graph config matches the measured setting.
-  - Whether the MeSH-only builder kept MED-RT relations (may_treat etc.) wasn't checked.
+- **Live Neo4j graphs.** Neo4j wasn't running. Graphs built the tool's way were tested
+  offline instead (see docs/graph-audit-2026-11-09.md):
+  - UMLS 2025AA has no SIB rows, so "SIB dropped" above was a no-op.
+  - On the tool-style UMLS graph, MedMentions keeps about 80% of the gain (dev 60.54 → 62.36).
+  - On the tool-style MeSH graph, the disease gain disappears unless sibling/qualifier
+    edges are excluded: `rel_exclude: [sibling, allowed_qualifier, can_be_qualified_by]`.
 - **Existing sessions.** Saved session configs keep `graph_switch_margin: 0.10`. Only
   new sessions get 0.02; the paper's Table 3 sessions are unchanged. To apply the new
   margin to a session, edit its config.

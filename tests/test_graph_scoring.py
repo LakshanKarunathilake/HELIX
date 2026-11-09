@@ -52,3 +52,12 @@ def test_combo_pick_graph_first_then_names_on_exact_ties():
     assert combo_pick(cands, [0, 0, 0], [1, 3, 9], 0.02) == "B"   # exact tie -> more names; C not tied
     assert combo_pick(cands, [0, 0, 1], [1, 3, 9], 0.02) == "C"   # graph wins within delta
     assert combo_pick(cands, [0, 0, 0], [1, 1, 9], 0.0) == "A"
+
+
+def test_rel_codes_never_links_a_concept_to_itself():
+    kb = {"rel": {"C1": {"C9": {"RN"}}}, "cuis": {"D1": {"C1"}, "D1|O1": {"C1", "C9"}, "X": {"C1"}, "D2": {"C9"}},
+          "deg": {}}
+    rel = Rel(kb)
+    assert rel.codes("D1", "D1|O1") == frozenset()
+    assert rel.codes("D1", "X") == frozenset()
+    assert rel.codes("D1", "D2") == frozenset({"RN"})
