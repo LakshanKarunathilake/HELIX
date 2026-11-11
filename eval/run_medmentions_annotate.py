@@ -4,8 +4,8 @@ session files (bypassing the per-call CSV reload in the API, which is O(n) and
 far too slow at 203k rows / 4,392 docs).
 
 Step 1 retrieval: cached dense KB -> best id per mention -> write annotated.csv.
-Step 2 graph:     per document, greedy connection-maximisation over the UMLS
-                  Neo4j graph (eltool.graph_client) -> graph snapshot + stats.
+Step 2 graph:     per document, the gated graph tie-break (optimize_selection, with
+                  retrieval scores) over the UMLS Neo4j graph -> graph snapshot + stats.
 Both scored by component-wise any-match. GRAPH_SAMPLE docs (0 = all).
 """
 from __future__ import annotations
@@ -47,17 +47,20 @@ def main():
     rows = list(csv.DictReader(open(INP, encoding="utf-8")))
 
     # ── Step 1: retrieval (client-cached by mention) ──────────────────────────
-    cache: dict[str, list[str]] = {}
+    # (id, score) pairs: optimize_selection needs the scores for its confidence gate --
+    # bare ids all score 0.0, i.e. one big tie, which silently made Step 2 ungated.
+    cache: dict[str, list[tuple[str, float]]] = {}
     preds: list[str] = []
     t0 = time.time()
     for i, r in enumerate(rows):
         lbl = r["entity_text"]
         if lbl not in cache:
             try:
-                cache[lbl] = [c["id"] for c in S.post(KB, json={"label": lbl, "top_k": TOP_N}, timeout=60).json()["results"]]
+                cache[lbl] = [(c["id"], float(c.get("score") or 0.0))
+                              for c in S.post(KB, json={"label": lbl, "top_k": TOP_N}, timeout=60).json()["results"]]
             except Exception:
                 cache[lbl] = []
-        preds.append(cache[lbl][0] if cache[lbl] else "")
+        preds.append(cache[lbl][0][0] if cache[lbl] else "")
         if (i + 1) % 50000 == 0:
             print(f"  retrieval {i+1}/{len(rows)} uniq={len(cache)} {time.time()-t0:.0f}s", flush=True)
     ra, n = score(rows, preds)

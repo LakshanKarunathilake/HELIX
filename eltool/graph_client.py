@@ -37,6 +37,59 @@ from eltool.hosting import UnsafeURLError, check_neo4j_uri
 logger = logging.getLogger(__name__)
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_NON_ALNUM = re.compile(r"[^0-9a-z]+")
+
+
+def _norm_label(text: str) -> str:
+    """Case/punctuation-insensitive mention text, to spot repeats of the same mention."""
+    return " ".join(_NON_ALNUM.sub(" ", str(text or "").lower()).split())
+
+
+def id_parts(cid: Any) -> list[str]:
+    """Graph lookup keys of one candidate id, the whole id first.
+
+    Dictionary ids can be composite: ``601367|D002544`` lists alternative ids of one
+    concept (OMIM|MeSH), ``D010051|D001943`` the concepts of a composite mention.
+    A graph node holds a single code, so each part is looked up on its own; the
+    whole id is kept as a key too, for a graph that stores it as is.
+    """
+    whole = str(cid or "").strip()
+    parts = [p.strip() for p in whole.split("|") if p.strip()]
+    return list(dict.fromkeys([whole, *parts])) if len(parts) > 1 else ([whole] if whole else [])
+
+
+class _IdMap:
+    """Candidate ids <-> graph keys, for ids that match several nodes.
+
+    Neo4j is queried with every part of every id; the node-level rows are mapped
+    back to the original ids. Two ids that share a part are the same concept, so a
+    relation between them is not a link (an id must never support itself).
+    """
+
+    def __init__(self, ids):
+        self.ids = list(dict.fromkeys(str(i).strip() for i in ids if i and str(i).strip()))
+        self.parts = {i: set(id_parts(i)) for i in self.ids}
+        owners: dict[str, list[str]] = defaultdict(list)
+        for i in self.ids:
+            for p in id_parts(i):
+                owners[p].append(i)
+        self.owners = dict(owners)
+        self.keys = sorted(self.owners)
+
+    def same(self, a: str, b: str) -> bool:
+        return a == b or bool(self.parts.get(a, {a}) & self.parts.get(b, {b}))
+
+    def lift(self, rows) -> list[dict[str, Any]]:
+        """Node-level ``{source, target, rel}`` rows -> rows between original ids."""
+        out, seen = [], set()
+        for r in rows:
+            for a in self.owners.get(r["source"], ()):
+                for b in self.owners.get(r["target"], ()):
+                    key = (min(a, b), max(a, b), r.get("rel"))
+                    if not self.same(a, b) and key not in seen:
+                        seen.add(key)
+                        out.append({**r, "source": a, "target": b})
+        return out
 
 # Repo root = parent of the eltool package.
 _ROOT = Path(__file__).resolve().parent.parent
@@ -249,9 +302,11 @@ class Neo4jGraphClient:
 
     # ── individual level: candidate neighborhood ─────────────────────────────
     def candidate_graph(self, ids: list[str], neighbor_limit: int = 25) -> GraphResult:
-        """How the candidate CUIs connect to each other and to their 1-hop neighbors."""
-        ids = [str(i) for i in ids if i]
-        if not ids:
+        """How the candidate CUIs connect to each other and to their 1-hop neighbors.
+
+        Composite ids are matched through each of their parts (see ``id_parts``)."""
+        m = _IdMap(ids)
+        if not m.ids:
             return GraphResult()
         s = self.schema
         L, P, R, RP, N = s.node_label, s.id_prop, s.rel_type, s.rel_prop, s.name_prop
@@ -262,7 +317,7 @@ class Neo4jGraphClient:
             f"MATCH (a:{L})-[r:{R}]-(b:{L}) "
             f"WHERE a.{P} IN $ids AND b.{P} IN $ids AND a.{P} < b.{P}{rf} "
             f"RETURN DISTINCT a.{P} AS source, b.{P} AS target, r.{RP} AS rel",
-            ids=ids, **rparams,
+            ids=m.keys, **rparams,
         )
         # 1-hop neighbors of each candidate (excluding other candidates), capped.
         neigh = self._run(
@@ -272,28 +327,45 @@ class Neo4jGraphClient:
             f"WITH cid, n, r LIMIT $lim "
             f"RETURN cid AS source, n.{P} AS target, r.{RP} AS rel, "
             f"n.{N} AS target_name",
-            ids=ids, lim=neighbor_limit, **rparams,
+            ids=m.keys, lim=neighbor_limit, **rparams,
         )
-        return self._assemble(ids, among, neigh)
+        lifted_neigh = [{**r, "source": a} for r in neigh for a in m.owners.get(r["source"], ())]
+        return self._assemble(m.ids, m.lift(among), lifted_neigh)
 
     # ── names for a set of ids (so nodes show a human-readable label) ─────────
     def _names_for(self, ids: list[str]) -> dict[str, str]:
-        """id -> human-readable name (from the schema's name_prop). Empty if none."""
-        ids = [str(i) for i in ids if i]
-        if not ids:
+        """id -> human-readable name (from the schema's name_prop). Empty if none.
+
+        A composite id gets the names of its parts that have a node, joined by " | "."""
+        m = _IdMap(ids)
+        if not m.ids:
             return {}
         s = self.schema
         L, P, N = s.node_label, s.id_prop, s.name_prop
         rows = self._run(
             f"MATCH (n:{L}) WHERE n.{P} IN $ids RETURN n.{P} AS id, n.{N} AS name",
-            ids=ids,
+            ids=m.keys,
         )
-        return {r["id"]: r["name"] for r in rows if r.get("name")}
+        by_key: dict[str, str] = {}
+        for r in rows:                      # a code on several nodes: keep the first name
+            if r.get("name"):
+                by_key.setdefault(r["id"], r["name"])
+        out: dict[str, str] = {}
+        for i in m.ids:
+            keys = id_parts(i)
+            if keys[0] in by_key:
+                out[i] = by_key[keys[0]]
+            else:
+                names = list(dict.fromkeys(by_key[k] for k in keys[1:] if k in by_key))
+                if names:
+                    out[i] = " | ".join(names)
+        return out
 
     # ── document level: subgraph among accepted entities ─────────────────────
     def document_graph(self, cuis: list[str]) -> GraphResult:
         """Subgraph among the CUIs the human accepted across a document."""
-        cuis = [str(c) for c in cuis if c]
+        m = _IdMap(cuis)
+        cuis = m.ids
         if not cuis:
             return GraphResult()
         s = self.schema
@@ -303,9 +375,9 @@ class Neo4jGraphClient:
             f"MATCH (a:{L})-[r:{R}]-(b:{L}) "
             f"WHERE a.{P} IN $ids AND b.{P} IN $ids AND a.{P} < b.{P}{rf} "
             f"RETURN DISTINCT a.{P} AS source, b.{P} AS target, r.{RP} AS rel",
-            ids=cuis, **rparams,
+            ids=m.keys, **rparams,
         )
-        res = self._assemble(cuis, among, [])
+        res = self._assemble(cuis, m.lift(among), [])
         # human-readable names for the accepted nodes (the `among` query only returns ids)
         names = self._names_for(cuis)
         # connection count per accepted node → drives the "isolated pick" flag.
@@ -322,8 +394,12 @@ class Neo4jGraphClient:
 
     # ── automatic collective disambiguation ─────────────────────────────────
     def _edges_among(self, cuis: list[str]) -> list[tuple[str, str]]:
-        """Undirected edges (as ordered pairs) among the given CUIs."""
-        if not cuis:
+        """Undirected edges (as ordered pairs) among the given ids.
+
+        Composite ids are linked through any of their parts; ids sharing a part are
+        the same concept and never linked to each other."""
+        m = _IdMap(cuis)
+        if not m.ids:
             return []
         s = self.schema
         L, P, R = s.node_label, s.id_prop, s.rel_type
@@ -332,37 +408,50 @@ class Neo4jGraphClient:
             f"MATCH (a:{L})-[r:{R}]-(b:{L}) "
             f"WHERE a.{P} IN $ids AND b.{P} IN $ids AND a.{P} < b.{P}{rf} "
             f"RETURN DISTINCT a.{P} AS source, b.{P} AS target",
-            ids=cuis, **rparams,
+            ids=m.keys, **rparams,
         )
-        return [(r["source"], r["target"]) for r in rows]
+        return sorted({(min(r["source"], r["target"]), max(r["source"], r["target"]))
+                       for r in m.lift(rows)})
 
     def optimize_selection(
         self,
         mention_candidates: list[tuple[int, list]],
         fixed: dict[int, str] | None = None,
         pin_threshold: float = 0.90,
-        switch_margin: float = 0.10,
-        iterations: int = 2,
+        switch_margin: float = 0.02,
+        iterations: int = 1,
+        labels: dict[int, str] | None = None,
     ) -> dict[str, Any]:
         """
-        Confidence-gated, confidence-ordered graph disambiguation.
+        Graph tie-breaking across a document -- the rule measured offline in
+        eval/run_graph_scoring.py (docs/graph-scoring-findings.md).
 
-        The graph should break *ties*, not overrule confident retrieval. So we
-        (a) never move a mention whose top-1 retrieval score is high
-        (``pin_threshold``); (b) for the remaining ambiguous mentions, only ever
-        switch among candidates within ``switch_margin`` of that mention's own
-        top-1 score; and (c) resolve mentions in order of decreasing confidence,
-        so reliable concepts anchor the graph before weaker ones are attached.
-        This maximises document-level graph coherence without destroying good
-        top-1 picks (see the paper's Algorithm).
+        The graph re-ranks only candidates retrieval cannot tell apart:
+
+        * an **exact tie** at the top (several ids share the top-1 score -- e.g. one
+          name shared by many CUIs) is always eligible, however high the score;
+          that is where nearly all of the measured gain is, so a confidence pin
+          must not block it;
+        * otherwise a mention is eligible only when its top-1 score is below
+          ``pin_threshold``, and only candidates within ``switch_margin`` of it may
+          win (wider margins lost accuracy on every dataset).
+
+        Graph support of a candidate = the number of distinct anchor concepts it
+        shares a relation with. Anchors are the other mentions' retrieval top-1 (or
+        the human's accepted id for ``fixed`` mentions), excluding mentions with the
+        same ``labels`` text: a repeat would only echo the mention's own top-1. A
+        candidate replaces the top-1 only with strictly more support. Hub weighting
+        and relation filtering were tested and not adopted (no robust gain).
 
         ``mention_candidates``: ``[(mention_idx, [(cui, score), ...]), ...]``,
         ranked by score descending. Bare ``[cui, ...]`` lists are accepted too
-        (treated as zero-confidence, i.e. fully optimisable).
+        (all score 0.0, i.e. one big tie: fully graph-decided).
         ``fixed``: mentions pinned to a CUI (already accepted by the human); they
-        anchor coherence but never move.
+        anchor but never move. ``iterations`` is accepted for compatibility; the
+        rule is a single pass against fixed anchors, so it is ignored.
         """
         fixed = dict(fixed or {})
+        labels = {k: _norm_label(v) for k, v in (labels or {}).items()}
 
         # normalise candidates to [(cui, score)], drop empties
         mc: list[tuple[int, list[tuple[str, float]]]] = []
@@ -386,7 +475,7 @@ class Neo4jGraphClient:
         if not universe or not order:
             return empty
 
-        # Neo4j edge query — the expensive part; measure it explicitly.
+        # Neo4j edge query -- the expensive part; measure it explicitly.
         _t0 = time.perf_counter()
         edge_pairs = self._edges_among(universe)
         query_ms = (time.perf_counter() - _t0) * 1000.0
@@ -395,16 +484,32 @@ class Neo4jGraphClient:
             adj[a].add(b)
             adj[b].add(a)
 
-        # baseline = retrieval top-1 for every mention
-        sel: dict[int, str] = dict(fixed)
-        for idx in order:
-            sel[idx] = candmap[idx][0][0]
-        initial = dict(sel)
+        # anchors: retrieval top-1 of every mention, the human's id for fixed ones
+        anchor_of: dict[int, str] = {**fixed, **{idx: candmap[idx][0][0] for idx in order}}
+        initial = {idx: candmap[idx][0][0] for idx in order}
+        sel = dict(initial)
 
-        # confidence = top-1 score; PIN confident mentions, order the rest
-        conf = {idx: candmap[idx][0][1] for idx in order}
-        pinned = {idx for idx in order if conf[idx] >= pin_threshold}
-        free = sorted((i for i in order if i not in pinned), key=lambda i: conf[i], reverse=True)
+        free: list[int] = []
+        for idx in order:
+            cands = candmap[idx]
+            top = cands[0][1]
+            tied = [cid for cid, sc in cands if sc == top]
+            if len(tied) > 1:
+                eligible = tied                                  # exact tie: always
+            elif top < pin_threshold:
+                eligible = [cid for cid, sc in cands if top - sc <= switch_margin]
+            else:
+                continue                                         # confident and unique
+            if len(eligible) < 2:
+                continue
+            free.append(idx)
+            mine = labels.get(idx)
+            anchors = {cid for j, cid in anchor_of.items()
+                       if j != idx and not (mine and labels.get(j) == mine)}
+            support = {cid: len((adj.get(cid, set()) & anchors) - {cid}) for cid in eligible}
+            best = max(eligible, key=lambda c: support[c])      # max keeps the first on ties
+            if support[best] > support[eligible[0]]:
+                sel[idx] = best
 
         def internal_edges(values) -> int:
             vals = list({v for v in values})
@@ -416,36 +521,17 @@ class Neo4jGraphClient:
                         c += 1
             return c
 
-        iters = 0
-        for _ in range(max(1, iterations)):
-            iters += 1
-            changed = False
-            for idx in free:                                   # confidence order
-                cands = candmap[idx]
-                top_score = cands[0][1]
-                rank = {cid: k for k, (cid, _) in enumerate(cands)}
-                # only near-ties are eligible — never trade score for a graph link
-                near = [cid for cid, sc in cands if top_score - sc <= switch_margin]
-                others = {sel[j] for j in sel if j != idx}
-                best = max(near, key=lambda c: (len(adj.get(c, set()) & others),
-                                                c == sel.get(idx), -rank[c]))
-                if best != sel.get(idx):
-                    sel[idx] = best
-                    changed = True
-            if not changed:
-                break
-
         return {
             "selections": {str(idx): sel[idx] for idx in order},
-            "edges_before": internal_edges(initial.values()),
-            "edges_after": internal_edges(sel.values()),
-            "changed": sum(1 for idx in order if sel[idx] != initial.get(idx)),
-            "pinned": len(pinned),               # confident mentions never moved
-            "free": len(free),                   # ambiguous mentions considered
+            "edges_before": internal_edges(list(initial.values()) + list(fixed.values())),
+            "edges_after": internal_edges(list(sel.values()) + list(fixed.values())),
+            "changed": sum(1 for idx in order if sel[idx] != initial[idx]),
+            "pinned": len(order) - len(free),    # mentions the graph may not move
+            "free": len(free),                   # mentions with a tie the graph may break
             "nodes_queried": len(universe),      # candidate CUIs sent to Neo4j
             "edges_found": len(edge_pairs),      # edges Neo4j returned among them
             "query_ms": round(query_ms, 2),      # Neo4j edge-query latency
-            "iterations": iters,
+            "iterations": 1,
         }
 
     # ── shared assembly ──────────────────────────────────────────────────────

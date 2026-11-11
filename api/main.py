@@ -180,7 +180,7 @@ class CreateSessionRequest(BaseModel):
     enable_graph: bool = False
     graph: dict[str, Any] | None = None
     graph_pin_threshold: float = 0.90
-    graph_switch_margin: float = 0.10
+    graph_switch_margin: float = 0.02
     enable_auto_select: bool = True
     study_condition: str = ""
     collect_feedback: bool = False
@@ -1060,15 +1060,19 @@ def graph_optimize(name: str, req: GraphOptimizeRequest):
     # retrieve candidate IDs per mention (top-N, capped to the LLM/graph budget)
     top_n = max(5, cfg.llm_top_n)
     mention_candidates: list[tuple[int, list[str]]] = []
+    labels: dict[int, str] = {}
     for i in same:
         label = str(df.iloc[i].get(cfg.label_column, "")).strip()
         if not label:
             continue
+        labels[int(i)] = label
         fused = _retrieve_fused(kb_cfg, label)
         mention_candidates.append((int(i), [(c.id, c.score) for c in fused[:top_n]]))
 
     try:
-        result = resolve_graph_client(cfg, _GRAPH_POOL).optimize_selection(mention_candidates, pin_threshold=cfg.graph_pin_threshold, switch_margin=cfg.graph_switch_margin)
+        result = resolve_graph_client(cfg, _GRAPH_POOL).optimize_selection(
+            mention_candidates, pin_threshold=cfg.graph_pin_threshold,
+            switch_margin=cfg.graph_switch_margin, labels=labels)
         metrics.record_graph(
             name, doc=doc_id, mentions=len(mention_candidates),
             nodes=result.get("nodes_queried", 0), edges=result.get("edges_found", 0),
@@ -1121,13 +1125,15 @@ def graph_optimize_all(name: str, skip_annotated: bool = True):
             idxs = list(group.index)
             fixed: dict[int, str] = {}
             mention_candidates: list[tuple[int, list[str]]] = []
+            labels: dict[int, str] = {int(i): str(df.at[i, cfg.label_column] or "").strip() for i in idxs}
             for i in idxs:
                 existing = str(out_df.at[i, kb] or "").strip()
-                # pin single-valued existing annotations (skip NIL / multi)
-                if skip_annotated and existing and existing != "NIL" and "|" not in existing:
+                # pin existing annotations: they anchor but never move. A multi-id
+                # annotation ("D010051|D001943") anchors through each of its ids.
+                if skip_annotated and existing and existing != "NIL":
                     fixed[int(i)] = existing
                     continue
-                if skip_annotated and existing:   # NIL or multi → leave as-is, don't optimise
+                if skip_annotated and existing:   # NIL → leave as-is, don't optimise
                     continue
                 label = str(df.at[i, cfg.label_column] or "").strip()
                 if not label:
@@ -1138,7 +1144,8 @@ def graph_optimize_all(name: str, skip_annotated: bool = True):
             if not mention_candidates:
                 continue
             try:
-                res = gc.optimize_selection(mention_candidates, fixed=fixed, pin_threshold=cfg.graph_pin_threshold, switch_margin=cfg.graph_switch_margin)
+                res = gc.optimize_selection(mention_candidates, fixed=fixed, pin_threshold=cfg.graph_pin_threshold,
+                                            switch_margin=cfg.graph_switch_margin, labels=labels)
             except GraphError as e:
                 return {"enabled": True, "error": str(e), "documents": docs_done}
             metrics.record_graph(
