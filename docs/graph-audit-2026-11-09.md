@@ -187,3 +187,36 @@ flagged "isolated".
 - `eval/run_graph_scoring.py` and `eval/run_hint_analysis.py`.
 - The probe scripts used for C, E and G are in the session scratchpad and are not committed.
 - The before/after output snapshots were diffed with the commands in this session.
+
+## Live Neo4j check (2026-11-11)
+
+Checked against the running Neo4j 5.24 (`umls` and `mesh` databases, read-only account).
+
+- **Inventory.** `umls` has 2,055,464 nodes and `mesh` has 402,563. Both index their id
+  property. No node id contains `|`.
+- **Same edges as offline.** For every document, the links live Neo4j returns among the
+  candidates were compared with the graph-file stub used above (sibling/qualifier excluded).
+  - BC5CDR disease dev and test, dataset index (with composites): 500 of 500 documents identical.
+  - BC5CDR chemical dev, full index: 500 of 500 identical.
+- **Spot check** with the PR #3 client:
+  - `D010051|D001943` is linked to `D009369` and named "Ovarian Neoplasms | Breast Neoplasms".
+  - `605027|D008228` is never linked to its own part `D008228`.
+  - The bare OMIM id `194300` stays isolated.
+- **Acc@1 through live Neo4j** (real client, abbreviation pool, sibling/qualifier excluded on
+  MeSH). "Original" is the pre-fix client (0b9d958) with margin 0.10:
+
+| | base | original | rule fix | + composite fix |
+|---|---|---|---|---|
+| MedMentions dev | 60.54 | 60.30 (+230/−329) | **62.36** (+1163/−419) | 62.36 |
+| MedMentions test | 59.79 | 59.68 (+224/−265) | **61.58** (+1113/−392) | 61.58 |
+| Disease dev, full | 77.46 | 77.25 (+82/−91) | **77.91** (+32/−13, p=0.007) | 77.91 |
+| Disease test, full | 78.75 | 79.23 (+85/−64, p=0.10) | 79.05 (+22/−9, p=0.03) | 79.05 |
+| Disease test, dataset | 93.19 | 92.48 (+14/−45) | 93.26 | 93.22 |
+| Chemical dev / test, full | 91.04 / 88.44 | 91.10 / 88.33 | 90.99 / 88.55 | 90.99 / 88.55 |
+
+- Every live number equals the offline tool-style number. The one exception is MedMentions
+  test, where offline used a 2025AA-built graph (61.65 vs 61.58).
+- Query latency: median 3–5 ms per document on MeSH, 14–15 ms on UMLS.
+- On disease test (full index), the original rule's net is +21 vs +13 for the new one. The
+  difference is not significant. On dev and on the dataset index, the original loses
+  (−9 and −31 net).
