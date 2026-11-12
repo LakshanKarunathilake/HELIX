@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { X, Play, Pause, Square, CheckCircle2, Loader2, Search, Share2, Download, Activity } from 'lucide-react'
 import * as api from '@/api/client'
 import type { Candidate, MetricsInsights, SessionConfig } from '@/types'
+import { hasSemanticGroup } from '@/lib/semantic'
 
 interface Props {
   sessionName: string
@@ -30,7 +31,7 @@ function pickBest(dense: Candidate[], lexical: Candidate[], entityType: string, 
   const topScore = pool[0].score ?? 0
   const tied = pool.filter(c => topScore - (c.score ?? 0) <= threshold)
   if (entityType) {
-    const match = tied.find(c => c.semantic_groups?.split(/[|,]/).map(s => s.trim()).includes(entityType))
+    const match = tied.find(c => hasSemanticGroup(c.semantic_groups, entityType))
     if (match) return match
   }
   return pool[0]
