@@ -1,6 +1,10 @@
 import { useEffect, useState } from 'react'
 import { CheckCircle2, ChevronDown, ChevronUp, BookOpen, Info } from 'lucide-react'
 import type { Candidate, PanelName } from '@/types'
+import { parseSemanticGroups, parseSemanticTypes, semanticTypeName } from '@/lib/semantic'
+
+// Type pills shown inline; the rest collapse into a "+N" pill (names on hover).
+const MAX_TYPE_PILLS = 2
 
 interface Props {
   candidate: Candidate
@@ -53,7 +57,7 @@ function SemanticGroupBadge({ code }: { code: string }) {
 
 function SemanticTypePill({ raw }: { raw: string }) {
   // Format: "T039:Physiologic Function" → show the human-readable part after the colon
-  const name = raw.includes(':') ? raw.split(':').slice(1).join(':').trim() : raw.trim()
+  const name = semanticTypeName(raw)
   return (
     <span className="inline-flex items-center rounded-full bg-violet-50 px-2 py-0.5 text-xs text-violet-700 ring-1 ring-inset ring-violet-600/20">
       {name}
@@ -103,17 +107,12 @@ export function CandidateCard({ candidate, rank, selected, onSelect, onPanelOpen
 
   const others = (candidate.aliases ?? []).filter(a => a !== candidate.label)
 
-  // Parse semantic groups (pipe- or comma-separated codes)
-  const semGroups = candidate.semantic_groups
-    ? candidate.semantic_groups.split(/[|,]/).map(s => s.trim()).filter(Boolean)
-    : []
-
-  // Parse semantic types (pipe- or comma-separated "TID:Name" strings)
-  const semTypes = candidate.semantic_types
-    ? candidate.semantic_types.split(/[|,]/).map(s => s.trim()).filter(Boolean)
-    : []
-
-  const showSemTypes = semTypes.length > 0 && semTypes.length <= 2
+  const semGroups = parseSemanticGroups(candidate.semantic_groups)
+  // "TID:Name" entries; names may contain commas ("Amino Acid, Peptide, or Protein")
+  const semTypes = parseSemanticTypes(candidate.semantic_types)
+  const shownTypes = semTypes.slice(0, MAX_TYPE_PILLS)
+  const hiddenTypes = semTypes.slice(MAX_TYPE_PILLS)
+  const showSemTypes = semTypes.length > 0
   const hasDefinition = !!candidate.definition
 
   return (
@@ -162,7 +161,15 @@ export function CandidateCard({ candidate, rank, selected, onSelect, onPanelOpen
           {(semGroups.length > 0 || showSemTypes || hasDefinition) && (
             <div className="mt-2 flex flex-wrap items-center gap-1.5">
               {semGroups.map(g => <SemanticGroupBadge key={g} code={g} />)}
-              {showSemTypes && semTypes.map(t => <SemanticTypePill key={t} raw={t} />)}
+              {shownTypes.map(t => <SemanticTypePill key={t} raw={t} />)}
+              {hiddenTypes.length > 0 && (
+                <span
+                  className="inline-flex items-center rounded-full bg-violet-50 px-2 py-0.5 text-xs text-violet-700 ring-1 ring-inset ring-violet-600/20"
+                  title={hiddenTypes.map(semanticTypeName).join('\n')}
+                >
+                  +{hiddenTypes.length}
+                </span>
+              )}
               {hasDefinition && (
                 <DefinitionTooltip definition={candidate.definition} onView={() => onPanelOpen?.('definition')} />
               )}
