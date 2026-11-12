@@ -17,7 +17,8 @@ interface Props {
  * that decided it, then how sure the annotator is. Shown after the save, so it
  * never counts toward the measured decision time.
  *
- * Keys: 1–9 pick the hint, then 1–3 pick confidence. Backspace goes back.
+ * Keys: 1–9 pick the hint (0 picks the 10th, C4's AI hint), then 1–3 pick
+ * confidence. Backspace goes back.
  */
 export function FeedbackPrompt({ term, options, initial, onSubmit, onCancel }: Props) {
   const [hint, setHint] = useState<string | null>(null)
@@ -41,10 +42,16 @@ export function FeedbackPrompt({ term, options, initial, onSubmit, onCancel }: P
       if (busy) return
       if (e.key === 'Escape' && onCancel) { onCancel(); return }
       if (e.key === 'Backspace' && hint) { setHint(null); return }
+      if (!/^[0-9]$/.test(e.key)) return
       const n = Number(e.key)
-      if (!Number.isInteger(n) || n < 1) return
-      if (!hint && n <= options.hints.length) setHint(options.hints[n - 1].code)
-      else if (hint && n <= options.confidence.length) submit(options.confidence[n - 1].code)
+      // "0" is the 10th hint (C4's AI suggestion); it never picks a confidence.
+      if (!hint) {
+        const i = n === 0 ? 9 : n - 1
+        if (i < options.hints.length) setHint(options.hints[i].code)
+        return
+      }
+      if (n < 1) return
+      if (n <= options.confidence.length) submit(options.confidence[n - 1].code)
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
@@ -69,22 +76,34 @@ export function FeedbackPrompt({ term, options, initial, onSubmit, onCancel }: P
         <div className="p-3">
           {!hint ? (
             <div className="space-y-1">
-              {options.hints.map((h, i) => (
-                <button
-                  key={h.code}
-                  onClick={() => setHint(h.code)}
-                  className={`w-full flex items-center gap-3 text-left text-sm rounded-lg px-3 py-2 transition-colors ${
-                    initial?.hint === h.code
-                      ? 'bg-brand-50 text-brand-800 ring-1 ring-brand-200'
-                      : 'hover:bg-gray-50 text-gray-700'
-                  }`}
-                >
-                  <kbd className="w-5 h-5 flex items-center justify-center rounded bg-gray-100 text-[11px] font-semibold text-gray-500">
-                    {i + 1}
-                  </kbd>
-                  {h.label}
-                </button>
-              ))}
+              {options.hints.map((h, i) => {
+                const ai = i === 9   // C4 only: the AI suggestion, bound to key 0
+                return (
+                  <button
+                    key={h.code}
+                    onClick={() => setHint(h.code)}
+                    className={`w-full flex items-center gap-3 text-left text-sm rounded-lg px-3 py-2 transition-colors ${
+                      initial?.hint === h.code
+                        ? 'bg-brand-50 text-brand-800 ring-1 ring-brand-200'
+                        : ai
+                          ? 'bg-violet-50 hover:bg-violet-100 text-violet-900'
+                          : 'hover:bg-gray-50 text-gray-700'
+                    }`}
+                  >
+                    <kbd className={`w-5 h-5 flex items-center justify-center rounded text-[11px] font-semibold ${
+                      ai ? 'bg-violet-100 text-violet-700' : 'bg-gray-100 text-gray-500'
+                    }`}>
+                      {ai ? 0 : i + 1}
+                    </kbd>
+                    {h.label}
+                    {ai && (
+                      <span className="ml-auto text-[11px] font-semibold text-violet-800 bg-violet-100 rounded-full px-2">
+                        C4 only
+                      </span>
+                    )}
+                  </button>
+                )
+              })}
             </div>
           ) : (
             <div className="space-y-3">

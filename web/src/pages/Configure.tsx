@@ -54,6 +54,7 @@ export function Configure() {
   const [llmPrompt, setLlmPrompt] = useState('')
   const [llmApiKey, setLlmApiKey] = useState('')
   const [llmApiKeySet, setLlmApiKeySet] = useState(false)
+  const [llmCacheOnly, setLlmCacheOnly] = useState(false)
   const [defaultPrompt, setDefaultPrompt] = useState('')
   // Neo4j graph
   const [enableGraph, setEnableGraph] = useState(false)
@@ -61,6 +62,9 @@ export function Configure() {
   const [graphTesting, setGraphTesting] = useState(false)
   const [graphTest, setGraphTest] = useState<{ ok: boolean; nodes?: number; error?: string } | null>(null)
   const [collectFeedback, setCollectFeedback] = useState(false)
+  // Mode C: the AI pre-annotates; the human works a review queue.
+  const [reviewMode, setReviewMode] = useState(false)
+  const [spotcheckPct, setSpotcheckPct] = useState(10)   // stored as a fraction
   const [debugShowGold, setDebugShowGold] = useState(false)
 
   useEffect(() => {
@@ -104,7 +108,11 @@ export function Configure() {
     if (existingCfg.llm_top_n != null) setLlmTopN(existingCfg.llm_top_n)
     if (existingCfg.llm_prompt) setLlmPrompt(existingCfg.llm_prompt)
     setLlmApiKeySet(!!existingCfg.llm_api_key_set)
+    if (existingCfg.llm_cache_only != null) setLlmCacheOnly(existingCfg.llm_cache_only)
     if (existingCfg.enable_graph != null) setEnableGraph(existingCfg.enable_graph)
+    if (existingCfg.review_mode != null) setReviewMode(existingCfg.review_mode)
+    if (existingCfg.review_spotcheck_rate != null)
+      setSpotcheckPct(Math.round(existingCfg.review_spotcheck_rate * 1000) / 10)
     if (existingCfg.graph) setGraph({ ...DEFAULT_GRAPH, ...existingCfg.graph })
   }, [existingCfg])
 
@@ -183,9 +191,12 @@ export function Configure() {
           llm_top_n: llmTopN,
           llm_prompt: llmPrompt.trim() || null,
           llm_api_key: llmApiKey || null,   // blank = keep existing (server-side)
+          llm_cache_only: llmCacheOnly,
           enable_graph: enableGraph,
           graph: graph?.uri?.trim() ? stripGraphFlags(graph) : null,
           collect_feedback: collectFeedback,
+          review_mode: reviewMode,
+          review_spotcheck_rate: Math.min(100, Math.max(0, spotcheckPct)) / 100,
           debug_show_gold: debugShowGold,
         }
         await api.updateSession(sessionName!, updated)
@@ -217,9 +228,12 @@ export function Configure() {
           llm_top_n: llmTopN,
           llm_prompt: llmPrompt.trim() || null,
           llm_api_key: llmApiKey || null,
+          llm_cache_only: llmCacheOnly,
           enable_graph: enableGraph,
           graph: graph?.uri?.trim() ? stripGraphFlags(graph) : null,
           collect_feedback: collectFeedback,
+          review_mode: reviewMode,
+          review_spotcheck_rate: Math.min(100, Math.max(0, spotcheckPct)) / 100,
           debug_show_gold: debugShowGold,
         })
         if (contextZip) {
@@ -271,8 +285,16 @@ export function Configure() {
         />
       )}
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">
+        <h1 className="flex items-center gap-3 text-2xl font-bold text-gray-900">
           {isEdit ? `Edit — ${sessionName}` : 'New session'}
+          {existingCfg?.study_condition && (
+            <span
+              className="text-xs font-semibold text-gray-600 bg-gray-100 rounded-full px-2.5 py-0.5"
+              title="Study condition — set by the study builder, not editable here"
+            >
+              Study condition: {existingCfg.study_condition}
+            </span>
+          )}
         </h1>
         <p className="text-gray-500 mt-1 text-sm">
           Configure your annotation session, column mapping, and knowledge bases.
@@ -368,6 +390,22 @@ export function Configure() {
             the API server. Falls back to retrieval ranking on any error.
           </p>
           <div className={`space-y-4 ${enableLlmRerank ? '' : 'opacity-40 pointer-events-none'}`}>
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={llmCacheOnly}
+                onChange={e => setLlmCacheOnly(e.target.checked)}
+              />
+              <span className="text-sm text-gray-700">
+                Use precomputed answers only
+                <span className="block text-xs text-gray-400">
+                  Never call the model while annotating; answers come from the cache filled by
+                  <code className="bg-gray-100 rounded px-1 mx-1">eval/prewarm_llm.py</code>.
+                  Uncached rows fall back to retrieval ranking.
+                </span>
+              </span>
+            </label>
             <div className="grid grid-cols-3 gap-4">
               <div>
                 <label className="label">Provider</label>
@@ -626,6 +664,41 @@ export function Configure() {
             <code className="bg-gray-100 rounded px-1">_hint</code> and{' '}
             <code className="bg-gray-100 rounded px-1">_confidence</code> to the output.
           </p>
+        </div>
+
+        <div className="border-t border-gray-100 pt-4 mt-2">
+          <label className="flex items-center gap-2 mb-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={reviewMode}
+              onChange={e => setReviewMode(e.target.checked)}
+            />
+            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+              Review mode — AI pre-annotates
+            </span>
+          </label>
+          <p className="text-xs text-gray-400 mb-3">
+            The AI answers every row first. Rows it is sure about (and that agree with the top
+            suggestion) are accepted automatically; the annotator only works through the rest.
+            Run <code className="bg-gray-100 rounded px-1">eval/preannotate.py</code> first.
+          </p>
+          <div className={`flex items-center gap-2 ${reviewMode ? '' : 'opacity-40 pointer-events-none'}`}>
+            <label className="text-sm text-gray-700" htmlFor="spotcheck-rate">Spot-check rate</label>
+            <input
+              id="spotcheck-rate"
+              type="number"
+              min={0}
+              max={100}
+              step={1}
+              className="input w-20 text-center py-1 text-sm"
+              value={spotcheckPct}
+              onChange={e => setSpotcheckPct(Math.min(100, Math.max(0, +e.target.value || 0)))}
+            />
+            <span className="text-sm text-gray-500">%</span>
+            <span className="text-xs text-gray-400">
+              of auto-accepted rows go to the annotator without the AI's answer
+            </span>
+          </div>
         </div>
 
         {/* ── DEBUG: gold answer ─────────────────────────────────────────── */}

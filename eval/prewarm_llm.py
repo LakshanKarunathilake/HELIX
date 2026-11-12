@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""Mode B prewarm: fill the LLM cache for C4 sessions before annotators start.
+
+C4 sessions run with ``llm_cache_only`` so a human never waits on the model.
+This script walks every row exactly as the annotator's browser will — same
+label, same context, same KB retrieval settings, same candidate fusion — and
+asks the session's LLM for its pick with the cache enabled, so the live
+/candidates endpoint later finds every answer on disk.
+
+Needs HELIX running (for retrieval) and the LLM reachable. Prompts for nothing;
+each session's own llm_* settings are used (API key from --api-key-file, else
+the session config, else the provider's env var, as the reranker does).
+
+Run it ON THE HELIX HOST with the same HELIX_LLM_CACHE_DIR as the server
+(default ~/.cache/helix_llm_rerank): the cache is a local directory, and the
+server only ever reads the one it was started with.
+
+Retrieval failures are not cached. The /candidates endpoint turns a KB error
+into an empty list (reporting it in ``retrieval_errors``), so a row with a
+retrieval error, or whose enabled dense or lexical list comes back empty, is
+counted ``failed`` and left uncached — caching a fused list built from
+half the retrieval would give a key the live endpoint never produces. Exit
+status is 1 when any row failed; rerun to retry (cached rows are skipped).
+
+Run:  python eval/prewarm_llm.py --prefix study3 [--helix http://127.0.0.1:8000]
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from collections import Counter
+from pathlib import Path
+from types import SimpleNamespace
+
+ROOT = Path(__file__).resolve().parent.parent
+for _p in (str(ROOT), str(Path(__file__).resolve().parent)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+import requests  # noqa: E402
+import eltool.session as session_mod  # noqa: E402  (module attr read at call time)
+from eltool.config import SessionConfig  # noqa: E402
+from eltool.llm_reranker import LLMRerankError  # noqa: E402
+from api.main import _fuse_candidates, _get_reranker  # noqa: E402
+from helix_api import HelixAPI  # noqa: E402
+
+
+def _session_config(session: str, api: HelixAPI) -> SessionConfig:
+    """Read from disk when local (GET masks the API key); else over HTTP."""
+    path = session_mod.session_config_path(session)
+    if path.exists():
+        return SessionConfig.load(path)
+    return SessionConfig(**api.config(session))
+
+
+def _fused(resp: dict) -> list[SimpleNamespace]:
+    """The endpoint's own fusion over the serialised candidates. Wrapping the
+    dicts keeps `_fuse_candidates` (attribute access) as the single definition
+    of the order, so the cache key matches the live endpoint's."""
+    dense = [SimpleNamespace(**c) for c in resp.get("dense_candidates") or []]
+    lexical = [SimpleNamespace(**c) for c in resp.get("lexical_candidates") or []]
+    return _fuse_candidates(dense, lexical)
+
+
+class RetrievalGap(Exception):
+    """An enabled retrieval list came back empty (likely a swallowed KB error)."""
+
+
+def _check_retrieval(resp: dict, kb) -> None:
+    errs = {k: v for k, v in (resp.get("retrieval_errors") or {}).items() if v}
+    if errs:
+        raise RetrievalGap("retrieval failed: "
+                           + "; ".join(f"{k}: {v}" for k, v in sorted(errs.items())))
+    dense = resp.get("dense_candidates") or []
+    lexical = resp.get("lexical_candidates") or []
+    if not dense and not lexical:
+        raise RetrievalGap("no candidates (KB down or nothing retrieved)")
+    if kb.enable_dense and not dense:
+        raise RetrievalGap("dense list empty while lexical returned results")
+    if kb.enable_lexical and not lexical:
+        raise RetrievalGap("lexical list empty while dense returned results")
+
+
+def prewarm_session(session: str, api: HelixAPI, api_key: str | None = None) -> Counter:
+    """``api_key`` (from --api-key-file) overrides the session's llm_api_key."""
+    cfg = _session_config(session, api)
+    stats: Counter = Counter({"cached": 0, "computed": 0, "failed": 0})
+    if not cfg.enable_llm_rerank:
+        return stats
+    reranker = _get_reranker(
+        cfg.llm_model, cfg.llm_top_n, cfg.llm_prompt, api_key or cfg.llm_api_key,
+        provider=cfg.llm_provider, base_url=cfg.llm_base_url, cache_only=False,
+    )
+    total = api.row(session, 0)["total"]
+    for i in range(total):
+        try:
+            row = api.row(session, i)
+            context = row.get("context_text")
+            for kb in cfg.kbs:
+                resp = api.candidates(session, row["label"], kb.name, context)
+                _check_retrieval(resp, kb)
+                result = reranker.rank(row["label"], context, _fused(resp))
+                stats["cached" if result.cached else "computed"] += 1
+        except (RetrievalGap, LLMRerankError, requests.RequestException) as e:
+            print(f"  {session} row {i}: {e}", file=sys.stderr)
+            stats["failed"] += 1
+    return stats
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n")[0],
+        epilog="Run on the HELIX host with the same HELIX_LLM_CACHE_DIR as the server.")
+    ap.add_argument("--prefix", required=True, help="session folder prefix, e.g. study3")
+    ap.add_argument("--helix", default="http://127.0.0.1:8000")
+    ap.add_argument("--api-key-file", default=None,
+                    help="LLM API key file; overrides each session's llm_api_key")
+    a = ap.parse_args(argv)
+
+    key = Path(a.api_key_file).expanduser().read_text().strip() if a.api_key_file else None
+    api = HelixAPI(a.helix)
+    root = session_mod.SESSIONS_DIR
+    sessions = sorted(p.name for p in root.glob(a.prefix + "*")
+                      if p.is_dir() and (p / "session.json").exists())
+    failed = 0
+    for name in sessions:
+        cfg = json.loads((root / name / "session.json").read_text())
+        if not cfg.get("enable_llm_rerank"):
+            continue
+        stats = prewarm_session(name, api, api_key=key)
+        failed += stats["failed"]
+        print(f"{name:24s} {dict(stats)}")
+    if failed:
+        print(f"{failed} rows failed — rerun to retry them (cached rows are skipped)")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from eltool.config import SLUG_RE, GraphConnection, KBConfig, SessionConfig
 from eltool import feedback as fb
 from eltool.provenance import classify_method
+from eltool.review import review_payload
 from eltool.hosting import check_neo4j_uri, check_outbound_url, cors_origins, hosted_mode
 from eltool.context_upload import ContextUploadError, extract_context_zip
 from eltool.graph_client import GraphError, Neo4jGraphClient, load_neo4j_settings
@@ -49,7 +50,7 @@ from eltool.session import (
     reflection_path, session_config_path, session_dir,
 )
 from eltool.store import (
-    ANNOTATOR_COL, CONFIDENCE_COL, HINT_COL, LLM_COL, detect_delimiter,
+    ANNOTATOR_COL, CONFIDENCE_COL, HINT_COL, LLM_COL, ROUTE_COL, detect_delimiter,
     find_resume_index, init_output, load_input, save_output, write_feedback, write_row,
 )
 
@@ -177,6 +178,7 @@ class CreateSessionRequest(BaseModel):
     llm_top_n: int = 10
     llm_prompt: str | None = None
     llm_api_key: str | None = None
+    llm_cache_only: bool = False
     enable_graph: bool = False
     graph: dict[str, Any] | None = None
     graph_pin_threshold: float = 0.90
@@ -185,6 +187,8 @@ class CreateSessionRequest(BaseModel):
     study_condition: str = ""
     collect_feedback: bool = False
     debug_show_gold: bool = False
+    review_mode: bool = False
+    review_spotcheck_rate: float = 0.1
 
 
 @app.post("/api/sessions")
@@ -241,6 +245,7 @@ def create_session(req: CreateSessionRequest):
             llm_top_n=req.llm_top_n,
             llm_prompt=req.llm_prompt,
             llm_api_key=req.llm_api_key,
+            llm_cache_only=req.llm_cache_only,
             enable_graph=req.enable_graph,
             graph=req.graph,
             graph_pin_threshold=req.graph_pin_threshold,
@@ -249,6 +254,8 @@ def create_session(req: CreateSessionRequest):
             study_condition=req.study_condition,
             collect_feedback=req.collect_feedback,
             debug_show_gold=req.debug_show_gold,
+            review_mode=req.review_mode,
+            review_spotcheck_rate=req.review_spotcheck_rate,
         )
     except ValidationError as e:
         raise HTTPException(400, _safe_validation_error(e))
@@ -373,7 +380,17 @@ def get_progress(name: str):
         resume = total if bool(filled.all()) else int((~filled).to_numpy().argmax())
     else:
         done, resume = 0, 0
-    return {"total": total, "done": done, "resume_idx": resume}
+    result: dict[str, Any] = {"total": total, "done": done, "resume_idx": resume}
+    if cfg.review_mode:
+        routes = (out_df[ROUTE_COL].astype(str) if ROUTE_COL in out_df.columns
+                  else pd.Series("", index=out_df.index))
+        queue = [int(i) for i in out_df.index[routes.isin(["review", "spotcheck"])]]
+        first_open = next((i for i in queue
+                           if not all(str(out_df.at[i, kb]).strip() for kb in kb_names)),
+                          len(out_df))
+        result["queue"] = queue
+        result["resume_idx"] = first_open
+    return result
 
 
 # ── rows ──────────────────────────────────────────────────────────────────────
@@ -522,6 +539,9 @@ def get_row(name: str, idx: int):
         "debug_gold": debug_gold,   # None unless the session enables debug_show_gold
         "debug_gold_info": debug_gold_info,
         "feedback": feedback,
+        "review": review_payload(out_df, idx) if cfg.review_mode else None,
+        # Mode C auto rows: shown read-only, never saved by the human.
+        "ai_accepted": _ai_accepted(cfg, out_df, idx),
     }
 
 
@@ -548,7 +568,7 @@ def save_rows_batch(name: str, req: BatchAnnotateRequest):
     with _WRITE_LOCK, metrics.timer("write.batch", name, rows=len(req.updates)):
         out_df = init_output(out_path, df, [k.name for k in cfg.kbs], cfg.annotator)
         for u in req.updates:
-            if u.idx < 0 or u.idx >= n:
+            if u.idx < 0 or u.idx >= n or _ai_accepted(cfg, out_df, u.idx):
                 continue
             out_df.at[u.idx, ANNOTATOR_COL] = cfg.annotator
             if u.llm_used is not None:
@@ -571,11 +591,40 @@ class AnnotateRequest(BaseModel):
     user_interacted: bool = False       # annotator touched the UI before commit
     manual_entry: bool = False          # id typed by hand rather than picked
     panels: list[str] | None = None     # UI panels opened on the row (feedback sessions)
+    # What the LLM banner showed (C4). None = nothing shown (cache miss / error).
+    llm_id: str | None = None
+    llm_confidence: float | None = None
+
+
+def _records_llm(cfg) -> bool:
+    """Study sessions that show the LLM's pick record what was shown (C4)."""
+    return bool(cfg.study_condition and cfg.enable_llm_rerank)
+
+
+def _records_provenance(cfg) -> bool:
+    """Study sessions and review-mode (mode C) sessions log per-row provenance;
+    review sessions need human time and method to measure the queue."""
+    return bool(cfg.study_condition or cfg.review_mode)
+
+
+def _ai_accepted(cfg, out_df: pd.DataFrame, idx: int) -> bool:
+    """Mode C: the AI accepted this row on its own; it is not the human's to edit."""
+    if not cfg.review_mode or ROUTE_COL not in out_df.columns or "_method" not in out_df.columns:
+        return False
+    return (str(out_df.at[idx, ROUTE_COL] or "") == "auto"
+            and str(out_df.at[idx, "_method"] or "") == "llm_auto")
+
+
+AI_ACCEPTED_MSG = "This row was accepted by the AI and is not in the review queue"
+
+
+_AI_WRITTEN_COLS = ("_llm_id", "_llm_confidence", "_llm_level", "_llm_label",
+                    "_top1_id", "_rationale", "_route")
 
 
 def _provenance_for(cfg, req: AnnotateRequest) -> dict[str, str] | None:
-    """Build the provenance row for a study session (None for ordinary ones)."""
-    if not cfg.study_condition:
+    """Build the provenance row for a study or review session (None for ordinary ones)."""
+    if not _records_provenance(cfg):
         return None
     selected = "|".join(req.annotations[k] for k in sorted(req.annotations))
     return {
@@ -588,8 +637,12 @@ def _provenance_for(cfg, req: AnnotateRequest) -> dict[str, str] | None:
         "_elapsed_ms": "" if req.elapsed_ms is None else str(req.elapsed_ms),
         "_selected_rank": "" if req.selected_rank is None else str(req.selected_rank),
         "_top1_id": req.top1_id or "",
-        "_condition": cfg.study_condition,
+        "_condition": cfg.study_condition or "REVIEW",
         "_debug_gold_shown": "1" if cfg.debug_show_gold else "0",
+        **({
+            "_llm_id": req.llm_id or "",
+            "_llm_confidence": "" if req.llm_confidence is None else str(req.llm_confidence),
+        } if _records_llm(cfg) else {}),
     }
 
 
@@ -602,8 +655,17 @@ def save_row(name: str, idx: int, req: AnnotateRequest):
     panels = fb.format_panels(req.panels) if cfg.collect_feedback else None
     with _WRITE_LOCK:   # atomic read-modify-write
         out_df = init_output(out_path, df, [k.name for k in cfg.kbs], cfg.annotator,
-                             provenance=bool(cfg.study_condition),
-                             feedback=cfg.collect_feedback)
+                             provenance=_records_provenance(cfg),
+                             feedback=cfg.collect_feedback, llm=_records_llm(cfg))
+        if _ai_accepted(cfg, out_df, idx):
+            raise HTTPException(409, AI_ACCEPTED_MSG)
+        if cfg.review_mode and provenance:
+            # Mode C: the pre-annotation pass wrote these; the human's first save
+            # must not replace them with the client's (usually empty) values.
+            for col in _AI_WRITTEN_COLS:
+                if col in provenance and col in out_df.columns \
+                        and str(out_df.at[idx, col] or "").strip():
+                    del provenance[col]
         write_row(out_path, out_df, idx, cfg.annotator, req.annotations,
                   llm_used=req.llm_used, provenance=provenance, panels=panels)
     return {"ok": True}
@@ -612,8 +674,8 @@ def save_row(name: str, idx: int, req: AnnotateRequest):
 # ── per-decision feedback (Annotation Guide Sec. 8) ─────────────────────────────
 
 @app.get("/api/feedback/options")
-def feedback_options():
-    return fb.options()
+def feedback_options(ai: bool = False):
+    return fb.options(include_ai=ai)
 
 
 class FeedbackRequest(BaseModel):
@@ -628,7 +690,7 @@ def save_feedback(name: str, idx: int, req: FeedbackRequest):
     cfg = _load_cfg(name)
     if not cfg.collect_feedback:
         raise HTTPException(400, "This session does not collect feedback.")
-    if req.hint not in fb.HINT_CODES:
+    if req.hint not in fb.hint_codes(include_ai=cfg.enable_llm_rerank):
         raise HTTPException(422, f"Unknown hint: {req.hint}")
     if req.confidence not in fb.CONFIDENCE_CODES:
         raise HTTPException(422, f"Unknown confidence: {req.confidence}")
@@ -639,7 +701,8 @@ def save_feedback(name: str, idx: int, req: FeedbackRequest):
     kb_names = [k.name for k in cfg.kbs]
     with _WRITE_LOCK:
         out_df = init_output(out_path, df, kb_names, cfg.annotator,
-                             provenance=bool(cfg.study_condition), feedback=True)
+                             provenance=_records_provenance(cfg), feedback=True,
+                             llm=_records_llm(cfg))
         if not all(str(out_df.at[idx, kb] or "").strip() for kb in kb_names):
             raise HTTPException(409, "Save the annotation before recording feedback.")
         write_feedback(out_path, out_df, idx, req.hint, req.confidence)
@@ -666,7 +729,7 @@ def save_reflection(name: str, req: ReflectionRequest):
     if not cfg.collect_feedback:
         raise HTTPException(400, "This session does not collect feedback.")
     try:
-        fb.validate_reflection_ranking(req.ranking)
+        fb.validate_reflection_ranking(req.ranking, include_ai=cfg.enable_llm_rerank)
     except ValueError as e:
         raise HTTPException(422, str(e))
     record = {
@@ -835,12 +898,13 @@ def auto_annotate_session(name: str, skip_annotated: bool = True):
 
 
 # Reranker instances are reused across requests (keeps the Anthropic client +
-# prompt cache warm). Keyed by (model, top_n, prompt, api_key).
+# prompt cache warm). Keyed by every constructor argument.
 _RERANKERS: dict[tuple, LLMReranker] = {}
 
 
 def _get_reranker(model: str, top_n: int, prompt: str | None, api_key: str | None,
-                  provider: str = "anthropic", base_url: str | None = None) -> LLMReranker:
+                  provider: str = "anthropic", base_url: str | None = None,
+                  cache_only: bool = False) -> LLMReranker:
     if base_url and hosted_mode():
         # Same outbound guard as KB URLs; a blocked URL degrades like any
         # other re-rank failure instead of a 500.
@@ -848,11 +912,11 @@ def _get_reranker(model: str, top_n: int, prompt: str | None, api_key: str | Non
             check_outbound_url(base_url)
         except UnsafeURLError as e:
             raise LLMRerankError(f"llm_base_url: {e}") from e
-    key = (provider, base_url or "", model, top_n, prompt or "", api_key or "")
+    key = (provider, base_url or "", model, top_n, prompt or "", api_key or "", cache_only)
     if key not in _RERANKERS:
         _RERANKERS[key] = LLMReranker(
             model=model, top_n=top_n, system_prompt=prompt, api_key=api_key or None,
-            provider=provider, base_url=base_url or None,
+            provider=provider, base_url=base_url or None, cache_only=cache_only,
         )
     return _RERANKERS[key]
 
@@ -884,8 +948,12 @@ def get_candidates(name: str, req: CandidateRequest):
     if not kb_cfg:
         raise HTTPException(404, f"KB '{req.kb_name}' not found")
     dense_cands, lexical_cands = [], []
+    # Swallowed retrieval failures, so callers (AI runners) can tell "KB down"
+    # from "nothing retrieved". None = disabled or succeeded.
+    retrieval_errors: dict[str, str | None] = {"dense": None, "lexical": None}
     # Set when the outbound URL guard blocks this KB, so the annotator sees why
     # there are no candidates (the message names the host, never headers).
+    # A blocked KB is a retrieval failure too, so it is also in retrieval_errors.
     kb_error: str | None = None
 
     if req.enable_dense:
@@ -896,8 +964,10 @@ def get_candidates(name: str, req: CandidateRequest):
         except UnsafeURLError as e:
             logger.warning("Dense search blocked for KB '%s': %s", req.kb_name, e)
             kb_error = f"KB '{req.kb_name}' blocked: {e}"
+            retrieval_errors["dense"] = kb_error
         except Exception as e:
             logger.warning("Dense search failed for KB '%s': %s", req.kb_name, e)
+            retrieval_errors["dense"] = str(e) or type(e).__name__
 
     if req.enable_lexical:
         try:
@@ -907,8 +977,10 @@ def get_candidates(name: str, req: CandidateRequest):
         except UnsafeURLError as e:
             logger.warning("Lexical search blocked for KB '%s': %s", req.kb_name, e)
             kb_error = f"KB '{req.kb_name}' blocked: {e}"
+            retrieval_errors["lexical"] = kb_error
         except Exception as e:
             msg = str(e)
+            retrieval_errors["lexical"] = msg or type(e).__name__
             if "503" in msg or "lexical index not initialised" in msg.lower():
                 logger.warning(
                     "Lexical search is disabled on the KB server for KB '%s' — "
@@ -928,6 +1000,7 @@ def get_candidates(name: str, req: CandidateRequest):
                 reranker = _get_reranker(
                     cfg.llm_model, cfg.llm_top_n, cfg.llm_prompt, cfg.llm_api_key,
                     provider=cfg.llm_provider, base_url=cfg.llm_base_url,
+                    cache_only=cfg.llm_cache_only,
                 )
                 with metrics.timer("rerank.llm", name, provider=cfg.llm_provider, model=cfg.llm_model):
                     result = reranker.rank(req.label, req.context, fused)
@@ -941,6 +1014,7 @@ def get_candidates(name: str, req: CandidateRequest):
         "dense_candidates":   _serialize_candidates(dense_cands),
         "lexical_candidates": _serialize_candidates(lexical_cands),
         "llm": llm,
+        "retrieval_errors": retrieval_errors,
         "error": kb_error,
     }
 

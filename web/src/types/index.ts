@@ -69,7 +69,10 @@ export interface SessionConfig {
   llm_prompt?: string | null
   llm_api_key?: string | null
   llm_api_key_set?: boolean   // read-only flag from GET (key itself is masked)
+  llm_cache_only?: boolean    // C4: answers come only from the prewarmed cache
   enable_graph?: boolean
+  review_mode?: boolean            // mode C: the AI pre-annotates, the human works a queue
+  review_spotcheck_rate?: number   // fraction of auto-eligible rows sent as spot-checks
   graph?: GraphConnection | null
 }
 
@@ -192,7 +195,23 @@ export interface RowData {
   debug_gold_info?: GoldReport[]
   /** Hint + confidence already recorded for this row; null = not yet. */
   feedback?: RowFeedback | null
+  /** Review-mode sessions: what the queue may show for this row; null = not a queue row. */
+  review?: ReviewInfo | null
+  /** Review-mode sessions: the AI accepted this row on its own — read-only, never saved. */
+  ai_accepted?: boolean
 }
+
+/** A `review` row shows the AI's pick; a `spotcheck` row deliberately shows nothing. */
+export type ReviewInfo =
+  | {
+      route: 'review'
+      llm_id: string
+      label: string
+      level: string          // sure | fairly_sure | unsure
+      rationale: string
+      reasons: string[]
+    }
+  | { route: 'spotcheck' }
 
 // ── per-decision feedback (Annotation Guide Sec. 8) ───────────────────────────
 
@@ -237,6 +256,8 @@ export interface Progress {
   total: number
   done: number
   resume_idx: number
+  /** Review-mode sessions only: rows routed to the human (review|spotcheck), in order. */
+  queue?: number[]
 }
 
 export interface ParsedFile {

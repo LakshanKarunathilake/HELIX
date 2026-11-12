@@ -57,7 +57,10 @@ export const createSession = (body: {
   llm_top_n?: number
   llm_prompt?: string | null
   llm_api_key?: string | null
+  llm_cache_only?: boolean
   enable_graph?: boolean
+  review_mode?: boolean
+  review_spotcheck_rate?: number
   graph?: GraphConnection | null
   collect_feedback?: boolean
   debug_show_gold?: boolean
@@ -107,6 +110,8 @@ export type RowProvenance = {
   user_interacted?: boolean
   manual_entry?: boolean
   panels?: PanelName[]      // feedback sessions only; frozen on first save
+  llm_id?: string           // the LLM pick shown on the row (C4); frozen on first save
+  llm_confidence?: number
 }
 
 export const saveRow = (
@@ -124,8 +129,9 @@ export const saveRow = (
 
 // ── per-decision feedback (Annotation Guide Sec. 8) ───────────────────────────
 
-export const getFeedbackOptions = () =>
-  req<FeedbackOptions>('/feedback/options')
+/** `ai` adds C4's 10th hint ("The AI suggestion and its explanation"). */
+export const getFeedbackOptions = (ai: boolean) =>
+  req<FeedbackOptions>(`/feedback/options${ai ? '?ai=true' : ''}`)
 
 export const saveFeedback = (name: string, idx: number, hint: string, confidence: string) =>
   req<{ ok: boolean }>(`/sessions/${name}/rows/${idx}/feedback`, {

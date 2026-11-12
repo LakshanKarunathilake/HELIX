@@ -387,7 +387,7 @@ def test_hosted_reranker_private_base_url_is_llm_error_not_500(env, hosted, monk
     def boom(*a, **k):
         raise AssertionError("must not contact the LLM")
 
-    monkeypatch.setattr("eltool.llm_reranker.LLMReranker._call_api", boom)
+    monkeypatch.setattr("eltool.llm_reranker.LLMReranker._request", boom)  # every provider call goes through it
     r = c.post("/api/sessions/attacker/candidates",
                json={"label": "lung", "kb_name": "UMLS", "enable_lexical": False})
     assert r.status_code == 200
@@ -452,6 +452,10 @@ def test_hosted_candidates_reports_blocked_kb(env, hosted, monkeypatch):
     body = r.json()
     assert body["dense_candidates"] == [] and body["error"]
     assert "ATTACKERTOKEN" not in r.text
+    # AI runners decide "retry, never record an answer" from retrieval_errors alone:
+    # a blocked KB must show up there, not read as "nothing retrieved".
+    assert body["retrieval_errors"]["dense"] and body["retrieval_errors"]["lexical"]
+    assert "ATTACKERTOKEN" not in str(body["retrieval_errors"])
 
 
 def test_candidates_error_is_none_when_ok(env, monkeypatch):
@@ -460,3 +464,4 @@ def test_candidates_error_is_none_when_ok(env, monkeypatch):
     body = c.post("/api/sessions/attacker/candidates",
                   json={"label": "lung", "kb_name": "UMLS", "enable_lexical": False}).json()
     assert body["dense_candidates"] and body["error"] is None
+    assert body["retrieval_errors"] == {"dense": None, "lexical": None}
