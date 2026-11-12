@@ -14,6 +14,7 @@ import { DocumentReview } from '@/components/DocumentReview'
 import { FeedbackPrompt } from '@/components/FeedbackPrompt'
 import { ReflectionModal } from '@/components/ReflectionModal'
 import { Network } from 'lucide-react'
+import { describeSemantics, hasSemanticGroup } from '@/lib/semantic'
 import type { Candidate, GraphData, LLMRerank, PanelName, ReviewInfo, RowFeedback, SessionConfig } from '@/types'
 
 const DEFAULT_AUTO_SELECT_SECS = 5
@@ -252,9 +253,7 @@ export function Annotate() {
     // Candidates within threshold of the top score
     const tied = pool.filter(c => topScore - (c.score ?? 0) <= threshold)
     if (entityType) {
-      const typeMatch = tied.find(c =>
-        c.semantic_groups?.split(/[|,]/).map(s => s.trim()).includes(entityType)
-      )
+      const typeMatch = tied.find(c => hasSemanticGroup(c.semantic_groups, entityType))
       if (typeMatch) return typeMatch
     }
     return pool[0]
@@ -672,9 +671,9 @@ export function Annotate() {
                                     {g.label}{' '}
                                     <span className="font-normal text-red-600">· in index</span>
                                   </p>
-                                  {(g.semantic_groups || g.semantic_types) && (
+                                  {describeSemantics(g.semantic_groups, g.semantic_types) && (
                                     <p className="text-[11px] text-red-600">
-                                      {[g.semantic_groups, g.semantic_types].filter(Boolean).join(' · ')}
+                                      {describeSemantics(g.semantic_groups, g.semantic_types)}
                                       {g.n_aliases ? ` · ${g.n_aliases} aliases` : ''}
                                     </p>
                                   )}
@@ -1001,9 +1000,9 @@ export function Annotate() {
                           <span className="text-sm font-semibold text-emerald-800">{r.label}</span>
                           <code className="text-xs font-mono text-emerald-700">{r.id}</code>
                         </div>
-                        {(r.semantic_groups || r.semantic_types) && (
+                        {describeSemantics(r.semantic_groups, r.semantic_types) && (
                           <p className="text-xs text-emerald-700 mt-1">
-                            {[r.semantic_groups, r.semantic_types].filter(Boolean).join(' · ')}
+                            {describeSemantics(r.semantic_groups, r.semantic_types)}
                           </p>
                         )}
                         {r.aliases?.length > 1 && (

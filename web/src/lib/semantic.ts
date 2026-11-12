@@ -22,3 +22,16 @@ export function parseSemanticGroups(raw?: string | null): string[] {
   if (!raw) return []
   return [...new Set(raw.split(/[|,]/).map(s => s.trim()).filter(Boolean))]
 }
+
+/** True when `code` is one of the entry's semantic groups (used to break near-ties on the mention type). */
+export function hasSemanticGroup(raw: string | null | undefined, code: string): boolean {
+  return parseSemanticGroups(raw).includes(code)
+}
+
+/**
+ * One-line summary for compact panels: groups then type names, joined with " · "
+ * (not commas, which type names may contain). "" when the entry has neither.
+ */
+export function describeSemantics(groups?: string | null, types?: string | null): string {
+  return [...parseSemanticGroups(groups), ...parseSemanticTypes(types).map(semanticTypeName)].join(' · ')
+}
