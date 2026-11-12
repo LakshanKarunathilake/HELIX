@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
 from .config import KBConfig
+from .hosting import check_outbound_url
 
 
 @dataclass
@@ -48,6 +50,45 @@ def _render_template(template: str, label: str, top_k: int) -> str:
     return template.replace("{label}", json.dumps(label)[1:-1]).replace("{top_k}", str(top_k))
 
 
+def entity_url(base: str, entity_id: str) -> str:
+    """The KB's by-id lookup route, derived from its configured /query URL.
+
+    The id is escaped (composite dictionary ids contain '|') and stripped of
+    path separators so it cannot steer the request off the /entity route.
+    """
+    root = base.rstrip("/")
+    if root.endswith("/query"):
+        root = root[: -len("/query")]
+    safe = quote(str(entity_id).replace("/", "").replace("..", ""), safe="")
+    return f"{root}/entity/{safe}"
+
+
+def _raise_on_redirect(resp) -> None:
+    if 300 <= resp.status_code < 400:
+        loc = resp.headers.get("Location", "")
+        raise ValueError(f"KB redirected to {loc}; redirects are not followed")
+
+
+def fetch_entity(cfg: KBConfig, entity_id: str, timeout: float = 10.0) -> dict | None:
+    """Look an id up on the KB's /entity route, sending the KB's headers.
+
+    Returns None on 404; raises requests.HTTPError on other errors.
+    """
+    url = entity_url(cfg.endpoint_url, entity_id)
+    check_outbound_url(url)
+    resp = requests.get(
+        url,
+        headers=json.loads(cfg.headers or "{}"),
+        timeout=timeout,
+        allow_redirects=False,
+    )
+    _raise_on_redirect(resp)
+    if resp.status_code == 404:
+        return None
+    resp.raise_for_status()
+    return resp.json()
+
+
 class KBClient:
     def __init__(self, cfg: KBConfig, timeout: float = 15.0):
         self.cfg = cfg
@@ -63,12 +104,14 @@ class KBClient:
         except json.JSONDecodeError as e:
             raise ValueError(f"request_template did not render to valid JSON: {e}") from e
 
+        check_outbound_url(self.cfg.endpoint_url)
         if self.cfg.method == "POST":
             resp = requests.post(
                 self.cfg.endpoint_url,
                 json=payload,
                 headers=self._headers(),
                 timeout=self.timeout,
+                allow_redirects=False,
             )
         else:
             resp = requests.get(
@@ -76,7 +119,9 @@ class KBClient:
                 params=payload,
                 headers=self._headers(),
                 timeout=self.timeout,
+                allow_redirects=False,
             )
+        _raise_on_redirect(resp)
         resp.raise_for_status()
         data = resp.json()
 

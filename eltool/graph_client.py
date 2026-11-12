@@ -32,6 +32,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from eltool.hosting import UnsafeURLError, check_neo4j_uri
+
 logger = logging.getLogger(__name__)
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -216,12 +218,21 @@ class Neo4jGraphClient:
         password: str | None = None,
         database: str | None = None,
         schema: GraphSchema | None = None,
+        *,
+        _use_settings: bool = True,
     ):
-        settings = load_neo4j_settings()
-        self.uri = uri or settings["uri"]
-        self.user = user or settings["user"]
-        self.password = password or settings["password"]
-        self.database = database or settings["database"]
+        if _use_settings:
+            settings = load_neo4j_settings()
+            self.uri = uri or settings["uri"]
+            self.user = user or settings["user"]
+            self.password = password or settings["password"]
+            self.database = database or settings["database"]
+        else:
+            settings = {"schema": {}}
+            self.uri = uri or ""
+            self.user = user or ""
+            self.password = password or ""
+            self.database = database or None
         # Schema precedence: explicit arg > file's `schema:` block > built-in defaults.
         if schema is None:
             known = GraphSchema().__dict__
@@ -229,16 +240,42 @@ class Neo4jGraphClient:
             schema = GraphSchema(**{**known, **overrides})
         self.schema = schema.validated()
         self._driver = None
+        self._closed = False
+
+    @classmethod
+    def from_connection(cls, conn) -> "Neo4jGraphClient":
+        """Build a client purely from a session's GraphConnection (no neo4j.yaml)."""
+        schema = GraphSchema(
+            node_label=conn.node_label, id_prop=conn.id_prop, rel_type=conn.rel_type,
+            rel_prop=conn.rel_prop, name_prop=conn.name_prop,
+            rel_include=list(conn.rel_include), rel_exclude=list(conn.rel_exclude),
+        )
+        return cls(conn.uri, conn.user, conn.password, conn.database, schema,
+                   _use_settings=False)
+
+    def ping(self) -> int:
+        """Count nodes with the configured label; proves connectivity + schema."""
+        L = self.schema.node_label
+        rows = self._run(f"MATCH (n:{L}) RETURN count(n) AS c")
+        return int(rows[0]["c"]) if rows else 0
 
     # ── connection ───────────────────────────────────────────────────────────
     def _driver_lazy(self):
+        if self._closed:
+            raise GraphError("graph client was closed")
         if self._driver is None:
             try:
                 from neo4j import GraphDatabase
             except ImportError as e:  # pragma: no cover
                 raise GraphError("neo4j driver not installed (pip install neo4j).") from e
             try:
-                self._driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
+                check_neo4j_uri(self.uri)
+            except UnsafeURLError as e:
+                raise GraphError(str(e)) from e
+            try:
+                self._driver = GraphDatabase.driver(
+                    self.uri, auth=(self.user, self.password), connection_timeout=10,
+                )
                 self._driver.verify_connectivity()
             except Exception as e:
                 self._driver = None
@@ -256,6 +293,7 @@ class Neo4jGraphClient:
             raise GraphError(f"Cypher query failed: {e}") from e
 
     def close(self) -> None:
+        self._closed = True
         if self._driver is not None:
             try:
                 self._driver.close()

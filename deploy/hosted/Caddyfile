@@ -1,0 +1,6 @@
+{$HELIX_DOMAIN} {
+	basic_auth {
+		{$HELIX_BASIC_USER} {$HELIX_BASIC_HASH}
+	}
+	reverse_proxy web:80
+}
