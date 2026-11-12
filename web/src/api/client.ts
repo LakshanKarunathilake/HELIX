@@ -1,4 +1,4 @@
-import type { Candidate, DocumentMentions, FeedbackOptions, GraphData, KBConfig, LLMRerank, PanelName, ParsedFile, Progress, Reflection, RowData, SessionConfig } from '@/types'
+import type { Candidate, DocumentMentions, FeedbackOptions, GraphConnection, GraphData, KBConfig, LLMRerank, PanelName, ParsedFile, Progress, Reflection, RowData, SessionConfig } from '@/types'
 
 const BASE = '/api'
 
@@ -15,6 +15,17 @@ async function req<T>(path: string, options?: RequestInit): Promise<T> {
 
 export const getSessions = () =>
   req<{ sessions: string[] }>('/sessions').then(r => r.sessions)
+
+export const getInfo = () => req<{ hosted: boolean }>('/info')
+
+export const uploadContext = (sessionName: string, file: File) => {
+  const fd = new FormData()
+  fd.append('file', file)
+  return req<{ files: number }>(`/sessions/${encodeURIComponent(sessionName)}/context`, {
+    method: 'POST',
+    body: fd,
+  })
+}
 
 export const parseFile = (file: File): Promise<ParsedFile> => {
   const fd = new FormData()
@@ -47,6 +58,7 @@ export const createSession = (body: {
   llm_prompt?: string | null
   llm_api_key?: string | null
   enable_graph?: boolean
+  graph?: GraphConnection | null
   collect_feedback?: boolean
   debug_show_gold?: boolean
 }) =>
@@ -152,14 +164,16 @@ export const getCandidates = (
   enable_lexical: boolean,
   context?: string | null,
 ) =>
-  req<{ dense_candidates: Candidate[]; lexical_candidates: Candidate[]; llm: LLMRerank | null }>(
+  req<{ dense_candidates: Candidate[]; lexical_candidates: Candidate[]; llm: LLMRerank | null
+         error?: string | null }>(
     `/sessions/${name}/candidates`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ label, kb_name, enable_dense, enable_lexical, context }),
     },
-  ).then(r => ({ dense: r.dense_candidates, lexical: r.lexical_candidates, llm: r.llm }))
+  ).then(r => ({ dense: r.dense_candidates, lexical: r.lexical_candidates, llm: r.llm,
+                 error: r.error ?? null }))
 
 // ── entity lookup (manual id entry) ───────────────────────────────────────────
 
@@ -228,11 +242,20 @@ export const optimizeDocument = (name: string, idx: number, kb_name: string) =>
 
 // ── KB test ───────────────────────────────────────────────────────────────────
 
-export const testKB = (kb_config: KBConfig, label: string) =>
+export const testKB = (kb_config: KBConfig, label: string, sessionName?: string) =>
   req<{ ok: boolean; candidates?: Candidate[]; error?: string }>('/kb/test', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ kb_config, label }),
+    body: JSON.stringify({ kb_config, label, session_name: sessionName ?? null }),
+  })
+
+// ── Neo4j connection test ──────────────────────────────────────────────────────
+
+export const testGraph = (graph: GraphConnection, sessionName?: string) =>
+  req<{ ok: boolean; nodes?: number; error?: string }>('/graph/test', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ graph, session_name: sessionName ?? null }),
   })
 
 // ── export & per-step snapshots ────────────────────────────────────────────────

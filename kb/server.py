@@ -20,6 +20,8 @@ Environment variable overrides:
     KB_ADAPTER_NAME HF Hub adapter name
     KB_HOST         bind host
     KB_PORT         port
+    KB_AUTH_TOKEN   if set, every route except /health needs 'Authorization: Bearer <token>'
+    KB_THREADS      waitress worker threads (default 8)
 
 ─────────────────────────────────────────────────────────────────────────────
 HTTP API
@@ -65,6 +67,7 @@ sys.path.insert(0, str(_ROOT / "kb"))
 
 from search_sapbert_index import SAPBERTIndexSearcher  # noqa: E402
 from lexical_search import LexicalSearcher             # noqa: E402
+from auth import install_bearer_auth                   # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -339,7 +342,13 @@ def main() -> None:
                        "POST /query/lexical will return 503.")
 
     logger.info(f"Server starting on http://{cfg['host']}:{cfg['port']}")
-    app.run(host=cfg["host"], port=cfg["port"], debug=False)
+    install_bearer_auth(app, os.environ.get("KB_AUTH_TOKEN"))
+    if os.environ.get("KB_AUTH_TOKEN"):
+        logger.info("Bearer auth enabled (every route except /health).")
+
+    import waitress  # imported here so tools that only import this module don't need it
+    waitress.serve(app, host=cfg["host"], port=cfg["port"],
+                   threads=int(os.environ.get("KB_THREADS", "8")))
 
 
 if __name__ == "__main__":

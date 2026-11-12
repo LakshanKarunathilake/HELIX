@@ -63,6 +63,33 @@ class KBConfig(BaseModel):
         return v
 
 
+_NEO4J_SCHEMES = ("bolt", "bolt+s", "bolt+ssc", "neo4j", "neo4j+s", "neo4j+ssc")
+
+
+class GraphConnection(BaseModel):
+    """Per-session Neo4j connection + schema mapping."""
+    uri: str
+    user: str = "neo4j"
+    password: str = ""
+    database: str | None = None
+    node_label: str = "Concept"
+    id_prop: str = "cui"
+    rel_type: str = "RELATES_TO"
+    rel_prop: str = "rel"
+    name_prop: str = "concept"
+    rel_include: list[str] = []
+    rel_exclude: list[str] = []
+
+    @field_validator("uri")
+    @classmethod
+    def _scheme(cls, v: str) -> str:
+        v = v.strip()
+        scheme = v.split("://", 1)[0].lower() if "://" in v else ""
+        if scheme not in _NEO4J_SCHEMES:
+            raise ValueError("uri scheme must be one of: " + ", ".join(_NEO4J_SCHEMES))
+        return v
+
+
 class SessionConfig(BaseModel):
     session_name: str
     annotator: str
@@ -94,11 +121,16 @@ class SessionConfig(BaseModel):
     # Neo4j graph neighborhood. Connection + schema live in neo4j.yaml (see
     # neo4j.example.yaml); this flag just turns the feature on for the session.
     enable_graph: bool = False
-    # Graph disambiguation only breaks ties: mentions whose top-1 retrieval score
-    # is >= pin_threshold are never moved; among the rest, only candidates within
-    # switch_margin of that mention's own top-1 score are eligible.
+    # Per-session Neo4j connection. When unset, local installs fall back to the
+    # server's neo4j.yaml; hosted deployments have no fallback.
+    graph: GraphConnection | None = None
+    # Graph disambiguation only breaks ties: an exact tie at the top is always
+    # eligible; otherwise a mention whose top-1 retrieval score is >= pin_threshold
+    # is never moved, and only candidates within switch_margin of its top-1 score
+    # may win. 0.10 lost accuracy on every dataset in offline tests; sessions saved
+    # with 0.10 keep it.
     graph_pin_threshold: float = 0.90
-    graph_switch_margin: float = 0.10
+    graph_switch_margin: float = 0.02
     # Pilot study (Sec. 4.6). Naming a condition (e.g. "C1"/"C2"/"C3") turns on
     # per-decision provenance logging for this session and stamps every row with
     # the arm it belongs to. Empty = ordinary session, original column layout.
