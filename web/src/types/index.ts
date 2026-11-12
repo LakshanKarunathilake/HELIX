@@ -9,8 +9,38 @@ export interface KBConfig {
   label_field: string
   score_field: string
   headers: string
+  headers_set?: boolean   // UI-only: server holds stored headers (write-only)
   enable_dense: boolean
   enable_lexical: boolean
+}
+
+export interface GraphConnection {
+  uri: string
+  user: string
+  password: string
+  password_set?: boolean   // UI-only: server holds a stored password (write-only)
+  database?: string | null
+  node_label: string
+  id_prop: string
+  rel_type: string
+  rel_prop: string
+  name_prop: string
+  rel_include: string[]
+  rel_exclude: string[]
+}
+
+export const DEFAULT_GRAPH: GraphConnection = {
+  uri: '',
+  user: 'neo4j',
+  password: '',
+  database: null,
+  node_label: 'Concept',
+  id_prop: 'cui',
+  rel_type: 'RELATES_TO',
+  rel_prop: 'rel',
+  name_prop: 'concept',
+  rel_include: [],
+  rel_exclude: [],
 }
 
 export interface SessionConfig {
@@ -43,6 +73,7 @@ export interface SessionConfig {
   enable_graph?: boolean
   review_mode?: boolean            // mode C: the AI pre-annotates, the human works a queue
   review_spotcheck_rate?: number   // fraction of auto-eligible rows sent as spot-checks
+  graph?: GraphConnection | null
 }
 
 export interface LLMRerank {

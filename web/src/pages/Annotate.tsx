@@ -215,6 +215,8 @@ export function Annotate() {
         .then(result => {
           setCandidates(prev => ({ ...prev, [kb.name]: result }))
           setLoadingKBs(prev => ({ ...prev, [kb.name]: false }))
+          // The server refused to contact this KB (hosted URL guard).
+          if (result.error) setKbErrors(prev => ({ ...prev, [kb.name]: result.error! }))
           // Individual-level graph: how this mention's candidates connect.
           if (cfg.enable_graph) {
             const ids = [...new Set([...result.dense, ...result.lexical].map(c => c.id))]

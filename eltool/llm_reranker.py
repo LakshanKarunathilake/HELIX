@@ -187,7 +187,13 @@ class LLMReranker:
                 from openai import OpenAI
             except ImportError as e:  # pragma: no cover
                 raise LLMRerankError("openai SDK is not installed (pip install openai).") from e
-            kwargs: dict[str, Any] = {"api_key": self._api_key, "timeout": self.timeout}
+            import httpx  # an openai dependency
+            kwargs: dict[str, Any] = {
+                "api_key": self._api_key, "timeout": self.timeout,
+                # Never follow a redirect: it would take the key (and the
+                # request) to a host the outbound URL guard never checked.
+                "http_client": httpx.Client(follow_redirects=False, timeout=self.timeout),
+            }
             if self.base_url:
                 kwargs["base_url"] = self.base_url   # e.g. Gemini's OpenAI-compat endpoint
             self._client = OpenAI(**kwargs)

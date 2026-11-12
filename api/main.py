@@ -6,6 +6,7 @@ Run from the ELTool root:
 """
 from __future__ import annotations
 
+import glob
 import io
 import json
 import logging
@@ -16,7 +17,6 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote
 from typing import Any
 
 import pandas as pd
@@ -25,18 +25,24 @@ import requests
 logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Body
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from eltool.config import KBConfig, SessionConfig
+from eltool.config import SLUG_RE, GraphConnection, KBConfig, SessionConfig
 from eltool import feedback as fb
 from eltool.provenance import classify_method
 from eltool.review import review_payload
+from eltool.hosting import check_neo4j_uri, check_outbound_url, cors_origins, hosted_mode
+from eltool.context_upload import ContextUploadError, extract_context_zip
 from eltool.graph_client import GraphError, Neo4jGraphClient, load_neo4j_settings
-from eltool.kb_client import KBClient
+from eltool.graph_pool import GraphClientPool, resolve_graph_client
+from eltool.hosting import UnsafeURLError
+from eltool.secrets import fill_graph_secret, fill_kb_secret, mask_session, merge_secrets
+from eltool.kb_client import KBClient, entity_url, fetch_entity
 from eltool.llm_reranker import LLMRerankError, LLMReranker
 from eltool.metrics import metrics
 from eltool.session import (
@@ -56,13 +62,72 @@ _WRITE_LOCK = threading.Lock()
 app = FastAPI(title="ELTool API", version="1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 _TMP = Path("/tmp/eltool_uploads")
 _TMP.mkdir(exist_ok=True)
+
+MAX_CONTEXT_UPLOAD = 50 * 1024 * 1024
+
+
+@app.get("/api/info")
+def get_info():
+    return {"hosted": hosted_mode()}
+
+
+def _require_session_name(name: str) -> str:
+    """A session name from the URL path must be a slug, so it can never name
+    '..', '.' or anything outside the sessions folder."""
+    if not isinstance(name, str) or not SLUG_RE.fullmatch(name):
+        raise HTTPException(404, "Session not found")
+    return name
+
+
+def _check_context_folder(folder: str | None, name: str) -> None:
+    """Hosted mode: only the session's own uploaded context folder is allowed."""
+    if not folder or not hosted_mode():
+        return
+    try:
+        ok = Path(folder).resolve() == (session_dir(name) / "context").resolve()
+    except (OSError, ValueError, RuntimeError):
+        ok = False
+    if not ok:
+        raise HTTPException(
+            400, "In hosted mode, upload context texts instead of naming a server folder.")
+
+
+def _check_confined(cfg: SessionConfig, name: str) -> None:
+    """Hosted mode backstop: a session only reads files inside its own folder."""
+    if not hosted_mode():
+        return
+    try:
+        ok = Path(cfg.input_path).resolve().is_relative_to(session_dir(name).resolve())
+    except (OSError, ValueError, RuntimeError):
+        ok = False
+    if not ok:
+        raise HTTPException(400, "This session's input file is outside its session folder.")
+    _check_context_folder(cfg.context_folder, name)
+
+
+def _check_hosted_urls(cfg: SessionConfig) -> None:
+    """Hosted mode: refuse KB, Neo4j and LLM addresses the outbound guard blocks,
+    at save time, so the creator sees why instead of an empty candidate list."""
+    if not hosted_mode():
+        return
+    checks = [(f"kbs[{i}].endpoint_url", check_outbound_url, kb.endpoint_url)
+              for i, kb in enumerate(cfg.kbs)]
+    if cfg.graph is not None:
+        checks.append(("graph.uri", check_neo4j_uri, cfg.graph.uri))
+    if cfg.llm_base_url:
+        checks.append(("llm_base_url", check_outbound_url, cfg.llm_base_url))
+    for field, check, url in checks:
+        try:
+            check(url)
+        except UnsafeURLError as e:
+            raise HTTPException(400, f"{field}: {e}")
 
 
 # ── sessions ────────────────────────────────────────────────────────────────
@@ -115,8 +180,9 @@ class CreateSessionRequest(BaseModel):
     llm_api_key: str | None = None
     llm_cache_only: bool = False
     enable_graph: bool = False
+    graph: dict[str, Any] | None = None
     graph_pin_threshold: float = 0.90
-    graph_switch_margin: float = 0.10
+    graph_switch_margin: float = 0.02
     enable_auto_select: bool = True
     study_condition: str = ""
     collect_feedback: bool = False
@@ -127,23 +193,36 @@ class CreateSessionRequest(BaseModel):
 
 @app.post("/api/sessions")
 def create_session(req: CreateSessionRequest):
+    # Everything is validated before the first side effect (mkdir / move).
+    if not SLUG_RE.fullmatch(req.session_name):
+        raise HTTPException(400, "session_name must contain only letters, digits, '-' or '_'.")
+    # tmp_path must be a file parse-file wrote: a direct child of the upload dir.
+    try:
+        src = Path(req.tmp_path).resolve()
+        is_upload = src.parent == _TMP.resolve() and src.is_file()
+    except (OSError, ValueError, RuntimeError):
+        is_upload = False
+    if not is_upload:
+        raise HTTPException(400, "Uploaded file not found — please re-upload.")
+    filename = Path(req.original_filename).name
+    if filename in ("", ".", ".."):
+        raise HTTPException(400, "Invalid original file name.")
+    sess_path = session_dir(req.session_name)
+    if hosted_mode() and sess_path.exists():
+        raise HTTPException(409, f"A session named '{req.session_name}' already exists.")
+
     try:
         kbs = [KBConfig(**k) for k in req.kbs]
-    except (ValidationError, Exception) as e:
-        raise HTTPException(400, str(e))
+    except ValidationError as e:
+        raise HTTPException(400, _safe_validation_error(e))
+    except Exception as e:
+        raise HTTPException(400, f"Invalid KB config ({type(e).__name__})")
 
-    sess_path = session_dir(req.session_name)
-    sess_path.mkdir(parents=True, exist_ok=True)
-
-    src = Path(req.tmp_path)
-    if not src.exists():
-        raise HTTPException(400, "Uploaded file not found — please re-upload.")
-    dest = input_copy_path(req.session_name, req.original_filename)
-    src.rename(dest)
-
+    _check_context_folder(req.context_folder, req.session_name)
     if req.context_folder and not Path(req.context_folder).is_dir():
         raise HTTPException(400, f"Context folder not found: {req.context_folder}")
 
+    dest = input_copy_path(req.session_name, filename)
     try:
         cfg = SessionConfig(
             session_name=req.session_name,
@@ -168,6 +247,7 @@ def create_session(req: CreateSessionRequest):
             llm_api_key=req.llm_api_key,
             llm_cache_only=req.llm_cache_only,
             enable_graph=req.enable_graph,
+            graph=req.graph,
             graph_pin_threshold=req.graph_pin_threshold,
             graph_switch_margin=req.graph_switch_margin,
             enable_auto_select=req.enable_auto_select,
@@ -178,8 +258,13 @@ def create_session(req: CreateSessionRequest):
             review_spotcheck_rate=req.review_spotcheck_rate,
         )
     except ValidationError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, _safe_validation_error(e))
+    _check_hosted_urls(cfg)
 
+    sess_path.mkdir(parents=True, exist_ok=True)
+    # shutil.move, not rename: the upload dir and the sessions volume can be
+    # different filesystems (Docker), where rename fails with EXDEV.
+    shutil.move(str(src), str(dest))
     cfg.save(session_config_path(req.session_name))
     df, _ = load_input(dest, req.delimiter)
     init_output(output_csv_path(req.session_name), df, [k.name for k in kbs], req.annotator)
@@ -189,29 +274,71 @@ def create_session(req: CreateSessionRequest):
 @app.get("/api/sessions/{name}")
 def get_session(name: str):
     cfg = _load_cfg(name)
-    d = cfg.model_dump()
-    # Never expose the stored API key to the browser; report only whether one is set.
-    d["llm_api_key_set"] = bool(d.get("llm_api_key"))
-    d["llm_api_key"] = ""
-    return d
+    # Secrets (LLM key, KB headers, Neo4j password) are write-only: masked here.
+    return mask_session(cfg)
 
 
 @app.put("/api/sessions/{name}")
 def update_session(name: str, body: dict = Body(...)):
     existing = _load_cfg(name)
-    body = dict(body)
-    body.pop("llm_api_key_set", None)  # UI-only flag, not a config field
-    # A blank key from the UI means "keep whatever is stored" (it was masked on GET).
-    if not (body.get("llm_api_key") or "").strip():
-        body["llm_api_key"] = existing.llm_api_key
+    # Blank secrets keep the stored value while the address is unchanged.
+    body = merge_secrets(body, existing)
+    # The input file and the name are fixed at creation; a PUT cannot repoint
+    # the session at another file (or another session's folder).
+    body["session_name"] = name
+    body["input_path"] = existing.input_path
+    _check_context_folder(body.get("context_folder"), name)
     try:
         cfg = SessionConfig(**body)
+    except ValidationError as e:
+        raise HTTPException(400, _safe_validation_error(e))
+    except Exception as e:
+        raise HTTPException(400, f"Could not save session ({type(e).__name__})")
+    _check_hosted_urls(cfg)
+    try:
         cfg.save(session_config_path(name))
         df, _ = load_input(Path(cfg.input_path), cfg.delimiter)
         init_output(output_csv_path(name), df, [k.name for k in cfg.kbs], cfg.annotator)
-    except (ValidationError, Exception) as e:
-        raise HTTPException(400, str(e))
+    except ValidationError as e:
+        raise HTTPException(400, _safe_validation_error(e))
+    except Exception as e:
+        # Never echo str(e) here: it may embed the merged body (secrets).
+        raise HTTPException(400, f"Could not save session ({type(e).__name__})")
     return {"ok": True}
+
+
+@app.post("/api/sessions/{name}/context")
+async def upload_context(name: str, file: UploadFile = File(...)):
+    """Upload a .zip of <doc_id>.txt files as this session's context folder."""
+    cfg = _load_cfg(name)
+    tmp = _TMP / f"{uuid.uuid4().hex}_ctx.zip"
+    try:
+        size = 0
+        with open(tmp, "wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_CONTEXT_UPLOAD:
+                    raise HTTPException(413, "Context zip is larger than 50 MB.")
+                out.write(chunk)
+        dest = session_dir(name) / "context"
+
+        def _finish() -> int:
+            n = extract_context_zip(tmp, dest)
+            cfg.context_folder = str(dest)
+            cfg.save(session_config_path(name))
+            return n
+
+        try:
+            # Blocking extract/writes run off the event loop.
+            count = await run_in_threadpool(_finish)
+        except ContextUploadError as e:
+            raise HTTPException(400, str(e))
+        return {"files": count}
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 @app.get("/api/llm/default-prompt")
@@ -222,7 +349,7 @@ def llm_default_prompt():
 
 @app.delete("/api/sessions/{name}")
 def delete_session(name: str):
-    path = session_dir(name)
+    path = session_dir(_require_session_name(name))
     if not path.exists():
         raise HTTPException(404, "Session not found")
     shutil.rmtree(path)
@@ -316,6 +443,24 @@ def _lookup_gold(uid: str) -> str | None:
         return None
 
 
+def _read_context(folder: Path, doc_id: str) -> str | None:
+    """Read the context text for doc_id, never leaving ``folder``."""
+    root = folder.resolve()
+    # Try <doc_id>.txt, then <doc_id> exactly, then any extension
+    try:
+        globbed = list(folder.glob(f"{glob.escape(doc_id)}.*"))
+    except (NotImplementedError, ValueError, OSError):
+        globbed = []  # e.g. absolute doc_id: not a valid relative pattern
+    for candidate in [folder / f"{doc_id}.txt", folder / doc_id, *globbed]:
+        try:
+            resolved = candidate.resolve()
+            if resolved.is_relative_to(root) and resolved.is_file():
+                return resolved.read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            continue
+    return None
+
+
 @app.get("/api/sessions/{name}/rows/{idx}")
 def get_row(name: str, idx: int):
     cfg = _load_cfg(name)
@@ -331,13 +476,7 @@ def get_row(name: str, idx: int):
         try:
             doc_id = str(row.get(cfg.doc_id_col, "")).strip()
             if doc_id:
-                folder = Path(cfg.context_folder)
-                # Try <doc_id>.txt, then <doc_id> exactly, then any extension
-                for candidate in [folder / f"{doc_id}.txt", folder / doc_id,
-                                   *list(folder.glob(f"{doc_id}.*"))]:
-                    if Path(candidate).is_file():
-                        context_text = Path(candidate).read_text(encoding="utf-8", errors="replace")
-                        break
+                context_text = _read_context(Path(cfg.context_folder), doc_id)
         except Exception as exc:
             logger.warning("Context lookup failed for row %d: %s", idx, exc)
     if cfg.span_col:
@@ -351,14 +490,10 @@ def get_row(name: str, idx: int):
     if cfg.debug_show_gold:
         debug_gold = _lookup_gold(str(row.get("mention_uid", "")).strip())
         if debug_gold and cfg.kbs:
-            base = cfg.kbs[0].endpoint_url
+            gold_kb = cfg.kbs[0]
 
             def _kb_entity(cid: str):
-                r = requests.get(_entity_url(base, cid), timeout=10)
-                if r.status_code == 404:
-                    return None
-                r.raise_for_status()
-                return r.json()
+                return fetch_entity(gold_kb, cid)
 
             debug_gold_info = build_gold_report(debug_gold, _kb_entity)
 
@@ -626,17 +761,7 @@ def _derived_url(base: str, suffix: str) -> str:
     return base.rstrip("/") + suffix
 
 
-def _entity_url(base: str, entity_id: str) -> str:
-    """The KB's by-id lookup route, derived from its configured /query URL.
-
-    The id is escaped (composite dictionary ids contain '|') and stripped of
-    path separators so it cannot steer the request off the /entity route.
-    """
-    root = base.rstrip("/")
-    if root.endswith("/query"):
-        root = root[: -len("/query")]
-    safe = quote(str(entity_id).replace("/", "").replace("..", ""), safe="")
-    return f"{root}/entity/{safe}"
+_entity_url = entity_url
 
 
 def _pick_best(dense: list, lexical: list, entity_type: str, threshold: float):
@@ -684,17 +809,18 @@ def lookup_entity(name: str, kb_name: str, entity_id: str):
         raise HTTPException(400, "Empty entity id")
 
     try:
-        resp = requests.get(_entity_url(kb.endpoint_url, eid), timeout=10)
+        ent = fetch_entity(kb, eid)
+    except UnsafeURLError as exc:
+        raise HTTPException(400, str(exc))
     except requests.RequestException as exc:
         raise HTTPException(502, f"KB unreachable: {exc}")
+    except ValueError as exc:
+        raise HTTPException(502, f"KB error: {exc}")
 
-    if resp.status_code == 404:
+    if ent is None:
         return {"found": False, "id": eid,
                 "message": f"'{eid}' is not in the {kb_name} index."}
-    if not resp.ok:
-        raise HTTPException(502, f"KB error {resp.status_code}: {resp.text[:200]}")
 
-    ent = resp.json()
     aliases = ent.get("all_aliases") or ent.get("aliases") or []
     return {
         "found": True,
@@ -779,6 +905,13 @@ _RERANKERS: dict[tuple, LLMReranker] = {}
 def _get_reranker(model: str, top_n: int, prompt: str | None, api_key: str | None,
                   provider: str = "anthropic", base_url: str | None = None,
                   cache_only: bool = False) -> LLMReranker:
+    if base_url and hosted_mode():
+        # Same outbound guard as KB URLs; a blocked URL degrades like any
+        # other re-rank failure instead of a 500.
+        try:
+            check_outbound_url(base_url)
+        except UnsafeURLError as e:
+            raise LLMRerankError(f"llm_base_url: {e}") from e
     key = (provider, base_url or "", model, top_n, prompt or "", api_key or "", cache_only)
     if key not in _RERANKERS:
         _RERANKERS[key] = LLMReranker(
@@ -808,6 +941,7 @@ class CandidateRequest(BaseModel):
 
 @app.post("/api/sessions/{name}/candidates")
 def get_candidates(name: str, req: CandidateRequest):
+  _require_session_name(name)
   with metrics.timer("candidates", name, kb=req.kb_name, mlen=len(req.label or "")):
     cfg = _load_cfg(name)
     kb_cfg = next((k for k in cfg.kbs if k.name == req.kb_name), None)
@@ -817,12 +951,20 @@ def get_candidates(name: str, req: CandidateRequest):
     # Swallowed retrieval failures, so callers (AI runners) can tell "KB down"
     # from "nothing retrieved". None = disabled or succeeded.
     retrieval_errors: dict[str, str | None] = {"dense": None, "lexical": None}
+    # Set when the outbound URL guard blocks this KB, so the annotator sees why
+    # there are no candidates (the message names the host, never headers).
+    # A blocked KB is a retrieval failure too, so it is also in retrieval_errors.
+    kb_error: str | None = None
 
     if req.enable_dense:
         try:
             dense_cfg = KBConfig(**{**kb_cfg.model_dump(), "endpoint_url": _derived_url(kb_cfg.endpoint_url, "/dense")})
             with metrics.timer("retrieval.dense", name, kb=req.kb_name):
                 dense_cands = KBClient(dense_cfg).query(req.label)
+        except UnsafeURLError as e:
+            logger.warning("Dense search blocked for KB '%s': %s", req.kb_name, e)
+            kb_error = f"KB '{req.kb_name}' blocked: {e}"
+            retrieval_errors["dense"] = kb_error
         except Exception as e:
             logger.warning("Dense search failed for KB '%s': %s", req.kb_name, e)
             retrieval_errors["dense"] = str(e) or type(e).__name__
@@ -832,6 +974,10 @@ def get_candidates(name: str, req: CandidateRequest):
             lex_cfg = KBConfig(**{**kb_cfg.model_dump(), "endpoint_url": _derived_url(kb_cfg.endpoint_url, "/lexical")})
             with metrics.timer("retrieval.lexical", name, kb=req.kb_name):
                 lexical_cands = KBClient(lex_cfg).query(req.label)
+        except UnsafeURLError as e:
+            logger.warning("Lexical search blocked for KB '%s': %s", req.kb_name, e)
+            kb_error = f"KB '{req.kb_name}' blocked: {e}"
+            retrieval_errors["lexical"] = kb_error
         except Exception as e:
             msg = str(e)
             retrieval_errors["lexical"] = msg or type(e).__name__
@@ -869,29 +1015,41 @@ def get_candidates(name: str, req: CandidateRequest):
         "lexical_candidates": _serialize_candidates(lexical_cands),
         "llm": llm,
         "retrieval_errors": retrieval_errors,
+        "error": kb_error,
     }
 
 
 # ── graph neighborhood (Neo4j) ────────────────────────────────────────────────
 
-# Graph clients are reused across requests. Connection + schema come from the
-# neo4j.yaml config file (or env fallback); cache is keyed on those resolved
-# values so editing the file and reloading picks up the change.
-_GRAPH_CLIENTS: dict[tuple, Neo4jGraphClient] = {}
+# Graph clients are pooled per connection (session.graph, or the server
+# neo4j.yaml for legacy local sessions); see eltool/graph_pool.py.
+_GRAPH_POOL = GraphClientPool()
 
 
-def _get_graph_client() -> Neo4jGraphClient:
-    s = load_neo4j_settings()
-    sc = s["schema"]
-    key = (
-        s["uri"], s["user"], s["password"], s["database"] or "",
-        sc.get("node_label", ""), sc.get("id_prop", ""), sc.get("rel_type", ""),
-        sc.get("rel_prop", ""), sc.get("name_prop", ""),
-        tuple(sc.get("rel_include") or []), tuple(sc.get("rel_exclude") or []),
-    )
-    if key not in _GRAPH_CLIENTS:
-        _GRAPH_CLIENTS[key] = Neo4jGraphClient()
-    return _GRAPH_CLIENTS[key]
+class GraphTestRequest(BaseModel):
+    graph: dict[str, Any]
+    session_name: str | None = None   # reuse that session's stored password if unchanged
+
+
+@app.post("/api/graph/test")
+def graph_test(req: GraphTestRequest):
+    """Check a Neo4j connection before saving it. Never raises; returns ok/error."""
+    try:
+        graph = fill_graph_secret(req.graph, _existing_or_none(req.session_name))
+        conn = GraphConnection(**graph)
+    except ValidationError as e:
+        return {"ok": False, "error": _safe_validation_error(e)}
+    client = None
+    try:
+        client = Neo4jGraphClient.from_connection(conn)
+        return {"ok": True, "nodes": client.ping()}
+    except GraphError as e:
+        return {"ok": False, "error": str(e)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    finally:
+        if client is not None:
+            client.close()
 
 
 class GraphCandidateRequest(BaseModel):
@@ -906,7 +1064,7 @@ def graph_candidates(name: str, req: GraphCandidateRequest):
     if not cfg.enable_graph:
         return {"nodes": [], "edges": [], "enabled": False}
     try:
-        result = _get_graph_client().candidate_graph(req.ids, req.neighbor_limit)
+        result = resolve_graph_client(cfg, _GRAPH_POOL).candidate_graph(req.ids, req.neighbor_limit)
         return {**result.to_dict(), "enabled": True}
     except GraphError as e:
         logger.warning("Graph candidate query failed: %s", e)
@@ -924,7 +1082,7 @@ def graph_document(name: str, req: GraphDocumentRequest):
     if not cfg.enable_graph:
         return {"nodes": [], "edges": [], "enabled": False}
     try:
-        result = _get_graph_client().document_graph(req.cuis)
+        result = resolve_graph_client(cfg, _GRAPH_POOL).document_graph(req.cuis)
         return {**result.to_dict(), "enabled": True}
     except GraphError as e:
         logger.warning("Graph document query failed: %s", e)
@@ -976,15 +1134,19 @@ def graph_optimize(name: str, req: GraphOptimizeRequest):
     # retrieve candidate IDs per mention (top-N, capped to the LLM/graph budget)
     top_n = max(5, cfg.llm_top_n)
     mention_candidates: list[tuple[int, list[str]]] = []
+    labels: dict[int, str] = {}
     for i in same:
         label = str(df.iloc[i].get(cfg.label_column, "")).strip()
         if not label:
             continue
+        labels[int(i)] = label
         fused = _retrieve_fused(kb_cfg, label)
         mention_candidates.append((int(i), [(c.id, c.score) for c in fused[:top_n]]))
 
     try:
-        result = _get_graph_client().optimize_selection(mention_candidates, pin_threshold=cfg.graph_pin_threshold, switch_margin=cfg.graph_switch_margin)
+        result = resolve_graph_client(cfg, _GRAPH_POOL).optimize_selection(
+            mention_candidates, pin_threshold=cfg.graph_pin_threshold,
+            switch_margin=cfg.graph_switch_margin, labels=labels)
         metrics.record_graph(
             name, doc=doc_id, mentions=len(mention_candidates),
             nodes=result.get("nodes_queried", 0), edges=result.get("edges_found", 0),
@@ -1023,9 +1185,13 @@ def graph_optimize_all(name: str, skip_annotated: bool = True):
     docs_done = 0
     edges_before_total = edges_after_total = 0
 
+    try:
+        gc = resolve_graph_client(cfg, _GRAPH_POOL)
+    except GraphError as e:
+        return {"enabled": True, "error": str(e)}
+
     with _WRITE_LOCK:
         out_df = init_output(out_path, df, [k.name for k in cfg.kbs], cfg.annotator)
-        gc = _get_graph_client()
 
         for doc_id, group in df.groupby(df[cfg.doc_id_col].astype(str).str.strip()):
             if not str(doc_id).strip():
@@ -1033,13 +1199,15 @@ def graph_optimize_all(name: str, skip_annotated: bool = True):
             idxs = list(group.index)
             fixed: dict[int, str] = {}
             mention_candidates: list[tuple[int, list[str]]] = []
+            labels: dict[int, str] = {int(i): str(df.at[i, cfg.label_column] or "").strip() for i in idxs}
             for i in idxs:
                 existing = str(out_df.at[i, kb] or "").strip()
-                # pin single-valued existing annotations (skip NIL / multi)
-                if skip_annotated and existing and existing != "NIL" and "|" not in existing:
+                # pin existing annotations: they anchor but never move. A multi-id
+                # annotation ("D010051|D001943") anchors through each of its ids.
+                if skip_annotated and existing and existing != "NIL":
                     fixed[int(i)] = existing
                     continue
-                if skip_annotated and existing:   # NIL or multi → leave as-is, don't optimise
+                if skip_annotated and existing:   # NIL → leave as-is, don't optimise
                     continue
                 label = str(df.at[i, cfg.label_column] or "").strip()
                 if not label:
@@ -1050,7 +1218,8 @@ def graph_optimize_all(name: str, skip_annotated: bool = True):
             if not mention_candidates:
                 continue
             try:
-                res = gc.optimize_selection(mention_candidates, fixed=fixed, pin_threshold=cfg.graph_pin_threshold, switch_margin=cfg.graph_switch_margin)
+                res = gc.optimize_selection(mention_candidates, fixed=fixed, pin_threshold=cfg.graph_pin_threshold,
+                                            switch_margin=cfg.graph_switch_margin, labels=labels)
             except GraphError as e:
                 return {"enabled": True, "error": str(e), "documents": docs_done}
             metrics.record_graph(
@@ -1132,12 +1301,35 @@ def document_mentions(name: str, idx: int = -1, doc_id: str = ""):
 class TestKBRequest(BaseModel):
     kb_config: dict[str, Any]
     label: str = "test"
+    session_name: str | None = None
+
+
+def _existing_or_none(session_name: str | None) -> SessionConfig | None:
+    """The named session's config, or None if absent/invalid (never a 404)."""
+    if not session_name or not SLUG_RE.fullmatch(session_name):
+        return None
+    try:
+        return _load_cfg(session_name)
+    except Exception:
+        return None
+
+
+def _safe_validation_error(e: ValidationError) -> str:
+    """Format a validation error without echoing input values (they may be secrets)."""
+    return "; ".join(
+        f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}"
+        for err in e.errors(include_input=False, include_url=False)
+    )
 
 
 @app.post("/api/kb/test")
 def test_kb(req: TestKBRequest):
     try:
-        kb_cfg = KBConfig(**req.kb_config)
+        try:
+            kb_dict = fill_kb_secret(req.kb_config, _existing_or_none(req.session_name))
+            kb_cfg = KBConfig(**kb_dict)
+        except ValidationError as e:
+            return {"ok": False, "error": _safe_validation_error(e)}
         cands = KBClient(kb_cfg).query(req.label)
         return {"ok": True, "candidates": _serialize_candidates(cands)}
     except Exception as e:
@@ -1234,6 +1426,7 @@ def list_snapshots(name: str):
 @app.get("/api/sessions/{name}/export")
 def export_csv(name: str, stage: str = ""):
     """Download the final output, or a per-step snapshot via ?stage=retrieval|graph."""
+    _require_session_name(name)
     if stage:
         if not _STAGE_RE.match(stage):
             raise HTTPException(400, "Invalid stage name.")
@@ -1254,7 +1447,9 @@ def export_csv(name: str, stage: str = ""):
 # ── helper ────────────────────────────────────────────────────────────────────
 
 def _load_cfg(name: str) -> SessionConfig:
-    path = session_config_path(name)
+    path = session_config_path(_require_session_name(name))
     if not path.exists():
         raise HTTPException(404, "Session not found")
-    return SessionConfig.load(path)
+    cfg = SessionConfig.load(path)
+    _check_confined(cfg, name)
+    return cfg

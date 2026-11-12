@@ -1,0 +1,46 @@
+# HELIX hosted server: web + api behind Caddy (TLS + basic auth). See README.md.
+#
+#   docker compose -f deploy/hosted/docker-compose.yml --env-file deploy/hosted/.env up -d --build
+
+name: helix
+
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile.api
+    environment:
+      HELIX_HOSTED: "1"
+      HELIX_URL_ALLOWLIST: ${HELIX_URL_ALLOWLIST:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - sessions:/app/sessions
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile.web
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.8.4
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      HELIX_DOMAIN: ${HELIX_DOMAIN:?set HELIX_DOMAIN in .env}
+      HELIX_BASIC_USER: ${HELIX_BASIC_USER:?set HELIX_BASIC_USER in .env}
+      HELIX_BASIC_HASH: ${HELIX_BASIC_HASH:?set HELIX_BASIC_HASH in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on:
+      - web
+    restart: unless-stopped
+
+volumes:
+  sessions:
+  caddy_data:

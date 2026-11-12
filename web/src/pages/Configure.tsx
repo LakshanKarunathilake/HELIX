@@ -6,8 +6,8 @@ import {
   FlaskConical, CheckCircle2, XCircle, Loader2, ArrowRight, Zap,
 } from 'lucide-react'
 import * as api from '@/api/client'
-import type { Candidate, KBConfig, ParsedFile, SessionConfig } from '@/types'
-import { DEFAULT_KB } from '@/types'
+import type { Candidate, GraphConnection, KBConfig, ParsedFile, SessionConfig } from '@/types'
+import { DEFAULT_GRAPH, DEFAULT_KB } from '@/types'
 import { CandidateCard } from '@/components/CandidateCard'
 import { AutoAnnotateModal } from '@/components/AutoAnnotateModal'
 import { MetricsModal } from '@/components/MetricsModal'
@@ -36,6 +36,9 @@ export function Configure() {
   const fileRef = useRef<HTMLInputElement>(null)
   // context folder
   const [contextFolder, setContextFolder] = useState('')
+  const [hosted, setHosted] = useState(false)
+  const [contextZip, setContextZip] = useState<File | null>(null)
+  const [contextMsg, setContextMsg] = useState('')
   const [docIdCol, setDocIdCol] = useState('')
   const [spanCol, setSpanCol] = useState('')
   // auto-select
@@ -55,6 +58,9 @@ export function Configure() {
   const [defaultPrompt, setDefaultPrompt] = useState('')
   // Neo4j graph
   const [enableGraph, setEnableGraph] = useState(false)
+  const [graph, setGraph] = useState<GraphConnection | null>(null)
+  const [graphTesting, setGraphTesting] = useState(false)
+  const [graphTest, setGraphTest] = useState<{ ok: boolean; nodes?: number; error?: string } | null>(null)
   const [collectFeedback, setCollectFeedback] = useState(false)
   // Mode C: the AI pre-annotates; the human works a review queue.
   const [reviewMode, setReviewMode] = useState(false)
@@ -107,7 +113,24 @@ export function Configure() {
     if (existingCfg.review_mode != null) setReviewMode(existingCfg.review_mode)
     if (existingCfg.review_spotcheck_rate != null)
       setSpotcheckPct(Math.round(existingCfg.review_spotcheck_rate * 1000) / 10)
+    if (existingCfg.graph) setGraph({ ...DEFAULT_GRAPH, ...existingCfg.graph })
   }, [existingCfg])
+
+  const g: GraphConnection = graph ?? DEFAULT_GRAPH
+  const setG = (patch: Partial<GraphConnection>) => setGraph({ ...g, ...patch })
+  const csv = (v: string) => v.split(',').map(x => x.trim()).filter(Boolean)
+
+  async function handleTestGraph() {
+    setGraphTesting(true)
+    setGraphTest(null)
+    try {
+      setGraphTest(await api.testGraph(stripGraphFlags(g), isEdit ? sessionName : undefined))
+    } catch (err: any) {
+      setGraphTest({ ok: false, error: err.message })
+    } finally {
+      setGraphTesting(false)
+    }
+  }
 
   // ── file upload ──────────────────────────────────────────────────────────
   const [uploading, setUploading] = useState(false)
@@ -126,6 +149,10 @@ export function Configure() {
       setUploading(false)
     }
   }
+
+  useEffect(() => {
+    api.getInfo().then(i => setHosted(i.hosted)).catch(() => {})
+  }, [])
 
   // ── KB helpers ───────────────────────────────────────────────────────────
   const updateKB = (i: number, patch: Partial<KBConfig>) =>
@@ -150,7 +177,7 @@ export function Configure() {
           annotator,
           label_column: labelCol,
           info_columns: infoCols,
-          kbs,
+          kbs: kbs.map(stripKbFlags),
           context_folder: contextFolder.trim() || null,
           doc_id_col: docIdCol || null,
           span_col: spanCol || null,
@@ -166,15 +193,20 @@ export function Configure() {
           llm_api_key: llmApiKey || null,   // blank = keep existing (server-side)
           llm_cache_only: llmCacheOnly,
           enable_graph: enableGraph,
+          graph: graph?.uri?.trim() ? stripGraphFlags(graph) : null,
           collect_feedback: collectFeedback,
           review_mode: reviewMode,
           review_spotcheck_rate: Math.min(100, Math.max(0, spotcheckPct)) / 100,
           debug_show_gold: debugShowGold,
         }
         await api.updateSession(sessionName!, updated)
+        if (contextZip) {
+          const r = await api.uploadContext(sessionName!, contextZip)
+          setContextMsg(`Uploaded ${r.files} context file(s).`)
+        }
         qc.invalidateQueries({ queryKey: ['session', sessionName] })
       } else {
-        await api.createSession({
+        const created = await api.createSession({
           session_name: name.trim(),
           annotator: annotator.trim(),
           tmp_path: parsed!.tmp_path,
@@ -182,7 +214,7 @@ export function Configure() {
           delimiter: parsed!.delimiter,
           label_column: labelCol,
           info_columns: infoCols,
-          kbs,
+          kbs: kbs.map(stripKbFlags),
           context_folder: contextFolder.trim() || null,
           doc_id_col: docIdCol || null,
           span_col: spanCol || null,
@@ -198,11 +230,16 @@ export function Configure() {
           llm_api_key: llmApiKey || null,
           llm_cache_only: llmCacheOnly,
           enable_graph: enableGraph,
+          graph: graph?.uri?.trim() ? stripGraphFlags(graph) : null,
           collect_feedback: collectFeedback,
           review_mode: reviewMode,
           review_spotcheck_rate: Math.min(100, Math.max(0, spotcheckPct)) / 100,
           debug_show_gold: debugShowGold,
         })
+        if (contextZip) {
+          const r = await api.uploadContext(created.session_name, contextZip)
+          setContextMsg(`Uploaded ${r.files} context file(s).`)
+        }
       }
       navigate(`/annotate/${isEdit ? sessionName : name.trim()}`)
     } catch (err: any) {
@@ -506,11 +543,106 @@ export function Configure() {
           </label>
           <p className="text-xs text-gray-400">
             Show how a mention's candidates connect to each other and their neighbors, pulled from your
-            Neo4j graph. Connection + schema are read from{' '}
-            <code className="bg-gray-100 rounded px-1">neo4j.yaml</code> on the server
-            (copy <code className="bg-gray-100 rounded px-1">neo4j.example.yaml</code>); env vars are a fallback.
-            Default schema: <code className="bg-gray-100 rounded px-1">(:Concept {'{'}cui{'}'})-[:RELATES_TO {'{'}rel{'}'}]-(:Concept)</code>.
+            Neo4j graph. Leave URI empty to use the server's <code className="bg-gray-100 rounded px-1">neo4j.yaml</code>{' '}
+            (local installs only).
           </p>
+          <div className="grid grid-cols-2 gap-3 mt-3">
+            <div className="col-span-2">
+              <label className="label">URI</label>
+              <input
+                className="input font-mono text-sm"
+                placeholder="neo4j+s://host:7687"
+                value={g.uri}
+                onChange={e => setG({ uri: e.target.value })}
+              />
+            </div>
+            <div>
+              <label className="label">User</label>
+              <input className="input" value={g.user} onChange={e => setG({ user: e.target.value })} />
+            </div>
+            <div>
+              <label className="label">Password</label>
+              <input
+                className="input"
+                type="password"
+                autoComplete="new-password"
+                value={g.password}
+                placeholder={g.password_set ? 'stored — leave blank to keep' : ''}
+                onChange={e => setG({ password: e.target.value })}
+              />
+            </div>
+            <div className="col-span-2">
+              <label className="label">Database (optional)</label>
+              <input
+                className="input"
+                value={g.database ?? ''}
+                onChange={e => setG({ database: e.target.value || null })}
+              />
+            </div>
+          </div>
+          <details className="mt-3">
+            <summary className="text-xs font-semibold text-gray-500 cursor-pointer">Schema</summary>
+            <div className="grid grid-cols-2 gap-3 mt-2">
+              <div>
+                <label className="label">Node label</label>
+                <input className="input" value={g.node_label} onChange={e => setG({ node_label: e.target.value })} />
+              </div>
+              <div>
+                <label className="label">ID property</label>
+                <input className="input" value={g.id_prop} onChange={e => setG({ id_prop: e.target.value })} />
+              </div>
+              <div>
+                <label className="label">Relationship type</label>
+                <input className="input" value={g.rel_type} onChange={e => setG({ rel_type: e.target.value })} />
+              </div>
+              <div>
+                <label className="label">Relation property</label>
+                <input className="input" value={g.rel_prop} onChange={e => setG({ rel_prop: e.target.value })} />
+              </div>
+              <div className="col-span-2">
+                <label className="label">Name property</label>
+                <input className="input" value={g.name_prop} onChange={e => setG({ name_prop: e.target.value })} />
+              </div>
+              <div>
+                <label className="label">Include relations (comma-separated)</label>
+                <input
+                  className="input"
+                  key={'i' + g.rel_include.join('~')}
+                  defaultValue={g.rel_include.join(', ')}
+                  onBlur={e => setG({ rel_include: csv(e.target.value) })}
+                />
+              </div>
+              <div>
+                <label className="label">Exclude relations (comma-separated)</label>
+                <input
+                  className="input"
+                  key={'e' + g.rel_exclude.join('~')}
+                  defaultValue={g.rel_exclude.join(', ')}
+                  onBlur={e => setG({ rel_exclude: csv(e.target.value) })}
+                />
+              </div>
+            </div>
+          </details>
+          <div className="flex items-center gap-3 mt-3">
+            <button
+              type="button"
+              className="btn-secondary text-xs"
+              onClick={handleTestGraph}
+              disabled={graphTesting || !g.uri.trim()}
+            >
+              {graphTesting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FlaskConical className="w-3.5 h-3.5" />}
+              Test connection
+            </button>
+            {graphTest && (graphTest.ok ? (
+              <span className="text-xs text-green-600 flex items-center gap-1">
+                <CheckCircle2 className="w-3.5 h-3.5" /> Connected: {graphTest.nodes} nodes
+              </span>
+            ) : (
+              <span className="text-xs text-red-600 flex items-center gap-1">
+                <XCircle className="w-3.5 h-3.5" /> {graphTest.error}
+              </span>
+            ))}
+          </div>
         </div>
 
         <div className="border-t border-gray-100 pt-4 mt-2">
@@ -686,16 +818,31 @@ export function Configure() {
           Folder of plain-text files named by document ID (e.g. <code className="bg-gray-100 px-1 rounded">25823274_en.txt</code>).
           The annotator will show the document passage with the entity highlighted.
         </p>
+        {!hosted && (
+          <div>
+            <label className="label">Folder path (absolute, on this machine)</label>
+            <input
+              className="input font-mono text-sm"
+              placeholder="/path/to/texts"
+              value={contextFolder}
+              onChange={e => setContextFolder(e.target.value)}
+            />
+          </div>
+        )}
         <div>
-          <label className="label">Folder path (absolute, on this machine)</label>
+          <label className="label">
+            Upload .zip of <code>&lt;doc_id&gt;</code>.txt files
+            <span className="ml-1 text-gray-400 font-normal">(max 50 MB)</span>
+          </label>
           <input
-            className="input font-mono text-sm"
-            placeholder="/path/to/texts"
-            value={contextFolder}
-            onChange={e => setContextFolder(e.target.value)}
+            type="file"
+            accept=".zip,application/zip"
+            className="text-sm"
+            onChange={e => { setContextZip(e.target.files?.[0] ?? null); setContextMsg('') }}
           />
+          {contextMsg && <p className="text-xs text-green-700 mt-1">{contextMsg}</p>}
         </div>
-        {contextFolder.trim() && (
+        {(contextFolder.trim() || contextZip) && (
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="label">
@@ -744,6 +891,7 @@ export function Configure() {
             kb={kb}
             index={i}
             sampleLabel={labelCol}
+            sessionName={isEdit ? sessionName : undefined}
             onChange={patch => updateKB(i, patch)}
             onRemove={() => removeKB(i)}
           />
@@ -824,13 +972,24 @@ function Section({ title, children, action }: { title: string; children: React.R
   )
 }
 
+// UI-only flags must not be sent back to the server.
+function stripKbFlags(kb: KBConfig): KBConfig {
+  const { headers_set: _h, ...rest } = kb
+  return rest as KBConfig
+}
+function stripGraphFlags(g: GraphConnection): GraphConnection {
+  const { password_set: _p, ...rest } = g
+  return rest as GraphConnection
+}
+
 // ── KB form ──────────────────────────────────────────────────────────────────
 
 function KBForm({
-  kb, index, sampleLabel, onChange, onRemove,
+  kb, index, sampleLabel, onChange, onRemove, sessionName,
 }: {
   kb: KBConfig; index: number; sampleLabel: string
   onChange: (p: Partial<KBConfig>) => void; onRemove: () => void
+  sessionName?: string
 }) {
   const [open, setOpen] = useState(index === 0)
   const [testing, setTesting] = useState(false)
@@ -839,7 +998,7 @@ function KBForm({
   async function handleTest() {
     setTesting(true); setTestResult(null)
     try {
-      const r = await api.testKB(kb, sampleLabel || 'test')
+      const r = await api.testKB(stripKbFlags(kb), sampleLabel || 'test', sessionName)
       console.log('test result:', r)
       setTestResult(r.ok
         ? { ok: true, msg: `${r.candidates?.length ?? 0} candidates returned`, cands: r.candidates }
@@ -898,7 +1057,7 @@ function KBForm({
             </div>
             <div>
               <label className="label">headers (JSON)</label>
-              <input className="input" value={kb.headers} onChange={e => onChange({ headers: e.target.value })} placeholder="{}" />
+              <input className="input" value={kb.headers} onChange={e => onChange({ headers: e.target.value })} placeholder={kb.headers_set ? 'stored — leave blank to keep' : '{}'} />
             </div>
           </div>
 
