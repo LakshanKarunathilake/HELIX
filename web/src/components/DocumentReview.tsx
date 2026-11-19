@@ -168,7 +168,8 @@ export function DocumentReview({ sessionName, rowIdx, kb, onClose, onChanged }: 
       }
       onChanged?.()
       setUndoState(changes.length ? prevSel : null)
-      setOptResult(`Connections ${r.edges_before} → ${r.edges_after} · ${r.changed} selection(s) updated`)
+      const kept = r.kept_saved ? ` · ${r.kept_saved} saved annotation(s) kept` : ''
+      setOptResult(`Connections ${r.edges_before} → ${r.edges_after} · ${r.changed} selection(s) updated${kept}`)
     } catch (e: any) {
       setOptResult(`Auto-match failed: ${e?.message ?? e}`)
     } finally {

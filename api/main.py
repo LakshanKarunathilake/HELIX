@@ -1113,9 +1113,33 @@ def _retrieve_fused(kb_cfg: KBConfig, label: str):
     return _fuse_candidates(dense, lexical)
 
 
+def _saved_pins(out_df, idxs, kb: str) -> tuple[dict[int, str], set[int]]:
+    """Split a document's saved annotations into graph pins and skips.
+
+    A saved id is the annotator's decision: it anchors the graph but is never
+    moved (``fixed``). A multi-id annotation ("D010051|D001943") anchors through
+    each of its ids. A saved NIL is left alone and does not anchor. Returns
+    ``(fixed, saved)`` where ``saved`` holds every row Auto-match must not touch.
+    """
+    fixed: dict[int, str] = {}
+    saved: set[int] = set()
+    for i in idxs:
+        existing = str(out_df.at[i, kb] or "").strip()
+        if not existing:
+            continue
+        saved.add(int(i))
+        if existing != "NIL":
+            fixed[int(i)] = existing
+    return fixed, saved
+
+
 @app.post("/api/sessions/{name}/graph/optimize")
 def graph_optimize(name: str, req: GraphOptimizeRequest):
-    """Auto-match: pick candidates across the document to maximise graph connections."""
+    """Auto-match: break retrieval ties across the document with the graph.
+
+    Saved annotations are kept: they anchor the graph but are never returned,
+    so the client cannot write a graph pick over an annotator's correction.
+    """
     cfg = _load_cfg(name)
     if not cfg.enable_graph:
         return {"selections": {}, "enabled": False}
@@ -1130,8 +1154,10 @@ def graph_optimize(name: str, req: GraphOptimizeRequest):
         raise HTTPException(404, "Row index out of range")
     doc_id = str(df.iloc[req.idx].get(cfg.doc_id_col, "")).strip()
     same = df.index[df[cfg.doc_id_col].astype(str).str.strip() == doc_id].tolist()
+    out_df = init_output(output_csv_path(name), df, [k.name for k in cfg.kbs], cfg.annotator)
+    fixed, saved = _saved_pins(out_df, same, kb_cfg.name)
 
-    # retrieve candidate IDs per mention (top-N, capped to the LLM/graph budget)
+    # retrieve candidate IDs per unsaved mention (top-N, capped to the LLM/graph budget)
     top_n = max(5, cfg.llm_top_n)
     mention_candidates: list[tuple[int, list[str]]] = []
     labels: dict[int, str] = {}
@@ -1139,14 +1165,17 @@ def graph_optimize(name: str, req: GraphOptimizeRequest):
         label = str(df.iloc[i].get(cfg.label_column, "")).strip()
         if not label:
             continue
-        labels[int(i)] = label
+        labels[int(i)] = label          # saved rows too: same-text mentions must not anchor each other
+        if int(i) in saved:
+            continue
         fused = _retrieve_fused(kb_cfg, label)
         mention_candidates.append((int(i), [(c.id, c.score) for c in fused[:top_n]]))
 
     try:
         result = resolve_graph_client(cfg, _GRAPH_POOL).optimize_selection(
-            mention_candidates, pin_threshold=cfg.graph_pin_threshold,
+            mention_candidates, fixed=fixed, pin_threshold=cfg.graph_pin_threshold,
             switch_margin=cfg.graph_switch_margin, labels=labels)
+        result["kept_saved"] = len(saved)      # saved annotations Auto-match left untouched
         metrics.record_graph(
             name, doc=doc_id, mentions=len(mention_candidates),
             nodes=result.get("nodes_queried", 0), edges=result.get("edges_found", 0),
