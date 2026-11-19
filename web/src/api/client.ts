@@ -238,6 +238,7 @@ export const optimizeDocument = (name: string, idx: number, kb_name: string) =>
     edges_before: number
     edges_after: number
     changed: number
+    kept_saved?: number      // saved annotations the server left untouched
     enabled: boolean
     error?: string
   }>(`/sessions/${name}/graph/optimize`, {
