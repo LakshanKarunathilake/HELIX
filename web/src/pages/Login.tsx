@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Navigate, useLocation } from 'react-router-dom'
 import type { Location } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
@@ -6,9 +6,14 @@ import { HelixLogo } from '@/components/HelixLogo'
 import { AuthSpinner, useAuth } from '@/hooks/useAuth'
 
 export function Login() {
-  const { auth, user, loading, error, signInWithGoogle } = useAuth()
+  const { auth, user, loading, error, signInReady, prepareSignIn, signInWithGoogle } = useAuth()
   const location = useLocation()
   const [busy, setBusy] = useState(false)
+
+  // Load Firebase now so the click can open the popup without awaiting anything first.
+  useEffect(() => {
+    if (!loading && auth) prepareSignIn()
+  }, [loading, auth, prepareSignIn])
 
   if (loading) return <AuthSpinner />
   if (!auth) return <Navigate to="/" replace />
@@ -32,9 +37,9 @@ export function Login() {
           </h1>
           <p className="text-sm text-gray-500 mt-1">Sign in to continue</p>
         </div>
-        <button className="btn-primary w-full justify-center" onClick={signIn} disabled={busy}>
-          {busy && <Loader2 className="w-4 h-4 animate-spin" />}
-          Sign in with Google
+        <button className="btn-primary w-full justify-center" onClick={signIn} disabled={busy || !signInReady}>
+          {(busy || !signInReady) && <Loader2 className="w-4 h-4 animate-spin" />}
+          {signInReady ? 'Sign in with Google' : 'Preparing sign-in…'}
         </button>
         {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
       </div>

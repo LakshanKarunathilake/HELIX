@@ -5,13 +5,13 @@ import { useAuth } from '@/hooks/useAuth'
 
 export function NavBar() {
   const { pathname } = useLocation()
-  const { auth, user, isAdmin, logout } = useAuth()
+  const { auth, user, loading, isAdmin, logout } = useAuth()
   const nav = [
     { to: '/', label: 'Sessions', icon: Link2 },
     ...(isAdmin ? [{ to: '/configure', label: 'Configure', icon: Settings }] : []),
   ]
-  // With auth on, the links and account block only make sense once signed in.
-  const signedOut = auth && !user
+  // Links and account block wait for the auth check and, with auth on, for a signed-in user.
+  const signedOut = loading || (auth && !user)
 
   return (
     <header className="sticky top-0 z-40 bg-white border-b border-gray-200 shadow-sm">
