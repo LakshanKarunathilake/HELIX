@@ -25,10 +25,12 @@ def verify_id_token(token: str) -> dict:
             token, google_requests.Request(), audience=project)
         if not payload:
             raise IdTokenError("empty token payload")
+        if payload.get("iss") != f"https://securetoken.google.com/{project}":
+            raise IdTokenError("token rejected (issuer)")
         return {
             "uid": payload["sub"],
             "email": payload.get("email") or "",
-            "email_verified": bool(payload.get("email_verified")),
+            "email_verified": payload.get("email_verified") is True,
             "name": payload.get("name") or "",
             "provider": (payload.get("firebase") or {}).get("sign_in_provider") or "",
         }

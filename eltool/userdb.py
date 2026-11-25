@@ -139,21 +139,28 @@ def _one(sql: str, args: tuple) -> User | None:
         conn.close()
 
 
+def insert_user(conn: sqlite3.Connection, email: str, name: str, role: str,
+                firebase_uid: str | None = None) -> int:
+    """INSERT a user on ``conn`` without committing, so a caller can write the
+    user and related rows in one transaction. Returns the new id."""
+    _check_role(role)
+    cur = conn.execute(
+        "INSERT INTO users (email, name, role, firebase_uid, active, created_at) "
+        "VALUES (?, ?, ?, ?, 1, ?)",
+        (_norm_email(email), name, role, firebase_uid, _now()))
+    return cur.lastrowid
+
+
 def create_user(email: str, name: str, role: str,
                 firebase_uid: str | None = None) -> User:
-    _check_role(role)
-    email = _norm_email(email)
     conn = connect()
     try:
         try:
             with conn:
-                cur = conn.execute(
-                    "INSERT INTO users (email, name, role, firebase_uid, active, created_at) "
-                    "VALUES (?, ?, ?, ?, 1, ?)",
-                    (email, name, role, firebase_uid, _now()))
+                new_id = insert_user(conn, email, name, role, firebase_uid)
         except sqlite3.IntegrityError as e:
             raise ValueError(f"A user with this email or sign-in already exists: {e}") from e
-        return _user(conn.execute("SELECT * FROM users WHERE id = ?", (cur.lastrowid,)).fetchone())
+        return _user(conn.execute("SELECT * FROM users WHERE id = ?", (new_id,)).fetchone())
     finally:
         conn.close()
 
@@ -179,15 +186,6 @@ def link_uid(user_id: int, uid: str) -> None:
                     "UPDATE users SET firebase_uid = ? WHERE id = ?", (uid, user_id)), user_id)
         except sqlite3.IntegrityError as e:
             raise ValueError("This sign-in is already linked to another user") from e
-    finally:
-        conn.close()
-
-
-def get_firebase_uid(user_id: int) -> str | None:
-    conn = connect()
-    try:
-        row = conn.execute("SELECT firebase_uid FROM users WHERE id = ?", (user_id,)).fetchone()
-        return row["firebase_uid"] if row else None
     finally:
         conn.close()
 

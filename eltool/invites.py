@@ -109,19 +109,26 @@ def revoke(invite_id: int) -> None:
         conn.close()
 
 
-def _mark_accepted(invite_id: int) -> None:
-    conn = userdb.connect()
-    try:
-        with conn:
-            conn.execute("UPDATE invites SET accepted_at = ? WHERE id = ?",
-                         (userdb._now(), invite_id))
-    finally:
-        conn.close()
+def _apply_invite(conn: sqlite3.Connection, invite: Invite, user_id: int) -> bool:
+    """Consume a still-pending invite and add its memberships, on ``conn`` and
+    without committing. False (and nothing added) if it was revoked or accepted
+    since it was read."""
+    cur = conn.execute(
+        "UPDATE invites SET accepted_at = ? "
+        "WHERE id = ? AND accepted_at IS NULL AND revoked_at IS NULL",
+        (userdb._now(), invite.id))
+    if cur.rowcount != 1:
+        return False
+    conn.executemany(
+        "INSERT OR IGNORE INTO memberships (session_name, user_id) VALUES (?, ?)",
+        [(s, user_id) for s in invite.session_names])
+    return True
 
 
 def provision(claims: dict) -> userdb.User:
     """The user a verified ID token signs in as, creating or linking the account
-    on first sign-in. Raises NotAuthorised for every refusal."""
+    on first sign-in. Raises NotAuthorised for every refusal; a refusal changes
+    nothing, and the user, memberships and accepted mark are written together."""
     uid = claims.get("uid") or ""
     email = userdb._norm_email(claims.get("email") or "")
     if (not uid or not email or claims.get("email_verified") is not True
@@ -130,33 +137,38 @@ def provision(claims: dict) -> userdb.User:
 
     user = userdb.get_user_by_uid(uid)
     if user is None:
-        user = userdb.get_user_by_email(email)
-        if user is not None:
-            # A registered row (bootstrap admin) links on first sign-in; one
-            # already linked to some other Google identity is refused.
-            if userdb.get_firebase_uid(user.id) is not None:
-                raise NotAuthorised()
-            try:
-                userdb.link_uid(user.id, uid)
-            except ValueError:
-                raise NotAuthorised() from None
-        else:
-            conn = userdb.connect()
-            try:
+        conn = userdb.connect()
+        try:
+            user = userdb.get_user_by_email(email)
+            if user is not None:
+                if not user.active:
+                    raise NotAuthorised()
+                # A registered row without a uid (bootstrap admin) links now; one
+                # already linked to another Google identity matches no row.
                 row = _pending_for(conn, email)
-            finally:
-                conn.close()
-            if row is None:
-                raise NotAuthorised()
-            invite = _invite(row)
-            name = (claims.get("name") or "").strip() or email.split("@")[0]
-            try:
-                user = userdb.create_user(email, name, invite.role, firebase_uid=uid)
-            except ValueError:
-                raise NotAuthorised() from None
-            for session_name in invite.session_names:
-                userdb.add_member(session_name, user.id)
-            _mark_accepted(invite.id)
+                with conn:
+                    cur = conn.execute(
+                        "UPDATE users SET firebase_uid = ? WHERE id = ? AND firebase_uid IS NULL",
+                        (uid, user.id))
+                    if cur.rowcount != 1:
+                        raise NotAuthorised()
+                    if row is not None:
+                        _apply_invite(conn, _invite(row), user.id)
+            else:
+                row = _pending_for(conn, email)
+                if row is None:
+                    raise NotAuthorised()
+                invite = _invite(row)
+                name = (claims.get("name") or "").strip() or email.split("@")[0]
+                with conn:
+                    user_id = userdb.insert_user(conn, email, name, invite.role, uid)
+                    if not _apply_invite(conn, invite, user_id):
+                        raise NotAuthorised()
+                user = userdb.get_user(user_id)
+        except sqlite3.IntegrityError:
+            raise NotAuthorised() from None
+        finally:
+            conn.close()
     if not user.active:
         raise NotAuthorised()
     userdb.touch_login(user.id)

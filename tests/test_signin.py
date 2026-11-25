@@ -275,6 +275,7 @@ def test_verify_id_token_maps_claims_and_wraps_failures(monkeypatch):
     def fake(token, request, audience=None):
         seen["audience"] = audience
         return {"sub": "u1", "email": "A@x.org", "email_verified": True, "name": "A",
+                "iss": "https://securetoken.google.com/proj-1",
                 "firebase": {"sign_in_provider": "google.com"}}
     monkeypatch.setattr(gid, "verify_firebase_token", fake)
     assert idtoken.verify_id_token("t") == {
@@ -288,3 +289,97 @@ def test_verify_id_token_maps_claims_and_wraps_failures(monkeypatch):
     with pytest.raises(idtoken.IdTokenError) as e:
         idtoken.verify_id_token("secret-token-value")
     assert "secret-token-value" not in str(e.value)
+
+
+def _stub_verifier(monkeypatch, **overrides):
+    import google.oauth2.id_token as gid
+    monkeypatch.setenv("HELIX_FIREBASE_PROJECT_ID", "proj-1")
+    payload = {"sub": "u1", "email": "A@x.org", "email_verified": True, "name": "A",
+               "iss": "https://securetoken.google.com/proj-1",
+               "firebase": {"sign_in_provider": "google.com"}}
+    payload.update(overrides)
+    monkeypatch.setattr(gid, "verify_firebase_token", lambda t, r, audience=None: payload)
+
+
+def test_email_verified_must_be_the_boolean_true(monkeypatch):
+    _stub_verifier(monkeypatch, email_verified="false")
+    assert idtoken.verify_id_token("t")["email_verified"] is False
+    _stub_verifier(monkeypatch, email_verified="true")
+    assert idtoken.verify_id_token("t")["email_verified"] is False
+    _stub_verifier(monkeypatch, email_verified=True)
+    assert idtoken.verify_id_token("t")["email_verified"] is True
+
+
+def test_wrong_issuer_is_rejected_without_leaking_the_token(monkeypatch):
+    _stub_verifier(monkeypatch, iss="https://securetoken.google.com/other-proj")
+    with pytest.raises(idtoken.IdTokenError) as e:
+        idtoken.verify_id_token("secret-token-value")
+    assert "secret-token-value" not in str(e.value)
+    _stub_verifier(monkeypatch, iss=None)
+    with pytest.raises(idtoken.IdTokenError):
+        idtoken.verify_id_token("t")
+
+
+# ---- provisioning is atomic and a refusal never changes the account ----
+
+def _invite_status(email):
+    return [i.status for i in invites.list_invites() if i.email == email]
+
+
+def test_provisioning_failure_rolls_everything_back_and_retry_succeeds(
+        admin, two_sessions, monkeypatch, sign_in):
+    invites.create_invite("new@x.org", "reviewer", two_sessions, admin.id)
+    real = invites._apply_invite
+
+    def boom(*a, **k):
+        raise RuntimeError("crash after the user insert")
+    monkeypatch.setattr(invites, "_apply_invite", boom)
+    with pytest.raises(RuntimeError):
+        invites.provision(claims())
+    assert userdb.get_user_by_email("new@x.org") is None
+    assert userdb.get_user_by_uid("uid-1") is None
+    assert _invite_status("new@x.org") == ["pending"]
+    conn = userdb.connect()
+    assert conn.execute("SELECT COUNT(*) FROM memberships").fetchone()[0] == 0
+    conn.close()
+
+    monkeypatch.setattr(invites, "_apply_invite", real)
+    r = sign_in(claims())
+    assert r.status_code == 200
+    assert members(r.json()["id"]) == ["alpha", "beta"]
+    assert _invite_status("new@x.org") == ["accepted"]
+
+
+def test_invite_revoked_between_lookup_and_consume_is_refused(admin, monkeypatch, sign_in):
+    inv, _ = invites.create_invite("new@x.org", "annotator", [], admin.id)
+    real = invites._pending_for
+
+    def lookup_then_revoke(conn, email):
+        row = real(conn, email)
+        invites.revoke(inv.id)  # the admin revokes just after the sign-in read it
+        return row
+    monkeypatch.setattr(invites, "_pending_for", lookup_then_revoke)
+    r = sign_in(claims())
+    assert (r.status_code, r.json()) == (403, REFUSAL)
+    assert userdb.get_user_by_email("new@x.org") is None
+    assert _invite_status("new@x.org") == ["revoked"]
+
+
+def test_refused_inactive_account_is_not_linked(auth_env, sign_in):
+    boss = userdb.create_user("boss@x.org", "Boss", "admin")
+    userdb.set_active(boss.id, False)
+    r = sign_in(claims("boss@x.org", uid="uid-boss"))
+    assert (r.status_code, r.json()) == (403, REFUSAL)
+    assert userdb.get_user_by_uid("uid-boss") is None
+
+
+def test_pending_invite_is_applied_when_the_email_became_registered_later(
+        admin, two_sessions, sign_in):
+    invites.create_invite("late@x.org", "reviewer", ["alpha"], admin.id)
+    late = userdb.create_user("late@x.org", "Late", "annotator")  # e.g. created by the CLI
+    r = sign_in(claims("late@x.org", uid="uid-late"))
+    assert r.status_code == 200
+    assert userdb.get_user_by_uid("uid-late").id == late.id
+    assert members(late.id) == ["alpha"]
+    assert _invite_status("late@x.org") == ["accepted"]
+    assert userdb.get_user(late.id).role == "annotator"  # the invite's role is not applied
