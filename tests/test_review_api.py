@@ -260,6 +260,87 @@ def test_removed_member_decisions_still_counted(world, as_user):
     assert _final_csv(rev)[0]["UMLS"] == "C1"
 
 
+@pytest.fixture
+def two_kb(world):
+    _make_session(world["root"], "s2", kbs=("UMLS", "MeSH"))
+    for u in (world["rev"], world["alice"], world["bob"]):
+        userdb.add_member("s2", u.id)
+    return world
+
+
+def _save_kbs(client, annotations, idx=0, name="s2"):
+    r = client.post(f"/api/sessions/{name}/rows/{idx}", json={"annotations": annotations})
+    assert r.status_code == 200, r.text
+
+
+def _adjudication_count():
+    conn = userdb.connect()
+    try:
+        return conn.execute("SELECT COUNT(*) FROM adjudications").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_partial_or_empty_adjudication_is_rejected_and_not_stored(two_kb, as_user):
+    c = as_user(two_kb["rev"])
+    r = c.post("/api/sessions/s2/adjudications",
+               json={"row_idx": 0, "kb_values": {"UMLS": "C9"}})
+    assert r.status_code == 400
+    assert "missing KB: MeSH" in r.json()["detail"]
+    r = c.post("/api/sessions/s2/adjudications", json={"row_idx": 0, "kb_values": {}})
+    assert r.status_code == 400
+    assert "missing KB: UMLS, MeSH" in r.json()["detail"]
+    r = c.post("/api/sessions/s2/adjudications",
+               json={"row_idx": 0, "kb_values": {"UMLS": "C9", "MeSH": "D1", "X": "x"}})
+    assert r.status_code == 400
+    assert "unknown KB: X" in r.json()["detail"]
+    assert _adjudication_count() == 0
+
+
+def test_full_two_kb_adjudication_shows_in_review_and_final_export(two_kb, as_user):
+    ca, cb = as_user(two_kb["alice"]), as_user(two_kb["bob"])
+    _save_kbs(ca, {"UMLS": "C1", "MeSH": "D1"})
+    _save_kbs(cb, {"UMLS": "C1", "MeSH": "D1"})
+    rev = as_user(two_kb["rev"])
+    r = rev.post("/api/sessions/s2/adjudications",
+                 json={"row_idx": 0, "kb_values": {"UMLS": "C9", "MeSH": "D9"}})
+    assert r.status_code == 200, r.text
+    (row,) = rev.get("/api/sessions/s2/review").json()["rows"]
+    assert row["adjudication"]["kb_values"] == {"UMLS": "C9", "MeSH": "D9"}
+    rows = _final_csv(rev, "s2")
+    assert (rows[0]["UMLS"], rows[0]["MeSH"], rows[0]["_needs_review"],
+            rows[0]["_review_reason"]) == ("C9", "D9", "", "")
+
+
+def test_final_export_two_kbs_agree_on_both(two_kb, as_user):
+    ca, cb = as_user(two_kb["alice"]), as_user(two_kb["bob"])
+    _save_kbs(ca, {"UMLS": "C1", "MeSH": "D1"})
+    _save_kbs(cb, {"UMLS": "C1", "MeSH": "D1"})
+    rows = _final_csv(as_user(two_kb["rev"]), "s2")
+    assert list(rows[0].keys()) == ["entity_text", "document_id", "UMLS", "MeSH",
+                                    "_needs_review", "_review_reason"]
+    assert (rows[0]["UMLS"], rows[0]["MeSH"], rows[0]["_needs_review"],
+            rows[0]["_review_reason"]) == ("C1", "D1", "", "")
+
+
+def test_final_export_two_kbs_differ_on_one_kb_blanks_both(two_kb, as_user):
+    ca, cb = as_user(two_kb["alice"]), as_user(two_kb["bob"])
+    _save_kbs(ca, {"UMLS": "C1", "MeSH": "D1"})
+    _save_kbs(cb, {"UMLS": "C1", "MeSH": "D2"})
+    rows = _final_csv(as_user(two_kb["rev"]), "s2")
+    assert (rows[0]["UMLS"], rows[0]["MeSH"], rows[0]["_needs_review"],
+            rows[0]["_review_reason"]) == ("", "", "1", "disagree")
+
+
+def test_review_label_blank_when_label_column_missing(world, as_user):
+    _save(as_user(world["alice"]), "C1")
+    pd.DataFrame({"other": ["a", "b", "c"]}).to_csv(world["root"] / "s1" / "input.csv",
+                                                     index=False)
+    r = as_user(world["rev"]).get("/api/sessions/s1/review")
+    assert r.status_code == 200, r.text
+    assert [row["label"] for row in r.json()["rows"]] == [""]
+
+
 def test_review_routes_are_404_with_auth_off(tmp_path, monkeypatch):
     monkeypatch.delenv("HELIX_AUTH", raising=False)
     monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)

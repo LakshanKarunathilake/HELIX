@@ -76,6 +76,7 @@ def _adjudication_json(adj: dict, names: dict[int, str]) -> dict:
 @router.get("/api/sessions/{name}/review", dependencies=[Depends(reviewer_access)])
 def review(name: str):
     cfg, df, kb_names = _session(name)
+    labels = df[cfg.label_column].tolist() if cfg.label_column in df.columns else [""] * len(df)
     names: dict[int, str] = {}
     by_row: dict[int, list] = {}
     for (user_id, row), d in sorted(decisions.latest_human_or_script(name).items(),
@@ -91,7 +92,7 @@ def review(name: str):
         adj = adjudications.get(idx)
         rows.append({
             "idx": idx,
-            "label": str(df.iloc[idx][cfg.label_column]),
+            "label": str(labels[idx]),
             "decisions": [{"user_id": d.user_id, "user_name": _user_name(d.user_id, names),
                            "actor": d.actor, "script": d.actor != "human",
                            "kb_values": d.kb_values, "llm_used": d.llm_used, "ts": d.ts}
@@ -129,9 +130,18 @@ def adjudicate(name: str, body: AdjudicationRequest,
     _, df, kb_names = _session(name)
     if not 0 <= body.row_idx < len(df):
         raise HTTPException(404, "Row out of range")
+    # A partial adjudication would publish blanks as reviewed final values,
+    # so it must name exactly the session's KBs.
     unknown = sorted(set(body.kb_values) - set(kb_names))
-    if unknown:
-        raise HTTPException(400, f"Unknown KB: {', '.join(unknown)}")
+    missing = [kb for kb in kb_names if kb not in body.kb_values]
+    if unknown or missing:
+        problems = []
+        if missing:
+            problems.append(f"missing KB: {', '.join(missing)}")
+        if unknown:
+            problems.append(f"unknown KB: {', '.join(unknown)}")
+        raise HTTPException(400, "An adjudication must cover every KB of the session ("
+                            + "; ".join(problems) + ").")
     adj = decisions.add_adjudication(name, body.row_idx, reviewer.id, body.kb_values,
                                      body.note)
     return _adjudication_json(adj, {})
