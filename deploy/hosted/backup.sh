@@ -61,9 +61,10 @@ fi
 
 # Write to a .tmp name and rename on success, so a failed run never leaves a
 # truncated archive that looks valid. The top-level entries are listed by name (everything
-# except the live database files) rather than excluded by pattern.
+# except the live database files and any helix.db.pre-restore* left by a restore) rather than
+# excluded by pattern.
 docker run --rm -v "$VOLUME":/data:ro -v "$BACKUP_DIR":/backup alpine:3.20 \
-  sh -c "umask 077 && cd /data && tar czf '/backup/$name.tmp' \$(find . -mindepth 1 -maxdepth 1 ! -name helix.db ! -name helix.db-wal ! -name helix.db-shm)"
+  sh -c "umask 077 && cd /data && tar czf '/backup/$name.tmp' \$(find . -mindepth 1 -maxdepth 1 ! -name helix.db ! -name helix.db-wal ! -name helix.db-shm ! -name 'helix.db.pre-restore*')"
 mv -f "$tmp" "$BACKUP_DIR/$name"
 
 find "$BACKUP_DIR" -maxdepth 1 -name 'sessions-*.tgz' -mtime +14 -delete

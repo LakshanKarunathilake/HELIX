@@ -171,17 +171,25 @@ first and changes nothing if it is unusable (wrong date or `BACKUP_DIR`, corrupt
 snapshot, failed integrity check). Only then does it move the current `helix.db`,
 `helix.db-wal` and `helix.db-shm` aside (renamed to `helix.db.pre-restore`,
 `helix.db.pre-restore-wal`, `helix.db.pre-restore-shm`, not deleted), put the snapshot in as
-`helix.db`, and copy the sessions over. From the repo root, with your own `BACKUP_DIR` in place
-of `/var/backups/helix` and the archive's date for `<date>`:
+`helix.db`, and copy the sessions over. It refuses to start if any `helix.db.pre-restore*` file
+from an earlier restore is still in the volume (move or delete them first), and it never copies
+database files from the archive over the restored `helix.db`. From the repo root, edit
+`BACKUP_DIR` and the archive's date (`YYYY-MM-DD`) in the first two lines:
 
 ```
+BACKUP_DIR=/var/backups/helix
+ARCHIVE=sessions-YYYY-MM-DD.tgz
+
 docker compose -f deploy/hosted/docker-compose.yml --env-file deploy/hosted/.env stop api
 
-docker run --rm -i -e ARCHIVE=sessions-<date>.tgz \
-  -v helix_sessions:/data -v /var/backups/helix:/backup:ro python:3.11-alpine sh -s <<'EOF'
+docker run --rm -i -e ARCHIVE="$ARCHIVE" \
+  -v helix_sessions:/data -v "$BACKUP_DIR":/backup:ro python:3.11-alpine sh -s <<'EOF'
 set -eu
 cd /data
 fail() { echo "restore: $1; nothing was changed" >&2; exit 1; }
+for f in helix.db.pre-restore helix.db.pre-restore-wal helix.db.pre-restore-shm; do
+  if [ -e "$f" ]; then fail "$f already exists in the volume; move or delete helix.db.pre-restore* first"; fi
+done
 work=$(mktemp -d)
 [ -f "/backup/$ARCHIVE" ] || fail "/backup/$ARCHIVE not found"
 tar xzf "/backup/$ARCHIVE" -C "$work" || fail "cannot extract $ARCHIVE"
@@ -192,14 +200,15 @@ for f in helix.db helix.db-wal helix.db-shm; do
   if [ -e "$f" ]; then mv -f "$f" "helix.db.pre-restore${f#helix.db}"; fi
 done
 mv "$work/helix.snapshot.db" helix.db
+rm -rf "$work"/helix.db "$work"/helix.db-wal "$work"/helix.db-shm "$work"/helix.db.pre-restore*
 cp -a "$work"/. .
 rm -rf "$work"
 echo "restored $ARCHIVE; the previous database is kept as helix.db.pre-restore"
 EOF
 ```
 
-If it prints a `restore:` message, nothing changed: fix the date or directory and run it
-again. Now check the restored database **before** starting `api` (a missing `helix.db` would
+If it prints a `restore:` message, nothing changed: fix the date or directory (or remove the
+old `helix.db.pre-restore*` files) and run it again. Now check the restored database **before** starting `api` (a missing `helix.db` would
 otherwise be silently replaced by a new empty one, which would also pass an integrity check).
 This opens the file read-only, so it fails instead of creating a file if `helix.db` is missing:
 
@@ -209,15 +218,28 @@ docker run --rm -v helix_sessions:/data python:3.11-alpine python -c "import sql
 
 Expect `[('ok',)]`, a non-zero number of users, and as many decisions as you had when the
 backup was taken. If both counts are zero, or the command fails, something went wrong: put the
-old database back (inside the volume: `helix.db.pre-restore` to `helix.db`, and the `-wal` and
-`-shm` files likewise) before starting `api`. When the numbers are right, start `api`:
+old database back before starting `api`. The same applies if the restore script itself died
+after it began moving files (the verify then fails on a missing or partial `helix.db`). This
+replaces `helix.db*` with the saved `helix.db.pre-restore*` files and does nothing if there are
+none:
+
+```
+docker run --rm -v helix_sessions:/data python:3.11-alpine sh -c '
+cd /data
+[ -f helix.db.pre-restore ] || { echo "rollback: no helix.db.pre-restore in the volume" >&2; exit 1; }
+rm -f helix.db helix.db-wal helix.db-shm
+for f in helix.db.pre-restore*; do mv "$f" "helix.db${f#helix.db.pre-restore}"; done'
+```
+
+When the numbers are right, start `api`:
 
 ```
 docker compose -f deploy/hosted/docker-compose.yml --env-file deploy/hosted/.env start api
 ```
 
-The `*.pre-restore*` files stay in the volume (and in later backups) until you delete them;
-remove them once you are satisfied with the restore. Sessions in the archive overwrite the
+The `helix.db.pre-restore*` files stay in the volume until you delete them (`backup.sh` leaves
+them out of its archives); remove them once you are satisfied with the restore, because the
+next restore refuses to run while they exist. Sessions in the archive overwrite the
 same-named folders in the volume; sessions that are not in the archive are left alone.
 
 Archives made by the older `backup.sh` have no `helix.snapshot.db`, so the restore above stops
