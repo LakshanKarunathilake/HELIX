@@ -24,6 +24,10 @@ def hosted_mode() -> bool:
     return os.environ.get("HELIX_HOSTED", "") == "1"
 
 
+def auth_enabled() -> bool:
+    return os.environ.get("HELIX_AUTH", "") == "1"
+
+
 def _csv_env(name: str) -> list[str]:
     return [p.strip() for p in os.environ.get(name, "").split(",") if p.strip()]
 
