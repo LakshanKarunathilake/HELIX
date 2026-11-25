@@ -97,8 +97,12 @@ an invite: it only adds the chosen sessions to that account and leaves its role 
 * **Annotators** see only the sessions they are members of, and only their own annotations.
   Their layer is `annotations/<user_id>.csv` in the session folder.
 * **Reviewers and admins** use the **Review** page of a session: every user's decisions per
-  row, pairwise agreement, and an adjudication box. Only admins create, configure and delete
-  sessions, manage users, and download the decision log (`GET /api/admin/decisions.csv`).
+  row, pairwise agreement, and an adjudication box (every KB needs a value; enter `NIL` for no
+  match). Only admins create, configure and delete sessions and manage users.
+* **Decision log** (`GET /api/admin/decisions` as JSON, `GET /api/admin/decisions.csv`): an
+  admin reads the whole log or any one session's with `?session=<name>`. A reviewer reads only
+  a session they are a member of and must name it with `?session=<name>` (another session gives
+  404, no `session=` gives 403). Annotators cannot read it.
 * **Final export** (Review page, or `GET /api/sessions/<name>/export?final=1`): a row gets a
   value when two human annotators made the same decision in every KB column, or when a
   reviewer adjudicated it. Every other row has blank KB columns, `_needs_review` set to `1`,
@@ -106,17 +110,33 @@ an invite: it only adds the chosen sessions to that account and leaves its role 
   `no_decisions`.
 * Rows written by a script (Auto-annotate, Auto-match) do not count towards agreement or the
   final export until the annotator opens the row and saves it.
-* A session that has logged decisions cannot be deleted.
+* A session that has logged decisions or adjudications cannot be deleted. Deleting a session
+  also removes its name from every invite, so a later session with the same name starts with
+  no members and no history.
 
 ### Limits to know about
 
 * Sessions created before accounts keep their shared `annotated.csv`. In accounts mode each
-  member opens such a session with an empty personal layer. The export routes only serve a
-  user's own layer (an administrator can name another user's with `?user=<id>`), never the
-  legacy `annotated.csv`; that file stays in the session folder of the sessions volume, so copy
-  it out of the volume if you need it.
-* Review-mode (Mode C) sessions write their pre-annotations into that same legacy
-  `annotated.csv`, so pre-annotations are not shown per user in accounts mode.
+  member opens such a session with an empty personal layer. An administrator downloads the
+  legacy file as-is with `GET /api/sessions/<name>/export?legacy=1` (404 if the session has
+  none); the other export routes serve per-user layers only (an administrator can name another
+  user's with `?user=<id>`).
+* Annotators work blind, from scratch. The Auto-annotate modal is on the admin-only Configure
+  page and writes only into the administrator's own layer, where its picks are logged as script
+  decisions (`auto_annotate`) that do not count towards agreement. An annotator-facing
+  Auto-annotate is a possible follow-up.
+* Countdown auto-accept saves (the Annotate page timer running out with no interaction) are
+  logged as `human` decisions with method `auto_accept`, and they DO count towards agreement
+  and the final export.
+* In the final export, a KB column with the same name as an input column overwrites that
+  input column.
+* The login cookie's `Secure` attribute follows `HELIX_HOSTED`: run with `HELIX_HOSTED=1`
+  behind TLS (as this compose file does), or the cookie is also sent over plain HTTP.
+* A re-created Google account (same email, new Google uid) is refused at sign-in. There is no
+  unlink in the UI: an administrator has to clear that user's `firebase_uid` in `helix.db`
+  directly (or invite a different address and untick **Active** on the old account).
+* Review-mode (Mode C) sessions write their pre-annotations into the session's legacy
+  `annotated.csv` (see the first point above), so pre-annotations are not shown per user in accounts mode.
 * Sign-in needs internet access from the browser and from the API (to fetch Google's token
   signing keys), and a Firebase project.
 * Only the `google.com` provider is accepted. There is no self sign-up, and no email sending.
