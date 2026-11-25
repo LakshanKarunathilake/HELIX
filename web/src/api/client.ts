@@ -1,4 +1,4 @@
-import type { AdminUser, AppInfo, Candidate, DocumentMentions, FeedbackOptions, GraphConnection, GraphData, Invite, InviteCreated, KBConfig, LLMRerank, PanelName, ParsedFile, Progress, Reflection, Role, RowData, SessionConfig, User } from '@/types'
+import type { AdminUser, Adjudication, AgreementData, AppInfo, Candidate, DocumentMentions, FeedbackOptions, GraphConnection, GraphData, Invite, InviteCreated, KBConfig, LLMRerank, PanelName, ParsedFile, Progress, Reflection, ReviewData, Role, RowData, SessionConfig, User } from '@/types'
 
 const BASE = '/api'
 
@@ -65,6 +65,23 @@ export const createInvite = (body: { email: string; role: Role; session_names: s
 
 export const revokeInvite = (id: number) =>
   req<{ ok: boolean }>(`/admin/invites/${id}/revoke`, { method: 'POST' })
+
+// ── review (reviewer / admin) ────────────────────────────────────────────────
+
+const sessionPath = (name: string) => `/sessions/${encodeURIComponent(name)}`
+
+export const getReview = (name: string) => req<ReviewData>(`${sessionPath(name)}/review`)
+
+export const getAgreement = (name: string) => req<AgreementData>(`${sessionPath(name)}/agreement`)
+
+/** `kb_values` must hold exactly the session's KB names: the server rejects partial adjudications. */
+export const postAdjudication = (
+  name: string,
+  body: { row_idx: number; kb_values: Record<string, string>; note: string },
+) => req<Adjudication>(`${sessionPath(name)}/adjudications`, jsonInit('POST', body))
+
+/** Download link for the reviewed set (cookie-authenticated, so a plain link works). */
+export const finalExportUrl = (name: string) => `${BASE}${sessionPath(name)}/export?final=1`
 
 // ── sessions ────────────────────────────────────────────────────────────────
 

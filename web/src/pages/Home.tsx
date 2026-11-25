@@ -1,13 +1,15 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { useNavigate } from 'react-router-dom'
-import { PenLine, Settings, ArrowRight, PlusCircle, Loader2, Download, ChevronDown, CheckCircle2 } from 'lucide-react'
+import { Link, useNavigate } from 'react-router-dom'
+import { ClipboardCheck, PenLine, Settings, ArrowRight, PlusCircle, Loader2, Download, ChevronDown, CheckCircle2 } from 'lucide-react'
 import * as api from '@/api/client'
 import { useAuth } from '@/hooks/useAuth'
 
 export function Home() {
   const navigate = useNavigate()
-  const { isAdmin } = useAuth()
+  const { isAdmin, auth, user, loading } = useAuth()
+  // Reviewing exists only with accounts: never offered when auth is off or still loading.
+  const canReview = !loading && auth && (user?.role === 'admin' || user?.role === 'reviewer')
   const { data: sessions, isLoading, error } = useQuery({
     queryKey: ['sessions'],
     queryFn: api.getSessions,
@@ -68,7 +70,7 @@ export function Home() {
       {sessions && sessions.length > 0 && (
         <div className="grid gap-3">
           {sessions.map(name => (
-            <SessionCard key={name} name={name} canConfigure={isAdmin} />
+            <SessionCard key={name} name={name} canConfigure={isAdmin} canReview={canReview} />
           ))}
         </div>
       )}
@@ -76,7 +78,11 @@ export function Home() {
   )
 }
 
-function SessionCard({ name, canConfigure }: { name: string; canConfigure: boolean }) {
+function SessionCard({ name, canConfigure, canReview }: {
+  name: string
+  canConfigure: boolean
+  canReview: boolean
+}) {
   const navigate = useNavigate()
   const { data: progress } = useQuery({
     queryKey: ['progress', name],
@@ -118,6 +124,11 @@ function SessionCard({ name, canConfigure }: { name: string; canConfigure: boole
       </div>
       <div className="flex items-center gap-2 flex-shrink-0">
         <ExportMenu name={name} />
+        {canReview && (
+          <Link className="btn-secondary" to={`/review/${encodeURIComponent(name)}`}>
+            <ClipboardCheck className="w-4 h-4" /> Review
+          </Link>
+        )}
         {canConfigure && (
           <button
             className="btn-secondary"

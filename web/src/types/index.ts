@@ -332,3 +332,52 @@ export interface AppInfo {
   auth: boolean
   firebase: FirebaseWebConfig | null
 }
+
+// ── review (reviewer / admin) ─────────────────────────────────────────────────
+
+export interface ReviewDecision {
+  user_id: number
+  user_name: string
+  actor: string
+  /** True when a script, not the person, wrote the decision. */
+  script: boolean
+  kb_values: Record<string, string>
+  llm_used: string | null
+  ts: string
+}
+
+export interface Adjudication {
+  row_idx: number
+  kb_values: Record<string, string>
+  note: string
+  reviewer_id: number
+  reviewer_name: string
+  ts: string
+}
+
+export interface ReviewRow {
+  idx: number
+  label: string
+  decisions: ReviewDecision[]
+  /** Two or more humans chose different values. */
+  disagree: boolean
+  adjudication: Adjudication | null
+}
+
+export interface ReviewData {
+  kb_names: string[]
+  rows: ReviewRow[]
+}
+
+export interface PairAgreement {
+  a: number
+  b: number
+  n: number
+  percent: number | null
+  kappa: number | null
+}
+
+export interface AgreementData {
+  by_kb: Record<string, PairAgreement[]>
+  excluded_script_rows: number
+}
