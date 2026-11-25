@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, Copy, Loader2, MailPlus, Pencil, Users as UsersIcon } from 'lucide-react'
@@ -54,8 +54,12 @@ function SessionPicker({ options, selected, onChange, disabled }: {
   )
 }
 
-function InviteForm({ sessions }: { sessions: string[] }) {
+/** `revocations` counts successful revokes: each one clears a stale error here (for example a
+ * "pending invite" 409 that the revoke just resolved). */
+function InviteForm({ sessions, revocations }: { sessions: string[]; revocations: number }) {
   const qc = useQueryClient()
+  const [error, setError] = useState('')
+  useEffect(() => { setError('') }, [revocations])
   const [email, setEmail] = useState('')
   const [role, setRole] = useState<Role>('annotator')
   const [chosen, setChosen] = useState<string[]>([])
@@ -64,6 +68,8 @@ function InviteForm({ sessions }: { sessions: string[] }) {
 
   const create = useMutation({
     mutationFn: api.createInvite,
+    onMutate: () => setError(''),
+    onError: e => setError(errorText(e)),
     onSuccess: () => {
       setEmail('')
       setCopied(null)
@@ -75,6 +81,7 @@ function InviteForm({ sessions }: { sessions: string[] }) {
 
   const submit = (e: FormEvent) => {
     e.preventDefault()
+    setError('')
     create.mutate({ email: email.trim(), role, session_names: chosen })
   }
 
@@ -130,8 +137,8 @@ function InviteForm({ sessions }: { sessions: string[] }) {
             {create.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <MailPlus className="w-4 h-4" />}
             Create invite
           </button>
-          {create.isError && (
-            <span className="text-sm text-red-600" role="alert">{errorText(create.error)}</span>
+          {error && (
+            <span className="text-sm text-red-600" role="alert">{error}</span>
           )}
         </div>
       </form>
@@ -166,7 +173,7 @@ function InviteForm({ sessions }: { sessions: string[] }) {
   )
 }
 
-function InvitesTable() {
+function InvitesTable({ onRevoked }: { onRevoked: () => void }) {
   const qc = useQueryClient()
   const invites = useQuery({ queryKey: ['admin', 'invites'], queryFn: api.listInvites })
   const [errors, setErrors] = useState<Record<number, string>>({})
@@ -174,7 +181,7 @@ function InvitesTable() {
 
   const revoke = useMutation({
     mutationFn: (id: number) => api.revokeInvite(id),
-    onSuccess: (_r, id) => setError(id, ''),
+    onSuccess: (_r, id) => { setError(id, ''); onRevoked() },
     onError: (e, id) => setError(id, errorText(e)),
     onSettled: () => qc.invalidateQueries({ queryKey: ['admin', 'invites'] }),
   })
@@ -378,6 +385,7 @@ function UsersTable({ sessions }: { sessions: string[] }) {
 
 export function Users() {
   const sessions = useQuery({ queryKey: ['sessions'], queryFn: api.getSessions })
+  const [revocations, setRevocations] = useState(0)
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-10">
@@ -387,8 +395,8 @@ export function Users() {
           Could not load sessions for the pickers: {errorText(sessions.error)}
         </div>
       )}
-      <InviteForm sessions={sessions.data ?? []} />
-      <InvitesTable />
+      <InviteForm sessions={sessions.data ?? []} revocations={revocations} />
+      <InvitesTable onRevoked={() => setRevocations(n => n + 1)} />
       <UsersTable sessions={sessions.data ?? []} />
     </div>
   )

@@ -40,13 +40,13 @@ interface RowView {
  *   which `disagree` already covers.
  *
  * Adjudication prefill: the current adjudication; else the agreed value (all humans match,
- * which is the first human's value); else the first human decision's value; else, for a
- * script-only row, the first decision's value. Missing KBs start empty.
+ * which is the first human's value); else the first human decision's value; else empty.
+ * A script's value is never offered: a script-only row starts with empty inputs.
  */
 function toView(row: ReviewRow, kbNames: string[]): RowView {
   const humans = row.decisions.filter(d => !d.script)
   const scriptOnly = row.decisions.length > 0 && humans.length === 0
-  const source = row.adjudication?.kb_values ?? humans[0]?.kb_values ?? row.decisions[0]?.kb_values ?? {}
+  const source = row.adjudication?.kb_values ?? humans[0]?.kb_values ?? {}
   return {
     row,
     scriptOnly,
@@ -142,9 +142,12 @@ function AdjudicationForm({ kbNames, prefill, saving, onSave, onCancel }: {
   const [values, setValues] = useState(prefill)
   const [note, setNote] = useState('')
   const uid = useId()
+  // The server rejects blank values: every KB needs a value, or NIL for no match.
+  const incomplete = kbNames.some(kb => !(values[kb] ?? '').trim())
 
   const submit = (e: FormEvent) => {
     e.preventDefault()
+    if (incomplete) return
     // A failed save drops the typed values back to what the server holds; the row shows the error.
     onSave(values, note.trim()).then(onCancel, () => { setValues(prefill); setNote('') })
   }
@@ -174,13 +177,23 @@ function AdjudicationForm({ kbNames, prefill, saving, onSave, onCancel }: {
         />
       </div>
       <div className="sm:col-span-2 flex gap-2">
-        <button className="btn-primary !py-1" type="submit" disabled={saving}>
+        <button
+          className="btn-primary !py-1"
+          type="submit"
+          disabled={saving || incomplete}
+          aria-describedby={incomplete ? `${uid}-hint` : undefined}
+        >
           {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />} Save adjudication
         </button>
         <button className="btn-secondary !py-1" type="button" disabled={saving} onClick={onCancel}>
           Cancel
         </button>
       </div>
+      {incomplete && (
+        <p id={`${uid}-hint`} className="sm:col-span-2 text-xs text-gray-500">
+          Enter a value for every KB, or NIL for no match.
+        </p>
+      )}
     </form>
   )
 }

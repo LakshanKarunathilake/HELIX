@@ -289,7 +289,7 @@ export const DEFAULT_KB: KBConfig = {
 export type Role = 'admin' | 'reviewer' | 'annotator'
 
 export interface User {
-  id: string
+  id: number
   email: string
   name: string
   role: Role
