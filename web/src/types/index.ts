@@ -295,6 +295,32 @@ export interface User {
   role: Role
 }
 
+/** A user as the admin Users page sees them (`/api/admin/users`). */
+export interface AdminUser {
+  id: number
+  email: string
+  name: string
+  role: Role
+  active: boolean
+  session_names: string[]
+}
+
+export type InviteStatus = 'pending' | 'accepted' | 'revoked'
+
+export interface Invite {
+  id: number
+  email: string
+  role: Role
+  session_names: string[]
+  status: InviteStatus
+}
+
+export interface InviteCreated {
+  invite: Invite
+  sign_in_url: string
+  already_registered: boolean
+}
+
 export interface FirebaseWebConfig {
   apiKey: string
   authDomain: string

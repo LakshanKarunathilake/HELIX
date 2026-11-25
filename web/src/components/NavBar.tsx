@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom'
-import { Link2, LogOut, Settings } from 'lucide-react'
+import { Link2, LogOut, Settings, Users } from 'lucide-react'
 import { HelixLogo } from './HelixLogo'
 import { useAuth } from '@/hooks/useAuth'
 
@@ -9,6 +9,8 @@ export function NavBar() {
   const nav = [
     { to: '/', label: 'Sessions', icon: Link2 },
     ...(isAdmin ? [{ to: '/configure', label: 'Configure', icon: Settings }] : []),
+    // Accounts only exist when auth is on; `isAdmin` alone is also true with auth off.
+    ...(auth && isAdmin ? [{ to: '/admin/users', label: 'Users', icon: Users }] : []),
   ]
   // Links and account block wait for the auth check and, with auth on, for a signed-in user.
   const signedOut = loading || (auth && !user)

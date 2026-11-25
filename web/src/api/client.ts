@@ -1,4 +1,4 @@
-import type { AppInfo, Candidate, DocumentMentions, FeedbackOptions, GraphConnection, GraphData, KBConfig, LLMRerank, PanelName, ParsedFile, Progress, Reflection, RowData, SessionConfig, User } from '@/types'
+import type { AdminUser, AppInfo, Candidate, DocumentMentions, FeedbackOptions, GraphConnection, GraphData, Invite, InviteCreated, KBConfig, LLMRerank, PanelName, ParsedFile, Progress, Reflection, Role, RowData, SessionConfig, User } from '@/types'
 
 const BASE = '/api'
 
@@ -41,6 +41,30 @@ export const sessionLogin = (idToken: string) =>
 export const logout = () => req<{ ok: boolean }>('/auth/logout', { method: 'POST' })
 
 export const me = () => req<User>('/auth/me')
+
+// ── admin: users and invitations ─────────────────────────────────────────────
+
+const jsonInit = (method: string, body: unknown): RequestInit => ({
+  method,
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body),
+})
+
+export const listUsers = () => req<AdminUser[]>('/admin/users')
+
+export const patchUser = (id: number, changes: { role?: Role; active?: boolean }) =>
+  req<AdminUser>(`/admin/users/${id}`, jsonInit('PATCH', changes))
+
+export const setUserSessions = (id: number, sessionNames: string[]) =>
+  req<AdminUser>(`/admin/users/${id}/sessions`, jsonInit('PUT', { session_names: sessionNames }))
+
+export const listInvites = () => req<Invite[]>('/admin/invites')
+
+export const createInvite = (body: { email: string; role: Role; session_names: string[] }) =>
+  req<InviteCreated>('/admin/invites', jsonInit('POST', body))
+
+export const revokeInvite = (id: number) =>
+  req<{ ok: boolean }>(`/admin/invites/${id}/revoke`, { method: 'POST' })
 
 // ── sessions ────────────────────────────────────────────────────────────────
 

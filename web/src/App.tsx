@@ -4,6 +4,7 @@ import { Home } from '@/pages/Home'
 import { Configure } from '@/pages/Configure'
 import { Annotate } from '@/pages/Annotate'
 import { Login } from '@/pages/Login'
+import { Users } from '@/pages/Users'
 import { AuthProvider, RequireAuth, RequireRole } from '@/hooks/useAuth'
 
 const adminOnly = (page: JSX.Element) => (
@@ -23,6 +24,7 @@ export default function App() {
                 <Route path="/" element={<Home />} />
                 <Route path="/configure" element={adminOnly(<Configure />)} />
                 <Route path="/configure/:sessionName" element={adminOnly(<Configure />)} />
+                <Route path="/admin/users" element={adminOnly(<Users />)} />
                 <Route path="/annotate/:sessionName" element={<Annotate />} />
               </Route>
               <Route path="*" element={<Navigate to="/" replace />} />
