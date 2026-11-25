@@ -322,3 +322,81 @@ def test_transaction_rolls_back_on_exception(world):
             tx.add("s1", 0, world["alice"].id, "human", "save", {"UMLS": "A"}, {"UMLS": ""})
             raise RuntimeError("boom")
     assert decisions.list_decisions("s1") == []
+
+
+def _fake_kb(main, monkeypatch):
+    class FakeKB:
+        def __init__(self, cfg):
+            pass
+
+        def query(self, label):
+            return [SimpleNamespace(id=f"C_{label.upper()}", score=1.0, semantic_groups="")]
+    monkeypatch.setattr(main, "KBClient", FakeKB)
+
+
+def _save_during_pick(main, monkeypatch, user, idx, label, annotations):
+    """Make a human save of row ``idx`` land while auto-annotate picks for
+    ``label`` (the KB calls and the pick run outside the write lock)."""
+    real = main._pick_best
+    done = []
+
+    def pick(dense, lexical, entity_type, threshold):
+        best = real(dense, lexical, entity_type, threshold)
+        if best is not None and best.id == f"C_{label.upper()}" and not done:
+            done.append(1)
+            main.save_row("s1", idx, main.AnnotateRequest(annotations=annotations), user=user)
+        return best
+    monkeypatch.setattr(main, "_pick_best", pick)
+
+
+def test_auto_annotate_skips_row_saved_by_a_human_during_the_run(world, as_user, monkeypatch):
+    import api.main as main
+    _fake_kb(main, monkeypatch)
+    alice = world["alice"]
+    _save_during_pick(main, monkeypatch, alice, 1, "flu", {"UMLS": "C_HUMAN"})
+
+    r = as_user(alice).post("/api/sessions/s1/auto-annotate")
+    assert r.status_code == 200, r.text
+    assert (r.json()["annotated"], r.json()["skipped"]) == (2, 1)
+    assert _layer(world["root"], "s1", alice)["UMLS"].tolist() == ["C_COLD", "C_HUMAN", "C_VIRUS"]
+    assert [d.actor for d in decisions.list_decisions("s1") if d.row_idx == 1] == ["human"]
+    latest = decisions.latest_human_or_script("s1")[(alice.id, 1)]
+    assert (latest.actor, latest.kb_values) == ("human", {"UMLS": "C_HUMAN"})
+
+
+def test_auto_annotate_writes_only_kbs_still_blank(auth_env, make_user, as_user, monkeypatch):
+    import api.main as main
+    _make_session(auth_env, "s1", kbs=[
+        {"name": "UMLS", "endpoint_url": "http://127.0.0.1:8765/query"},
+        {"name": "MESH", "endpoint_url": "http://127.0.0.1:8766/query"}])
+    alice = make_user("alice@x.org", name="Alice")
+    userdb.add_member("s1", alice.id)
+    _fake_kb(main, monkeypatch)
+    # while UMLS is being picked for row 0, the human saves MESH on that row
+    _save_during_pick(main, monkeypatch, alice, 0, "cold", {"MESH": "M_HUMAN"})
+
+    assert as_user(alice).post("/api/sessions/s1/auto-annotate").status_code == 200
+    layer = _layer(auth_env, "s1", alice)
+    assert (layer.at[0, "UMLS"], layer.at[0, "MESH"]) == ("C_COLD", "M_HUMAN")
+    auto_row0 = [d for d in decisions.list_decisions("s1")
+                 if d.row_idx == 0 and d.actor == "auto_annotate"]
+    assert [(d.kb_values, d.previous) for d in auto_row0] == [({"UMLS": "C_COLD"}, {"UMLS": ""})]
+
+
+@pytest.mark.parametrize("prefix", ["=", "+", "-", "@", "\t"])
+def test_decisions_csv_neutralises_formulas(world, as_user, make_user, prefix):
+    evil = make_user("evil@x.org", name=f"{prefix}HYPERLINK(1)")
+    userdb.add_member("s1", evil.id)
+    _save(as_user(evil), "C1", llm_used=f"{prefix}1+1")
+    r = as_user(world["admin"]).get("/api/admin/decisions.csv?session=s1")
+    (row,) = [dict(zip(CSV_HEADER, cells)) for cells in csv.reader(io.StringIO(r.text))][1:]
+    assert row["llm_used"] == f"'{prefix}1+1"
+    assert row["user_name"] == f"'{prefix}HYPERLINK(1)"
+    assert row["user_id"] == str(evil.id) and row["row_idx"] == "0"
+    assert json.loads(row["kb_values"]) == {"UMLS": "C1"}
+
+
+def test_numeric_looking_llm_used_round_trips_as_text(world, as_user):
+    _save(as_user(world["alice"]), "C1", llm_used="123")
+    (d,) = decisions.list_decisions("s1")
+    assert d.llm_used == "123"

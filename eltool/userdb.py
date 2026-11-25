@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     action        TEXT NOT NULL CHECK (action IN ('save', 'feedback', 'batch', 'auto')),
     kb_values     TEXT,
     previous      TEXT,
-    llm_used      INTEGER,
+    llm_used      TEXT,
     method        TEXT,
     elapsed_ms    INTEGER,
     selected_rank INTEGER,

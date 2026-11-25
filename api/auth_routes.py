@@ -147,6 +147,19 @@ _DECISION_CSV_COLUMNS = [
     "revision"]
 
 
+_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_cell(value):
+    """A CSV cell a spreadsheet will not run as a formula: strings that start
+    like one get a leading ' (names and llm_used come from users). Numbers are kept."""
+    if value is None:
+        return ""
+    if isinstance(value, str) and value.startswith(_FORMULA_START):
+        return "'" + value
+    return value
+
+
 @router.get("/api/admin/decisions",
             dependencies=[Depends(_auth_mode_only), Depends(require_admin)])
 def list_decisions(session: str | None = None, user: int | None = None):
@@ -165,7 +178,7 @@ def export_decisions(session: str | None = None):
         row = {**asdict(d), "kb_values": json.dumps(d.kb_values),
                "previous": json.dumps(d.previous),
                "user_name": who.name if who else "", "user_email": who.email if who else ""}
-        out.writerow(["" if row[c] is None else row[c] for c in _DECISION_CSV_COLUMNS])
+        out.writerow([_csv_cell(row[c]) for c in _DECISION_CSV_COLUMNS])
     fname = f"{session}_decisions.csv" if session and SLUG_RE.fullmatch(session) \
         else "decisions.csv"
     return Response(buf.getvalue(), media_type="text/csv",

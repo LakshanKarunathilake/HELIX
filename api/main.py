@@ -411,9 +411,9 @@ def llm_default_prompt():
 @app.delete("/api/sessions/{name}", dependencies=[Depends(require_admin)])
 def delete_session(name: str):
     path = session_dir(_require_session_name(name))
-    if not path.exists():
-        raise HTTPException(404, "Session not found")
     with _WRITE_LOCK:   # no save can log a decision between the check and the delete
+        if not path.exists():
+            raise HTTPException(404, "Session not found")
         if auth_enabled() and decisions.has_decisions(name):
             raise HTTPException(409, "This session has logged decisions and cannot be deleted")
         shutil.rmtree(path)
@@ -982,12 +982,20 @@ def auto_annotate_session(name: str, skip_annotated: bool = True,
 
         if new_annotations:
             # KB calls above run unlocked; the write re-reads the layer under the
-            # lock so a save made meanwhile is neither clobbered nor overwritten.
+            # lock so a save made meanwhile is neither clobbered nor overwritten:
+            # only KBs still blank are written, and a row filled meanwhile is skipped
+            # (no write, no log entry, so a human decision stays human).
             with _WRITE_LOCK, _decision_log(user) as tx:
                 out_df = init_output(out_path, df, kb_names, who)
+                now_done = all(str(out_df.at[idx, kb] or "").strip() for kb in kb_names)
                 if skip_annotated:
-                    new_annotations = {kb: str(out_df.at[idx, kb] or "").strip() or val
-                                       for kb, val in new_annotations.items()}
+                    new_annotations = {kb: val for kb, val in new_annotations.items()
+                                       if not str(out_df.at[idx, kb] or "").strip()}
+                if skip_annotated and now_done:
+                    skipped_count += 1
+                    continue
+                if not new_annotations:
+                    continue
                 if tx:
                     tx.add(name, idx, user.id, "auto_annotate", "auto", new_annotations,
                            _layer_values(out_df, idx, new_annotations))
