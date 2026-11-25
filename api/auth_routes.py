@@ -64,6 +64,54 @@ def logout(request: Request, response: Response):
     return {"ok": True}
 
 
+class UserUpdate(BaseModel):
+    role: str | None = None
+    active: bool | None = None
+
+
+class MembershipsRequest(BaseModel):
+    session_names: list[str]
+
+
+def _user_json(user: userdb.User) -> dict:
+    return {"id": user.id, "email": user.email, "name": user.name, "role": user.role,
+            "active": user.active, "session_names": userdb.sessions_for(user.id)}
+
+
+@router.get("/api/admin/users",
+            dependencies=[Depends(_auth_mode_only), Depends(require_admin)])
+def list_users():
+    return [_user_json(u) for u in userdb.list_users()]
+
+
+@router.patch("/api/admin/users/{user_id}",
+              dependencies=[Depends(_auth_mode_only), Depends(require_admin)])
+def update_user(user_id: int, body: UserUpdate):
+    try:
+        user = userdb.update_user(user_id, role=body.role, active=body.active)
+    except LookupError:
+        raise HTTPException(404, "No such user") from None
+    except userdb.LastAdminError as e:
+        raise HTTPException(409, str(e)) from None
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    return _user_json(user)
+
+
+@router.put("/api/admin/users/{user_id}/sessions",
+            dependencies=[Depends(_auth_mode_only), Depends(require_admin)])
+def replace_user_sessions(user_id: int, body: MembershipsRequest):
+    known = set(list_sessions())
+    unknown = [n for n in body.session_names if n not in known]
+    if unknown:
+        raise HTTPException(400, f"Unknown session: {', '.join(unknown)}")
+    try:
+        userdb.replace_memberships(user_id, body.session_names)
+    except LookupError:
+        raise HTTPException(404, "No such user") from None
+    return _user_json(userdb.get_user(user_id))
+
+
 @router.post("/api/admin/invites", dependencies=[Depends(_auth_mode_only)])
 def create_invite(body: InviteRequest, admin: userdb.User = Depends(require_admin)):
     known = set(list_sessions())

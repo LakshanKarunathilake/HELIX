@@ -201,6 +201,110 @@ def add_member(session_name: str, user_id: int) -> None:
         conn.close()
 
 
+def remove_member(session_name: str, user_id: int) -> None:
+    conn = connect()
+    try:
+        with conn:
+            conn.execute("DELETE FROM memberships WHERE session_name = ? AND user_id = ?",
+                         (session_name, user_id))
+    finally:
+        conn.close()
+
+
+def members(session_name: str) -> list[User]:
+    conn = connect()
+    try:
+        return [_user(r) for r in conn.execute(
+            "SELECT u.* FROM memberships m JOIN users u ON u.id = m.user_id "
+            "WHERE m.session_name = ? ORDER BY u.id", (session_name,))]
+    finally:
+        conn.close()
+
+
+def sessions_for(user_id: int) -> list[str]:
+    conn = connect()
+    try:
+        return [r["session_name"] for r in conn.execute(
+            "SELECT session_name FROM memberships WHERE user_id = ? ORDER BY session_name",
+            (user_id,))]
+    finally:
+        conn.close()
+
+
+def is_member(session_name: str, user_id: int) -> bool:
+    conn = connect()
+    try:
+        return conn.execute(
+            "SELECT 1 FROM memberships WHERE session_name = ? AND user_id = ?",
+            (session_name, user_id)).fetchone() is not None
+    finally:
+        conn.close()
+
+
+def count_active_admins() -> int:
+    conn = connect()
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1").fetchone()[0]
+    finally:
+        conn.close()
+
+
+class LastAdminError(Exception):
+    """The change would leave no active admin."""
+
+
+def update_user(user_id: int, role: str | None = None, active: bool | None = None) -> User:
+    """Change a user's role and/or active flag in one write transaction, so the
+    last-admin check and the update cannot be raced. Deactivating also deletes
+    the user's login sessions. Raises ValueError (bad role), LookupError (no
+    such user) or LastAdminError."""
+    if role is not None:
+        _check_role(role)
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")  # take the write lock before reading the admin count
+        with conn:
+            row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            if row is None:
+                raise LookupError(f"No user with id {user_id}")
+            new_role = row["role"] if role is None else role
+            new_active = bool(row["active"]) if active is None else active
+            was_admin = row["role"] == "admin" and bool(row["active"])
+            if was_admin and not (new_role == "admin" and new_active):
+                others = conn.execute(
+                    "SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1 AND id != ?",
+                    (user_id,)).fetchone()[0]
+                if others == 0:
+                    raise LastAdminError("Cannot remove the last admin")
+            conn.execute("UPDATE users SET role = ?, active = ? WHERE id = ?",
+                         (new_role, 1 if new_active else 0, user_id))
+            if not new_active:
+                conn.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
+            return _user(conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone())
+    finally:
+        conn.close()
+
+
+def replace_memberships(user_id: int, session_names: list[str]) -> list[str]:
+    """Make ``session_names`` exactly the user's memberships, atomically.
+    Raises LookupError if the user does not exist. Returns the new sorted list."""
+    wanted = sorted(set(session_names))
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        with conn:
+            if conn.execute("SELECT 1 FROM users WHERE id = ?", (user_id,)).fetchone() is None:
+                raise LookupError(f"No user with id {user_id}")
+            conn.execute("DELETE FROM memberships WHERE user_id = ?", (user_id,))
+            conn.executemany(
+                "INSERT INTO memberships (session_name, user_id) VALUES (?, ?)",
+                [(n, user_id) for n in wanted])
+        return wanted
+    finally:
+        conn.close()
+
+
 def list_users() -> list[User]:
     conn = connect()
     try:
