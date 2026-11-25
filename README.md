@@ -167,6 +167,19 @@ Then enable **Graph neighbourhood** for a session.
    switch IDs until the document is coherent.
 4. **Export** — download `sessions/<name>/annotated.csv` any time. Sessions are resumable.
 
+### Accounts and roles
+
+By default HELIX has no sign-in: one person, one shared `annotated.csv` per session. For a
+team, set `HELIX_AUTH=1` (the hosted deployment does this for you) to switch on invite-only
+accounts with Google sign-in through Firebase. There are three roles: **admin** (manages
+users and sessions), **reviewer** (sees every annotator's decisions, agreement and the reviewed
+final export) and **annotator** (sees only the sessions they were invited to, and only their
+own annotations, kept in `sessions/<name>/annotations/<user_id>.csv`). Users, invitations and
+an append-only decision log live in `sessions/helix.db`. Setup, bootstrapping the first admin,
+inviting people and the known limits are in
+[`deploy/hosted/README.md`](deploy/hosted/README.md); the design is in
+[`docs/superpowers/specs/2026-11-25-user-management-design.md`](docs/superpowers/specs/2026-11-25-user-management-design.md).
+
 ---
 
 ## Evaluation

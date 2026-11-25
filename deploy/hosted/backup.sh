@@ -2,7 +2,8 @@
 # Archive the HELIX sessions volume and keep 14 days of backups.
 # Usage: BACKUP_DIR=/var/backups/helix deploy/hosted/backup.sh
 set -euo pipefail
-# The archives hold every stored secret (LLM keys, KB headers, Neo4j passwords).
+# The archives hold every stored secret (LLM keys, KB headers, Neo4j passwords) and
+# helix.db (the user table, invitations and the decision log).
 umask 077
 
 if [ -z "${BACKUP_DIR:-}" ]; then
