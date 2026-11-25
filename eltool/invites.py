@@ -10,6 +10,7 @@ import sqlite3
 from dataclasses import dataclass
 
 from eltool import userdb
+from eltool.session import list_sessions
 
 # Only Google sign-in is accepted for now.
 ALLOWED_PROVIDERS = frozenset({"google.com"})
@@ -119,10 +120,30 @@ def _apply_invite(conn: sqlite3.Connection, invite: Invite, user_id: int) -> boo
         (userdb._now(), invite.id))
     if cur.rowcount != 1:
         return False
+    # A session deleted since the invite was made grants nothing, even if a new
+    # session has taken its name.
+    existing = set(list_sessions())
     conn.executemany(
         "INSERT OR IGNORE INTO memberships (session_name, user_id) VALUES (?, ?)",
-        [(s, user_id) for s in invite.session_names])
+        [(s, user_id) for s in invite.session_names if s in existing])
     return True
+
+
+def forget_session(session_name: str) -> None:
+    """Remove a deleted session's name from every invite, so a pending invite
+    cannot make its invitee a member of a later session with the same name."""
+    conn = userdb.connect()
+    try:
+        with conn:
+            rows = conn.execute("SELECT id, session_names FROM invites").fetchall()
+            for row in rows:
+                names = json.loads(row["session_names"])
+                if session_name in names:
+                    conn.execute("UPDATE invites SET session_names = ? WHERE id = ?",
+                                 (json.dumps([n for n in names if n != session_name]),
+                                  row["id"]))
+    finally:
+        conn.close()
 
 
 def provision(claims: dict) -> userdb.User:

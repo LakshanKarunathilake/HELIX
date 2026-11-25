@@ -39,7 +39,7 @@ from eltool import feedback as fb
 from eltool.provenance import classify_method
 from eltool.review import review_payload
 from eltool.hosting import auth_enabled, check_neo4j_uri, check_outbound_url, cors_origins, hosted_mode
-from eltool import decisions, userdb
+from eltool import decisions, invites, userdb
 from eltool.auth import auth_gate, current_user, require_admin, session_access
 from api import auth_routes, review_routes
 from eltool.context_upload import ContextUploadError, extract_context_zip
@@ -427,9 +427,12 @@ def delete_session(name: str):
             raise HTTPException(404, "Session not found")
         if auth_enabled() and decisions.has_decisions(name):
             raise HTTPException(409, "This session has logged decisions and cannot be deleted")
+        if auth_enabled() and decisions.has_adjudications(name):
+            raise HTTPException(409, "This session has adjudications and cannot be deleted")
         shutil.rmtree(path)
         if auth_enabled():
             userdb.delete_memberships_for_session(name)
+            invites.forget_session(name)
     return {"ok": True}
 
 

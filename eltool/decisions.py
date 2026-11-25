@@ -89,6 +89,15 @@ def has_decisions(session_name: str) -> bool:
         conn.close()
 
 
+def has_adjudications(session_name: str) -> bool:
+    conn = userdb.connect()
+    try:
+        return conn.execute("SELECT 1 FROM adjudications WHERE session_name = ? LIMIT 1",
+                            (session_name,)).fetchone() is not None
+    finally:
+        conn.close()
+
+
 def list_decisions(session_name: str | None = None,
                    user_id: int | None = None) -> list[Decision]:
     """Every logged decision, oldest first, optionally for one session and/or user."""
