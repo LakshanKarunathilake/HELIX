@@ -380,7 +380,13 @@ def test_auto_annotate_writes_only_kbs_still_blank(auth_env, make_user, as_user,
     assert (layer.at[0, "UMLS"], layer.at[0, "MESH"]) == ("C_COLD", "M_HUMAN")
     auto_row0 = [d for d in decisions.list_decisions("s1")
                  if d.row_idx == 0 and d.actor == "auto_annotate"]
-    assert [(d.kb_values, d.previous) for d in auto_row0] == [({"UMLS": "C_COLD"}, {"UMLS": ""})]
+    # every decision holds the row's complete state across all session KBs
+    assert [(d.kb_values, d.previous) for d in auto_row0] == [
+        ({"UMLS": "C_COLD", "MESH": "M_HUMAN"}, {"UMLS": "", "MESH": "M_HUMAN"})]
+    human_row0 = [d for d in decisions.list_decisions("s1")
+                  if d.row_idx == 0 and d.actor == "human"]
+    assert [(d.kb_values, d.previous) for d in human_row0] == [
+        ({"UMLS": "", "MESH": "M_HUMAN"}, {"UMLS": "", "MESH": ""})]
 
 
 @pytest.mark.parametrize("prefix", ["=", "+", "-", "@", "\t"])

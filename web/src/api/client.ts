@@ -192,11 +192,14 @@ export const saveRow = (
   annotations: Record<string, string>,
   llm_used?: string | null,
   provenance?: RowProvenance,
+  // `auto: true` marks a script-written save (the Auto-annotate modal): the
+  // decision log records it as `auto_annotate`, not as a human decision.
+  opts?: { auto?: boolean },
 ) =>
   req<{ ok: boolean }>(`/sessions/${name}/rows/${idx}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ annotations, llm_used, ...provenance }),
+    body: JSON.stringify({ annotations, llm_used, ...provenance, ...(opts?.auto ? { auto: true } : {}) }),
   })
 
 // ── per-decision feedback (Annotation Guide Sec. 8) ───────────────────────────

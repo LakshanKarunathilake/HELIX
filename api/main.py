@@ -136,6 +136,16 @@ def _layer_values(out_df: pd.DataFrame, idx: int, kbs) -> dict[str, str]:
             if kb in out_df.columns and idx in out_df.index else "" for kb in kbs}
 
 
+def _row_states(out_df: pd.DataFrame, idx: int, kb_names: list[str],
+                update: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+    """(after, before) for a decision-log entry: the row's value in EVERY session
+    KB after the write, and before it. A decision always holds the complete row
+    state, so a KB the write did not touch keeps its earlier value instead of
+    reading as missing. Call before the write, under the same lock."""
+    before = _layer_values(out_df, idx, kb_names)
+    return {**before, **update}, before
+
+
 def _int_or_none(value: str | None) -> int | None:
     return int(value) if value not in (None, "") else None
 
@@ -638,15 +648,17 @@ def save_rows_batch(name: str, req: BatchAnnotateRequest, user=Depends(session_a
     out_path = _out(name, user)
     who = _who(cfg, user)
     n = len(df)
+    kb_names = [k.name for k in cfg.kbs]
     with _WRITE_LOCK, metrics.timer("write.batch", name, rows=len(req.updates)), \
             _decision_log(user) as tx:
-        out_df = init_output(out_path, df, [k.name for k in cfg.kbs], who)
+        out_df = init_output(out_path, df, kb_names, who)
         for u in req.updates:
             if u.idx < 0 or u.idx >= n or _ai_accepted(cfg, out_df, u.idx):
                 continue
             if tx:
-                tx.add(name, u.idx, user.id, "auto_match", "batch", u.annotations,
-                       _layer_values(out_df, u.idx, u.annotations), llm_used=u.llm_used)
+                after, before = _row_states(out_df, u.idx, kb_names, u.annotations)
+                tx.add(name, u.idx, user.id, "auto_match", "batch", after, before,
+                       llm_used=u.llm_used)
             out_df.at[u.idx, ANNOTATOR_COL] = who
             if u.llm_used is not None:
                 out_df.at[u.idx, LLM_COL] = u.llm_used
@@ -671,6 +683,11 @@ class AnnotateRequest(BaseModel):
     # What the LLM banner showed (C4). None = nothing shown (cache miss / error).
     llm_id: str | None = None
     llm_confidence: float | None = None
+    # Set by the Auto-annotate modal's bulk save: the values came from a script,
+    # so the decision log records actor "auto_annotate" and the row does not count
+    # as a human decision. The flag can only lower trust (a human save that claims
+    # to be a script is merely left out of agreement), so the client may set it.
+    auto: bool = False
 
 
 def _records_llm(cfg) -> bool:
@@ -746,8 +763,10 @@ def save_row(name: str, idx: int, req: AnnotateRequest, user=Depends(session_acc
                     del provenance[col]
         if tx:
             prov = provenance or {}
-            tx.add(name, idx, user.id, "human", "save", req.annotations,
-                   _layer_values(out_df, idx, req.annotations), llm_used=req.llm_used,
+            after, before = _row_states(out_df, idx, [k.name for k in cfg.kbs],
+                                        req.annotations)
+            actor, action = ("auto_annotate", "auto") if req.auto else ("human", "save")
+            tx.add(name, idx, user.id, actor, action, after, before, llm_used=req.llm_used,
                    method=prov.get("_method", ""),
                    elapsed_ms=_int_or_none(prov.get("_elapsed_ms")),
                    selected_rank=_int_or_none(prov.get("_selected_rank")),
@@ -998,8 +1017,8 @@ def auto_annotate_session(name: str, skip_annotated: bool = True,
                 if not new_annotations:
                     continue
                 if tx:
-                    tx.add(name, idx, user.id, "auto_annotate", "auto", new_annotations,
-                           _layer_values(out_df, idx, new_annotations))
+                    after, before = _row_states(out_df, idx, kb_names, new_annotations)
+                    tx.add(name, idx, user.id, "auto_annotate", "auto", after, before)
                 write_row(out_path, out_df, idx, who, new_annotations)
             annotated_count += 1
 
@@ -1377,10 +1396,11 @@ def graph_optimize_all(name: str, skip_annotated: bool = True,
 
         # single atomic write of everything
         with _decision_log(user) as tx:
+            kb_names = [k.name for k in cfg.kbs]
             for u in updates:
                 if tx:
-                    tx.add(name, u["idx"], user.id, "auto_match", "auto", {kb: u["cui"]},
-                           _layer_values(out_df, u["idx"], [kb]))
+                    after, before = _row_states(out_df, u["idx"], kb_names, {kb: u["cui"]})
+                    tx.add(name, u["idx"], user.id, "auto_match", "auto", after, before)
                 out_df.at[u["idx"], ANNOTATOR_COL] = who
                 out_df.at[u["idx"], LLM_COL] = ""        # graph-driven, not LLM
                 out_df.at[u["idx"], kb] = u["cui"]

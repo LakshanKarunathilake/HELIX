@@ -119,7 +119,8 @@ export function AutoAnnotateModal({ sessionName, cfg, onClose, onComplete }: Pro
         } catch { setS1(s => ({ ...s, errors: ++err })) }
       }
       if (any) {
-        try { await api.saveRow(sessionName, idx, newAnn); setS1(s => ({ ...s, annotated: ++ann })) }
+        // A script's pick: logged as `auto_annotate`, never as a human decision.
+        try { await api.saveRow(sessionName, idx, newAnn, undefined, undefined, { auto: true }); setS1(s => ({ ...s, annotated: ++ann })) }
         catch { setS1(s => ({ ...s, errors: ++err })) }
       }
     }
