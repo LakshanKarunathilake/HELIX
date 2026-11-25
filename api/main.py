@@ -168,6 +168,8 @@ def _check_hosted_urls(cfg: SessionConfig) -> None:
 def get_sessions(request: Request):
     names = list_sessions()
     user = current_user(request)
+    if auth_enabled() and user is None:
+        raise HTTPException(401, "Not signed in")
     if user is not None and user.role != "admin":
         mine = set(userdb.sessions_for(user.id))
         names = [n for n in names if n in mine]
@@ -406,6 +408,11 @@ def get_progress(name: str, user=Depends(session_access)):
     # first access when no output exists yet.
     if out_path.exists():
         out_df = pd.read_csv(out_path, dtype=str, keep_default_na=False)
+        # A layer written before a KB was added has no column for it yet:
+        # count it as blank (in memory only; the file is not rewritten here).
+        for kb in kb_names:
+            if kb not in out_df.columns:
+                out_df[kb] = ""
     else:
         df, _ = load_input(Path(cfg.input_path), cfg.delimiter)
         out_df = init_output(out_path, df, kb_names, _who(cfg, user))

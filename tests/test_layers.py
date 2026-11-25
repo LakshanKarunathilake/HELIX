@@ -244,6 +244,36 @@ def test_save_row_stamps_user_name_in_annotator_column(world, as_user):
     assert list(layer["annotator"]) == ["Alice", "Alice"]
 
 
+def test_progress_tolerates_layer_missing_a_kb_added_later(world, as_user):
+    a, root = world["alice"], world["root"]
+    ca = as_user(a)
+    _save(ca, "s1", "C0001")
+    admin = as_user(world["admin"])
+    cfg = admin.get("/api/sessions/s1").json()
+    cfg["kbs"].append({"name": "MeSH", "endpoint_url": "http://127.0.0.1:8766/query"})
+    assert admin.put("/api/sessions/s1", json=cfg).status_code == 200
+    layer = root / "s1" / "annotations" / f"{a.id}.csv"
+    before = layer.read_bytes()
+    r = ca.get("/api/sessions/s1/progress")
+    assert r.status_code == 200
+    assert r.json() == {"total": 2, "done": 0, "resume_idx": 0}   # MeSH not done yet
+    assert layer.read_bytes() == before                           # progress stays read-only
+
+
+def test_session_list_refuses_missing_user_in_auth_mode(auth_env):
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from api.main import get_sessions
+
+    _make_session(auth_env, "s1")
+    with pytest.raises(HTTPException) as exc:
+        get_sessions(SimpleNamespace(state=SimpleNamespace()))
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "Not signed in"
+
+
 def test_auth_off_paths_unchanged(tmp_path, monkeypatch):
     monkeypatch.delenv("HELIX_AUTH", raising=False)
     monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
