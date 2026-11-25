@@ -166,26 +166,66 @@ taken from a one-off `python:3.11-alpine` container instead (nothing is writing 
 
 ### Restoring a backup
 
-The archive holds the snapshot as `helix.snapshot.db`; restoring renames it to `helix.db`. Stop
-`api` first, so nothing has `helix.db` open, and remove any stale `helix.db-wal` and
-`helix.db-shm`, which would otherwise be mixed with the restored file. From the repo root:
+The archive holds the database as `helix.snapshot.db`. The restore below checks the archive
+first and changes nothing if it is unusable (wrong date or `BACKUP_DIR`, corrupt archive, no
+snapshot, failed integrity check). Only then does it move the current `helix.db`,
+`helix.db-wal` and `helix.db-shm` aside (renamed to `helix.db.pre-restore`,
+`helix.db.pre-restore-wal`, `helix.db.pre-restore-shm`, not deleted), put the snapshot in as
+`helix.db`, and copy the sessions over. From the repo root, with your own `BACKUP_DIR` in place
+of `/var/backups/helix` and the archive's date for `<date>`:
 
 ```
 docker compose -f deploy/hosted/docker-compose.yml --env-file deploy/hosted/.env stop api
 
-docker run --rm -v helix_sessions:/data -v /var/backups/helix:/backup:ro alpine:3.20 sh -c \
-  "cd /data && rm -f helix.db helix.db-wal helix.db-shm \
-   && tar xzf /backup/sessions-<date>.tgz && mv -f helix.snapshot.db helix.db"
-
-docker compose -f deploy/hosted/docker-compose.yml --env-file deploy/hosted/.env start api
-
-docker compose -f deploy/hosted/docker-compose.yml --env-file deploy/hosted/.env \
-  exec -T api python -c "import sqlite3; print(sqlite3.connect('/app/sessions/helix.db').execute('PRAGMA integrity_check').fetchall())"
+docker run --rm -i -e ARCHIVE=sessions-<date>.tgz \
+  -v helix_sessions:/data -v /var/backups/helix:/backup:ro python:3.11-alpine sh -s <<'EOF'
+set -eu
+cd /data
+fail() { echo "restore: $1; nothing was changed" >&2; exit 1; }
+work=$(mktemp -d)
+[ -f "/backup/$ARCHIVE" ] || fail "/backup/$ARCHIVE not found"
+tar xzf "/backup/$ARCHIVE" -C "$work" || fail "cannot extract $ARCHIVE"
+[ -f "$work/helix.snapshot.db" ] || fail "$ARCHIVE has no helix.snapshot.db (made by an older backup.sh?)"
+python3 -c "import sqlite3, sys; r = sqlite3.connect('file:' + sys.argv[1] + '?mode=ro', uri=True).execute('PRAGMA integrity_check').fetchall(); sys.exit(r != [('ok',)])" \
+  "$work/helix.snapshot.db" || fail "the snapshot in $ARCHIVE failed its integrity check"
+for f in helix.db helix.db-wal helix.db-shm; do
+  if [ -e "$f" ]; then mv -f "$f" "helix.db.pre-restore${f#helix.db}"; fi
+done
+mv "$work/helix.snapshot.db" helix.db
+cp -a "$work"/. .
+rm -rf "$work"
+echo "restored $ARCHIVE; the previous database is kept as helix.db.pre-restore"
+EOF
 ```
 
-Use your own `BACKUP_DIR` for `/var/backups/helix` and the archive's date for `<date>`. The last
-command should print `[('ok',)]`. Sessions in the archive overwrite the same-named folders in
-the volume; sessions that are not in the archive are left alone.
+If it prints a `restore:` message, nothing changed: fix the date or directory and run it
+again. Now check the restored database **before** starting `api` (a missing `helix.db` would
+otherwise be silently replaced by a new empty one, which would also pass an integrity check).
+This opens the file read-only, so it fails instead of creating a file if `helix.db` is missing:
+
+```
+docker run --rm -v helix_sessions:/data python:3.11-alpine python -c "import sqlite3; c = sqlite3.connect('file:/data/helix.db?mode=ro', uri=True); q = lambda s: c.execute(s).fetchall(); print(q('PRAGMA integrity_check'), 'users', q('SELECT count(*) FROM users')[0][0], 'decisions', q('SELECT count(*) FROM decisions')[0][0])"
+```
+
+Expect `[('ok',)]`, a non-zero number of users, and as many decisions as you had when the
+backup was taken. If both counts are zero, or the command fails, something went wrong: put the
+old database back (inside the volume: `helix.db.pre-restore` to `helix.db`, and the `-wal` and
+`-shm` files likewise) before starting `api`. When the numbers are right, start `api`:
+
+```
+docker compose -f deploy/hosted/docker-compose.yml --env-file deploy/hosted/.env start api
+```
+
+The `*.pre-restore*` files stay in the volume (and in later backups) until you delete them;
+remove them once you are satisfied with the restore. Sessions in the archive overwrite the
+same-named folders in the volume; sessions that are not in the archive are left alone.
+
+Archives made by the older `backup.sh` have no `helix.snapshot.db`, so the restore above stops
+with a message instead of proceeding. For such an archive, extract it into a scratch folder by
+hand and copy the `helix.db` (and any `helix.db-wal` / `helix.db-shm`) found there into the
+volume after moving the current ones aside. That copy is consistent only if `api` was stopped
+when the archive was made; otherwise it may be torn, so check it with the read-only command
+above.
 
 ## Smoke checklist (after the first deploy)
 
