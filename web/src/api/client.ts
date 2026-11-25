@@ -1,22 +1,53 @@
-import type { Candidate, DocumentMentions, FeedbackOptions, GraphConnection, GraphData, KBConfig, LLMRerank, PanelName, ParsedFile, Progress, Reflection, RowData, SessionConfig } from '@/types'
+import type { AppInfo, Candidate, DocumentMentions, FeedbackOptions, GraphConnection, GraphData, KBConfig, LLMRerank, PanelName, ParsedFile, Progress, Reflection, RowData, SessionConfig, User } from '@/types'
 
 const BASE = '/api'
+
+/** A failed API call; `status` lets callers tell a 401/403 from other failures. */
+export class ApiError extends Error {
+  readonly status: number
+  constructor(status: number, message: string) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
+let unauthorizedHandler: (() => void) | null = null
+
+/** Register what happens when any call (other than sign-in itself) comes back 401. */
+export const onUnauthorized = (handler: (() => void) | null) => {
+  unauthorizedHandler = handler
+}
 
 async function req<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, options)
   if (!res.ok) {
+    if (res.status === 401 && path !== '/auth/session') unauthorizedHandler?.()
     const body = await res.json().catch(() => ({}))
-    throw new Error(body.detail ?? body.error ?? `HTTP ${res.status}`)
+    throw new ApiError(res.status, body.detail ?? body.error ?? `HTTP ${res.status}`)
   }
   return res.json()
 }
+
+// ── auth ────────────────────────────────────────────────────────────────────
+
+export const sessionLogin = (idToken: string) =>
+  req<User>('/auth/session', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id_token: idToken }),
+  })
+
+export const logout = () => req<{ ok: boolean }>('/auth/logout', { method: 'POST' })
+
+export const me = () => req<User>('/auth/me')
 
 // ── sessions ────────────────────────────────────────────────────────────────
 
 export const getSessions = () =>
   req<{ sessions: string[] }>('/sessions').then(r => r.sessions)
 
-export const getInfo = () => req<{ hosted: boolean }>('/info')
+export const getInfo = () => req<AppInfo>('/info')
 
 export const uploadContext = (sessionName: string, file: File) => {
   const fd = new FormData()

@@ -7,6 +7,7 @@ import {
 } from 'lucide-react'
 import { Sparkles } from 'lucide-react'
 import * as api from '@/api/client'
+import { useAuth } from '@/hooks/useAuth'
 import { CandidateCard } from '@/components/CandidateCard'
 import { CountdownTimer } from '@/components/CountdownTimer'
 import { FloatingGraphPanel } from '@/components/FloatingGraphPanel'
@@ -44,6 +45,7 @@ export function Annotate() {
   const { sessionName } = useParams<{ sessionName: string }>()
   const navigate = useNavigate()
   const qc = useQueryClient()
+  const { auth, user } = useAuth()
 
   // ── session config ─────────────────────────────────────────────────────
   const { data: cfg, isLoading: cfgLoading } = useQuery({
@@ -553,7 +555,7 @@ export function Annotate() {
                     {acceptedByAI} accepted by AI
                   </span>
                   <span className="text-xs text-gray-400 bg-gray-100 rounded px-2 py-0.5">
-                    {cfg!.annotator}
+                    {auth && user ? user.name : cfg!.annotator}
                   </span>
                 </>
               ) : (
@@ -563,7 +565,7 @@ export function Annotate() {
                   </span>
                   <span className="text-sm text-gray-500">{pctLabel}</span>
                   <span className="text-xs text-gray-400 bg-gray-100 rounded px-2 py-0.5">
-                    {cfg!.annotator}
+                    {auth && user ? user.name : cfg!.annotator}
                   </span>
                 </>
               )}

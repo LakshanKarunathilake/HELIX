@@ -3,9 +3,11 @@ import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { PenLine, Settings, ArrowRight, PlusCircle, Loader2, Download, ChevronDown, CheckCircle2 } from 'lucide-react'
 import * as api from '@/api/client'
+import { useAuth } from '@/hooks/useAuth'
 
 export function Home() {
   const navigate = useNavigate()
+  const { isAdmin } = useAuth()
   const { data: sessions, isLoading, error } = useQuery({
     queryKey: ['sessions'],
     queryFn: api.getSessions,
@@ -30,10 +32,12 @@ export function Home() {
       {/* actions */}
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-lg font-semibold text-gray-800">Sessions</h2>
-        <button className="btn-primary" onClick={() => navigate('/configure')}>
-          <PlusCircle className="w-4 h-4" />
-          New session
-        </button>
+        {isAdmin && (
+          <button className="btn-primary" onClick={() => navigate('/configure')}>
+            <PlusCircle className="w-4 h-4" />
+            New session
+          </button>
+        )}
       </div>
 
       {/* list */}
@@ -51,16 +55,20 @@ export function Home() {
       {sessions && sessions.length === 0 && (
         <div className="card p-12 flex flex-col items-center gap-4 text-center">
           <PenLine className="w-10 h-10 text-gray-300" />
-          <p className="text-gray-500">No sessions yet. Create one to get started.</p>
-          <button className="btn-primary" onClick={() => navigate('/configure')}>
-            <PlusCircle className="w-4 h-4" /> New session
-          </button>
+          <p className="text-gray-500">
+            {isAdmin ? 'No sessions yet. Create one to get started.' : 'No sessions yet. An admin will add you to one.'}
+          </p>
+          {isAdmin && (
+            <button className="btn-primary" onClick={() => navigate('/configure')}>
+              <PlusCircle className="w-4 h-4" /> New session
+            </button>
+          )}
         </div>
       )}
       {sessions && sessions.length > 0 && (
         <div className="grid gap-3">
           {sessions.map(name => (
-            <SessionCard key={name} name={name} />
+            <SessionCard key={name} name={name} canConfigure={isAdmin} />
           ))}
         </div>
       )}
@@ -68,7 +76,7 @@ export function Home() {
   )
 }
 
-function SessionCard({ name }: { name: string }) {
+function SessionCard({ name, canConfigure }: { name: string; canConfigure: boolean }) {
   const navigate = useNavigate()
   const { data: progress } = useQuery({
     queryKey: ['progress', name],
@@ -110,13 +118,15 @@ function SessionCard({ name }: { name: string }) {
       </div>
       <div className="flex items-center gap-2 flex-shrink-0">
         <ExportMenu name={name} />
-        <button
-          className="btn-secondary"
-          onClick={() => navigate(`/configure/${name}`)}
-          title="Edit configuration"
-        >
-          <Settings className="w-4 h-4" />
-        </button>
+        {canConfigure && (
+          <button
+            className="btn-secondary"
+            onClick={() => navigate(`/configure/${name}`)}
+            title="Edit configuration"
+          >
+            <Settings className="w-4 h-4" />
+          </button>
+        )}
         <button
           className="btn-primary"
           onClick={() => navigate(`/annotate/${name}`)}

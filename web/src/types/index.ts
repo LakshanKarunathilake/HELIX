@@ -283,3 +283,26 @@ export const DEFAULT_KB: KBConfig = {
   enable_dense: true,
   enable_lexical: false,
 }
+
+// ── auth ──────────────────────────────────────────────────────────────────────
+
+export type Role = 'admin' | 'reviewer' | 'annotator'
+
+export interface User {
+  id: string
+  email: string
+  name: string
+  role: Role
+}
+
+export interface FirebaseWebConfig {
+  apiKey: string
+  authDomain: string
+  projectId: string
+}
+
+export interface AppInfo {
+  hosted: boolean
+  auth: boolean
+  firebase: FirebaseWebConfig | null
+}
