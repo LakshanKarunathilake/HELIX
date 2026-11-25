@@ -10,6 +10,7 @@ import glob
 import io
 import json
 import logging
+import os
 import re
 import shutil
 import sys
@@ -36,7 +37,9 @@ from eltool.config import SLUG_RE, GraphConnection, KBConfig, SessionConfig
 from eltool import feedback as fb
 from eltool.provenance import classify_method
 from eltool.review import review_payload
-from eltool.hosting import check_neo4j_uri, check_outbound_url, cors_origins, hosted_mode
+from eltool.hosting import auth_enabled, check_neo4j_uri, check_outbound_url, cors_origins, hosted_mode
+from eltool.auth import auth_gate
+from api import auth_routes
 from eltool.context_upload import ContextUploadError, extract_context_zip
 from eltool.graph_client import GraphError, Neo4jGraphClient, load_neo4j_settings
 from eltool.graph_pool import GraphClientPool, resolve_graph_client
@@ -60,6 +63,9 @@ from eltool.store import (
 _WRITE_LOCK = threading.Lock()
 
 app = FastAPI(title="ELTool API", version="1.0")
+# Registered before CORS so CORS is the outer layer: a 401 from the gate still
+# carries CORS headers, and preflight requests never reach the gate.
+app.middleware("http")(auth_gate)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins(),
@@ -73,9 +79,24 @@ _TMP.mkdir(exist_ok=True)
 MAX_CONTEXT_UPLOAD = 50 * 1024 * 1024
 
 
+app.include_router(auth_routes.router)
+
+
+def _firebase_web_config() -> dict | None:
+    """The public web-SDK config the login page needs (identifiers, not secrets)."""
+    if not auth_enabled():
+        return None
+    cfg = {
+        "apiKey": os.environ.get("HELIX_FIREBASE_API_KEY", ""),
+        "authDomain": os.environ.get("HELIX_FIREBASE_AUTH_DOMAIN", ""),
+        "projectId": os.environ.get("HELIX_FIREBASE_PROJECT_ID", ""),
+    }
+    return cfg if all(cfg.values()) else None
+
+
 @app.get("/api/info")
 def get_info():
-    return {"hosted": hosted_mode()}
+    return {"hosted": hosted_mode(), "auth": auth_enabled(), "firebase": _firebase_web_config()}
 
 
 def _require_session_name(name: str) -> str:

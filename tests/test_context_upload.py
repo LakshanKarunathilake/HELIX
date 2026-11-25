@@ -211,9 +211,9 @@ def test_local_allows_server_folder(client, tmp_path):
 
 def test_info_endpoint(client, monkeypatch):
     monkeypatch.delenv("HELIX_HOSTED", raising=False)
-    assert client.get("/api/info").json() == {"hosted": False}
+    assert client.get("/api/info").json()["hosted"] is False
     monkeypatch.setenv("HELIX_HOSTED", "1")
-    assert client.get("/api/info").json() == {"hosted": True}
+    assert client.get("/api/info").json()["hosted"] is True
 
 
 # ── fix round 1 ──────────────────────────────────────────────────────────────

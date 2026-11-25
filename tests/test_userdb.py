@@ -77,8 +77,37 @@ def test_set_role_active_and_touch_login(auth_env):
     assert got.role == "reviewer" and got.active is False
     with pytest.raises(ValueError):
         userdb.set_role(u.id, "nope")
-    userdb.touch_login(u.id)
     assert [x.id for x in userdb.list_users()] == [u.id]
+
+
+def test_touch_login_stamps_last_login(auth_env):
+    u = userdb.create_user("a@x.org", "Ann", "annotator")
+    conn = userdb.connect()
+    sql = "SELECT last_login_at FROM users WHERE id = ?"
+    assert conn.execute(sql, (u.id,)).fetchone()[0] is None
+    userdb.touch_login(u.id)
+    assert conn.execute(sql, (u.id,)).fetchone()[0] is not None
+    conn.close()
+
+
+def test_updates_on_a_missing_user_raise(auth_env):
+    for call in (lambda: userdb.link_uid(99, "uid"),
+                 lambda: userdb.set_role(99, "reviewer"),
+                 lambda: userdb.set_active(99, False),
+                 lambda: userdb.touch_login(99)):
+        with pytest.raises(ValueError):
+            call()
+
+
+def test_connect_on_an_existing_db_does_not_take_the_write_lock(auth_env):
+    userdb.connect().close()
+    writer = userdb.connect()
+    writer.execute("BEGIN IMMEDIATE")  # holds the write lock
+    try:
+        userdb.connect().close()  # must not block or raise "database is locked"
+    finally:
+        writer.rollback()
+        writer.close()
 
 
 def test_token_hash_is_sha256_hex():

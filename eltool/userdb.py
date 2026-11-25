@@ -7,13 +7,15 @@ tests (and operators) can point it elsewhere without re-importing.
 from __future__ import annotations
 
 import hashlib
+import secrets
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import eltool.session as session_mod
 
 ROLES = ("admin", "reviewer", "annotator")
+AUTH_SESSION_DAYS = 14
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -94,6 +96,11 @@ def _norm_email(email: str) -> str:
     return email.strip().lower()
 
 
+def _require_one(cur: sqlite3.Cursor, user_id: int) -> None:
+    if cur.rowcount != 1:
+        raise ValueError(f"No user with id {user_id}")
+
+
 def _check_role(role: str) -> None:
     if role not in ROLES:
         raise ValueError(f"Unknown role '{role}'")
@@ -107,8 +114,9 @@ def connect() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.executescript(_SCHEMA)
-    conn.execute("PRAGMA user_version=1")
+    if conn.execute("PRAGMA user_version").fetchone()[0] == 0:
+        conn.executescript(_SCHEMA)
+        conn.execute("PRAGMA user_version=1")
     return conn
 
 
@@ -167,7 +175,8 @@ def link_uid(user_id: int, uid: str) -> None:
     try:
         try:
             with conn:
-                conn.execute("UPDATE users SET firebase_uid = ? WHERE id = ?", (uid, user_id))
+                _require_one(conn.execute(
+                    "UPDATE users SET firebase_uid = ? WHERE id = ?", (uid, user_id)), user_id)
         except sqlite3.IntegrityError as e:
             raise ValueError("This sign-in is already linked to another user") from e
     finally:
@@ -187,7 +196,8 @@ def set_role(user_id: int, role: str) -> None:
     conn = connect()
     try:
         with conn:
-            conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
+            _require_one(conn.execute(
+                "UPDATE users SET role = ? WHERE id = ?", (role, user_id)), user_id)
     finally:
         conn.close()
 
@@ -196,7 +206,8 @@ def set_active(user_id: int, active: bool) -> None:
     conn = connect()
     try:
         with conn:
-            conn.execute("UPDATE users SET active = ? WHERE id = ?", (1 if active else 0, user_id))
+            _require_one(conn.execute(
+                "UPDATE users SET active = ? WHERE id = ?", (1 if active else 0, user_id)), user_id)
     finally:
         conn.close()
 
@@ -205,6 +216,51 @@ def touch_login(user_id: int) -> None:
     conn = connect()
     try:
         with conn:
-            conn.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (_now(), user_id))
+            _require_one(conn.execute(
+                "UPDATE users SET last_login_at = ? WHERE id = ?", (_now(), user_id)), user_id)
+    finally:
+        conn.close()
+
+
+def create_auth_session(user_id: int) -> str:
+    """Start a login session; returns the raw token (only its hash is stored)."""
+    token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(days=AUTH_SESSION_DAYS)
+    conn = connect()
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO auth_sessions (token_hash, user_id, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?)",
+                (token_hash(token), user_id, now.isoformat(timespec="seconds"),
+                 expires.isoformat(timespec="seconds")))
+    finally:
+        conn.close()
+    return token
+
+
+def user_for_token(token: str) -> User | None:
+    """The active user a login token belongs to; None if unknown or expired."""
+    return _one(
+        "SELECT u.* FROM auth_sessions s JOIN users u ON u.id = s.user_id "
+        "WHERE s.token_hash = ? AND s.expires_at > ? AND u.active = 1",
+        (token_hash(token), _now()))
+
+
+def delete_auth_session(token: str) -> None:
+    conn = connect()
+    try:
+        with conn:
+            conn.execute("DELETE FROM auth_sessions WHERE token_hash = ?", (token_hash(token),))
+    finally:
+        conn.close()
+
+
+def delete_user_auth_sessions(user_id: int) -> None:
+    conn = connect()
+    try:
+        with conn:
+            conn.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
     finally:
         conn.close()
