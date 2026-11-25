@@ -74,7 +74,9 @@ docker compose -f deploy/hosted/docker-compose.yml --env-file deploy/hosted/.env
 `--name` is optional (default: the part of the email before `@`). The command refuses an email
 that already has an account. The administrator row has no Google identity yet: open
 `https://<your-domain>` and sign in with Google using exactly that email address, and the
-account is linked at that first sign-in. The email must be a verified Google account.
+account is linked at that first sign-in. The email given to `create-admin` must be exactly the
+Google email the person signs in with, and a verified Google account; any other address is
+refused.
 
 ### Inviting people
 
@@ -86,7 +88,9 @@ signs in with that Google account and is created with the invited role and sessi
 page. Sessions of an existing user are edited on the Users page too.
 
 If someone loses their Google account, invite the new address and untick **Active** for the
-old account on the Users page.
+old account on the Users page. Inviting an address that already has an account does not create
+an invite: it only adds the chosen sessions to that account and leaves its role unchanged
+(roles are changed on the Users page).
 
 ### Who sees what
 
@@ -128,7 +132,10 @@ python scripts/migrate_sessions_for_hosting.py --src sessions --dest /tmp/hosted
 
 Read its warnings and act on them: KB endpoints with no mapping still point at your laptop,
 localhost graphs will not work on the server, and stored secrets should be re-entered in HELIX.
-Then copy the result to the server and load it into the volume:
+Migrated sessions have no memberships: annotators see nothing until an administrator grants
+access on the Users page. Their existing `annotated.csv` files are not shown per user in
+accounts mode (see "Limits to know about" above). Copy the result to the server and load it
+into the volume:
 
 ```
 docker compose -f deploy/hosted/docker-compose.yml --env-file deploy/hosted/.env \
@@ -148,9 +155,37 @@ Add it to cron (`crontab -e`):
 0 3 * * * BACKUP_DIR=/var/backups/helix /path/to/helix/deploy/hosted/backup.sh
 ```
 
-The database runs in WAL mode and the archive is taken while the API is up, so a night-time
-run is best; restore by extracting an archive (all `helix.db*` files together) into
-`/app/sessions` of the `api` container.
+`helix.db` is a WAL-mode SQLite database that the API writes to while it runs, so the script
+does not tar the live file. It first asks the running `api` container to write a consistent
+copy with SQLite's online backup (`helix.snapshot.db`, in the volume), runs `PRAGMA
+integrity_check` on it, and archives the snapshot in place of `helix.db`, `helix.db-wal` and
+`helix.db-shm`. If the check fails the script exits non-zero and writes no archive. The
+snapshot is removed from the volume afterwards, on failure too. It is safe to run while people
+are annotating; no particular time of night is needed. If `api` is not running the snapshot is
+taken from a one-off `python:3.11-alpine` container instead (nothing is writing then).
+
+### Restoring a backup
+
+The archive holds the snapshot as `helix.snapshot.db`; restoring renames it to `helix.db`. Stop
+`api` first, so nothing has `helix.db` open, and remove any stale `helix.db-wal` and
+`helix.db-shm`, which would otherwise be mixed with the restored file. From the repo root:
+
+```
+docker compose -f deploy/hosted/docker-compose.yml --env-file deploy/hosted/.env stop api
+
+docker run --rm -v helix_sessions:/data -v /var/backups/helix:/backup:ro alpine:3.20 sh -c \
+  "cd /data && rm -f helix.db helix.db-wal helix.db-shm \
+   && tar xzf /backup/sessions-<date>.tgz && mv -f helix.snapshot.db helix.db"
+
+docker compose -f deploy/hosted/docker-compose.yml --env-file deploy/hosted/.env start api
+
+docker compose -f deploy/hosted/docker-compose.yml --env-file deploy/hosted/.env \
+  exec -T api python -c "import sqlite3; print(sqlite3.connect('/app/sessions/helix.db').execute('PRAGMA integrity_check').fetchall())"
+```
+
+Use your own `BACKUP_DIR` for `/var/backups/helix` and the archive's date for `<date>`. The last
+command should print `[('ok',)]`. Sessions in the archive overwrite the same-named folders in
+the volume; sessions that are not in the archive are left alone.
 
 ## Smoke checklist (after the first deploy)
 
@@ -163,7 +198,8 @@ account; the rest are commands.
 2. `curl -sk https://<domain>/api/info` shows `"auth":true` and a `"firebase"` block holding your
    `apiKey`, `authDomain` and `projectId`.
 3. **Manual.** Sign in with Google as the bootstrap administrator (step 5) at
-   `https://<domain>`. The session list opens.
+   `https://<domain>`, using the exact Google email that `create-admin` was run with. The
+   session list opens.
 4. **Manual.** As that administrator, create a session from an uploaded CSV (with your KB kit
    running; saving returns to the session list without an error, which also moves the upload
    from the container's `/tmp` into the sessions volume, a different filesystem). On the
@@ -179,8 +215,9 @@ account; the rest are commands.
 7. `docker compose -f deploy/hosted/docker-compose.yml --env-file deploy/hosted/.env ps` shows no
    published port other than 80 and 443.
 8. `BACKUP_DIR=$(mktemp -d) deploy/hosted/backup.sh` writes one `sessions-<date>.tgz`, and
-   `tar tzf` on it lists `helix.db` and the `session.json` files. The directory is mode `700` and
-   no `.tmp` file is left behind.
+   `tar tzf` on it lists `helix.snapshot.db` (and no `helix.db*` files) and the `session.json`
+   files. The directory is mode `700`, no `.tmp` file is left behind, and the snapshot is gone
+   from the volume again.
 
 Stop it with `docker compose -f deploy/hosted/docker-compose.yml --env-file deploy/hosted/.env down`
 (add `-v` only if you want to delete the sessions, the accounts and the decision log).
