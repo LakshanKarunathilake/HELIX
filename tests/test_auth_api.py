@@ -26,6 +26,13 @@ def test_non_api_paths_pass_the_gate(auth_env, client):
     assert client.get("/some-page").status_code != 401
 
 
+def test_api_lookalike_prefix_is_not_gated(auth_env, client):
+    # "/apix" is not under "/api/": the gate must not treat it as protected.
+    assert client.get("/apix").status_code != 401
+    assert client.get("/apix/sessions").status_code != 401
+    assert client.get("/api/anything-else").status_code == 401
+
+
 def test_info_is_public_and_hides_secrets(auth_env, client, monkeypatch):
     monkeypatch.setenv("HELIX_FIREBASE_API_KEY", "key-1")
     monkeypatch.setenv("HELIX_FIREBASE_AUTH_DOMAIN", "x.firebaseapp.com")
@@ -106,6 +113,29 @@ def test_logout_invalidates_cookie(make_user, login_as, client):
     client.cookies.set(COOKIE_NAME, token)
     assert client.get("/api/auth/me").status_code == 401
     assert userdb.user_for_token(token) is None
+
+
+def test_logout_with_auth_off_leaves_the_db_alone(tmp_path, monkeypatch, client):
+    monkeypatch.delenv("HELIX_AUTH", raising=False)
+    monkeypatch.setattr("eltool.session.SESSIONS_DIR", tmp_path)
+    client.cookies.set(COOKIE_NAME, "stale-cookie")
+    assert client.post("/api/auth/logout").status_code == 200
+    assert not (tmp_path / "helix.db").exists()
+
+
+def test_creating_a_session_prunes_expired_ones(make_user):
+    ann = make_user("a@x.org")
+    old = userdb.create_auth_session(ann.id)
+    conn = userdb.connect()
+    with conn:
+        conn.execute("UPDATE auth_sessions SET expires_at = '2000-01-01T00:00:00+00:00'")
+    conn.close()
+    fresh = userdb.create_auth_session(ann.id)
+    conn = userdb.connect()
+    rows = [r["token_hash"] for r in conn.execute("SELECT token_hash FROM auth_sessions")]
+    conn.close()
+    assert rows == [userdb.token_hash(fresh)]
+    assert userdb.user_for_token(old) is None
 
 
 def test_delete_user_auth_sessions_signs_out_every_device(make_user):

@@ -183,6 +183,26 @@ def link_uid(user_id: int, uid: str) -> None:
         conn.close()
 
 
+def get_firebase_uid(user_id: int) -> str | None:
+    conn = connect()
+    try:
+        row = conn.execute("SELECT firebase_uid FROM users WHERE id = ?", (user_id,)).fetchone()
+        return row["firebase_uid"] if row else None
+    finally:
+        conn.close()
+
+
+def add_member(session_name: str, user_id: int) -> None:
+    conn = connect()
+    try:
+        with conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO memberships (session_name, user_id) VALUES (?, ?)",
+                (session_name, user_id))
+    finally:
+        conn.close()
+
+
 def list_users() -> list[User]:
     conn = connect()
     try:
@@ -230,6 +250,7 @@ def create_auth_session(user_id: int) -> str:
     conn = connect()
     try:
         with conn:
+            conn.execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (_now(),))
             conn.execute(
                 "INSERT INTO auth_sessions (token_hash, user_id, created_at, expires_at) "
                 "VALUES (?, ?, ?, ?)",

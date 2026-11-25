@@ -1,12 +1,50 @@
-"""Account endpoints: who am I, and sign out. (Sign-in itself is added separately.)"""
+"""Account endpoints: sign in, who am I, sign out, and the admin's invites."""
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request, Response
+import os
 
-from eltool import userdb
-from eltool.auth import COOKIE_NAME, clear_login_cookie, current_user
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from pydantic import BaseModel, Field
+
+from eltool import idtoken, invites, userdb
+from eltool.auth import COOKIE_NAME, clear_login_cookie, current_user, require_admin, set_login_cookie
+from eltool.hosting import auth_enabled
+from eltool.session import list_sessions
 
 router = APIRouter()
+
+# One message for every sign-in refusal: it must not reveal which check failed.
+_REFUSED = "This Google account is not authorised for HELIX"
+
+
+def _auth_mode_only() -> None:
+    if not auth_enabled():
+        raise HTTPException(404, "Not found")
+
+
+class SignInRequest(BaseModel):
+    id_token: str
+
+
+class InviteRequest(BaseModel):
+    email: str
+    role: str
+    session_names: list[str] = Field(default_factory=list)
+
+
+def _invite_json(inv: invites.Invite) -> dict:
+    return {"id": inv.id, "email": inv.email, "role": inv.role,
+            "session_names": inv.session_names, "status": inv.status}
+
+
+@router.post("/api/auth/session", dependencies=[Depends(_auth_mode_only)])
+def sign_in(body: SignInRequest, response: Response):
+    try:
+        user = invites.provision(idtoken.verify_id_token(body.id_token))
+    except (idtoken.IdTokenError, invites.NotAuthorised):
+        raise HTTPException(403, _REFUSED) from None
+    set_login_cookie(response, userdb.create_auth_session(user.id))
+    return {"id": user.id, "email": user.email, "name": user.name, "role": user.role}
 
 
 @router.get("/api/auth/me")
@@ -20,7 +58,43 @@ def me(request: Request):
 @router.post("/api/auth/logout")
 def logout(request: Request, response: Response):
     token = request.cookies.get(COOKIE_NAME)
-    if token:
+    if token and auth_enabled():
         userdb.delete_auth_session(token)
     clear_login_cookie(response)
+    return {"ok": True}
+
+
+@router.post("/api/admin/invites", dependencies=[Depends(_auth_mode_only)])
+def create_invite(body: InviteRequest, admin: userdb.User = Depends(require_admin)):
+    known = set(list_sessions())
+    unknown = [n for n in body.session_names if n not in known]
+    if unknown:
+        raise HTTPException(400, f"Unknown session: {', '.join(unknown)}")
+    try:
+        invite, registered = invites.create_invite(
+            body.email, body.role, body.session_names, admin.id)
+    except invites.DuplicateInvite as e:
+        raise HTTPException(409, str(e)) from None
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    return {"invite": _invite_json(invite),
+            "sign_in_url": os.environ.get("HELIX_PUBLIC_URL") or "http://localhost:5173",
+            "already_registered": registered}
+
+
+@router.get("/api/admin/invites",
+            dependencies=[Depends(_auth_mode_only), Depends(require_admin)])
+def list_invites():
+    return [_invite_json(i) for i in invites.list_invites()]
+
+
+@router.post("/api/admin/invites/{invite_id}/revoke",
+             dependencies=[Depends(_auth_mode_only), Depends(require_admin)])
+def revoke_invite(invite_id: int):
+    try:
+        invites.revoke(invite_id)
+    except LookupError:
+        raise HTTPException(404, "No such invite") from None
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from None
     return {"ok": True}
