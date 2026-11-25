@@ -1,6 +1,6 @@
 """The decision log: one append-only row per server-side write to a user's layer.
 
-Rows are only ever inserted. There is deliberately no update or delete here,
+Rows (and reviewers' adjudications) are only ever inserted. There is deliberately no update or delete here,
 so the log cannot be rewritten through this module or the API.
 """
 from __future__ import annotations
@@ -116,3 +116,39 @@ def latest_human_or_script(session_name: str) -> dict[tuple[int, int], Decision]
         if d.action != "feedback":
             latest[(d.user_id, d.row_idx)] = d      # ordered by id: later wins
     return latest
+
+
+def _adjudication(row: sqlite3.Row) -> dict:
+    return {"id": row["id"], "ts": row["ts"], "row_idx": row["row_idx"],
+            "reviewer_id": row["reviewer_id"],
+            "kb_values": json.loads(row["kb_values"] or "{}"), "note": row["note"] or ""}
+
+
+def add_adjudication(session_name: str, row_idx: int, reviewer_id: int,
+                     kb_values: dict, note: str = "") -> dict:
+    """Append a reviewer's final values for one row. Adjudications are append-only
+    like decisions: posting again for the row supersedes, never overwrites."""
+    conn = userdb.connect()
+    try:
+        with conn:
+            cur = conn.execute(
+                "INSERT INTO adjudications (ts, session_name, row_idx, reviewer_id, "
+                "kb_values, note) VALUES (?, ?, ?, ?, ?, ?)",
+                (datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                 session_name, int(row_idx), reviewer_id, json.dumps(kb_values), note))
+            row = conn.execute("SELECT * FROM adjudications WHERE id = ?",
+                               (cur.lastrowid,)).fetchone()
+        return _adjudication(row)
+    finally:
+        conn.close()
+
+
+def current_adjudications(session_name: str) -> dict[int, dict]:
+    """The latest adjudication per row of a session, keyed by row index."""
+    conn = userdb.connect()
+    try:
+        rows = conn.execute("SELECT * FROM adjudications WHERE session_name = ? ORDER BY id",
+                            (session_name,)).fetchall()
+    finally:
+        conn.close()
+    return {r["row_idx"]: _adjudication(r) for r in rows}   # ordered by id: later wins

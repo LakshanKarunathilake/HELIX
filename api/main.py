@@ -41,7 +41,7 @@ from eltool.review import review_payload
 from eltool.hosting import auth_enabled, check_neo4j_uri, check_outbound_url, cors_origins, hosted_mode
 from eltool import decisions, userdb
 from eltool.auth import auth_gate, current_user, require_admin, session_access
-from api import auth_routes
+from api import auth_routes, review_routes
 from eltool.context_upload import ContextUploadError, extract_context_zip
 from eltool.graph_client import GraphError, Neo4jGraphClient, load_neo4j_settings
 from eltool.graph_pool import GraphClientPool, resolve_graph_client
@@ -83,6 +83,7 @@ MAX_CONTEXT_UPLOAD = 50 * 1024 * 1024
 
 
 app.include_router(auth_routes.router)
+app.include_router(review_routes.router)
 
 
 def _firebase_web_config() -> dict | None:
@@ -1574,13 +1575,19 @@ def list_snapshots(name: str, user=Depends(session_access)):
 
 
 @app.get("/api/sessions/{name}/export")
-def export_csv(name: str, stage: str = "", user: int | None = None,
-               caller=Depends(session_access)):
+def export_csv(name: str, request: Request, stage: str = "", user: int | None = None,
+               final: bool = False, caller=Depends(session_access)):
     """Download the caller's output, or a per-step snapshot via ?stage=retrieval|graph.
 
-    In auth mode an admin may name another user's layer with ?user=<id>.
+    In auth mode an admin may name another user's layer with ?user=<id>, and a
+    reviewer or admin may download the reviewed set with ?final=1.
     """
     _require_session_name(name)
+    if final:
+        review_routes.reviewer_access(name, request)
+        if stage or user is not None:
+            raise HTTPException(400, "?final= cannot be combined with ?stage= or ?user=.")
+        return review_routes.final_export(name)
     layer = _export_layer(caller, user)
     if stage:
         if not _STAGE_RE.match(stage):
