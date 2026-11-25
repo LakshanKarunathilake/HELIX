@@ -142,6 +142,11 @@ def adjudicate(name: str, body: AdjudicationRequest,
             problems.append(f"unknown KB: {', '.join(unknown)}")
         raise HTTPException(400, "An adjudication must cover every KB of the session ("
                             + "; ".join(problems) + ").")
+    # A blank value would publish an empty cell as a reviewed final value.
+    blank = [kb for kb in kb_names if not body.kb_values[kb].strip()]
+    if blank:
+        raise HTTPException(400, f"Enter a value for every KB (blank: {', '.join(blank)}); "
+                            "use NIL for no match.")
     adj = decisions.add_adjudication(name, body.row_idx, reviewer.id, body.kb_values,
                                      body.note)
     return _adjudication_json(adj, {})

@@ -12,7 +12,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from eltool import decisions, idtoken, invites, userdb
-from eltool.auth import COOKIE_NAME, clear_login_cookie, current_user, require_admin, set_login_cookie
+from eltool.auth import (COOKIE_NAME, clear_login_cookie, current_user, require_admin,
+                         session_access, set_login_cookie)
 from eltool.config import SLUG_RE
 from eltool.hosting import auth_enabled
 from eltool.session import list_sessions
@@ -155,14 +156,29 @@ _DECISION_CSV_COLUMNS = [
     "revision"]
 
 
+def _decision_log_access(request: Request, session: str | None = None) -> None:
+    """Dependency (after ``_auth_mode_only``): admins read the whole log or any
+    session's; reviewers read only a session they are a member of, named with
+    ?session= (another session is a 404, like every session route; no session
+    is a 403); annotators are refused."""
+    user = current_user(request)
+    if user is not None and user.role == "admin":
+        return
+    if user is None or user.role != "reviewer":
+        raise HTTPException(403, "Administrators and reviewers only")
+    if not session:
+        raise HTTPException(403, "Reviewers must name a session (?session=<name>)")
+    session_access(session, request)
+
+
 @router.get("/api/admin/decisions",
-            dependencies=[Depends(_auth_mode_only), Depends(require_admin)])
+            dependencies=[Depends(_auth_mode_only), Depends(_decision_log_access)])
 def list_decisions(session: str | None = None, user: int | None = None):
     return [asdict(d) for d in decisions.list_decisions(session, user)]
 
 
 @router.get("/api/admin/decisions.csv",
-            dependencies=[Depends(_auth_mode_only), Depends(require_admin)])
+            dependencies=[Depends(_auth_mode_only), Depends(_decision_log_access)])
 def export_decisions(session: str | None = None):
     users = {u.id: u for u in userdb.list_users()}
     buf = io.StringIO()

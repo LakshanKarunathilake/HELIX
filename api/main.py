@@ -6,6 +6,7 @@ Run from the ELTool root:
 """
 from __future__ import annotations
 
+import csv
 import glob
 import io
 import json
@@ -56,7 +57,8 @@ from eltool.session import (
 )
 from eltool.store import (
     ANNOTATOR_COL, CONFIDENCE_COL, HINT_COL, LLM_COL, ROUTE_COL, detect_delimiter,
-    find_resume_index, init_output, load_input, next_revision, save_output, write_feedback,
+    find_resume_index, init_output, load_input, next_revision, save_output,
+    spreadsheet_safe_cell, write_feedback,
     write_row,
 )
 
@@ -134,6 +136,17 @@ def _layer_values(out_df: pd.DataFrame, idx: int, kbs) -> dict[str, str]:
     """The caller's current value for each of ``kbs`` on row ``idx`` ("" if none)."""
     return {kb: str(out_df.at[idx, kb] or "")
             if kb in out_df.columns and idx in out_df.index else "" for kb in kbs}
+
+
+def _check_annotations(annotations: dict[str, str], kb_names: list[str]) -> None:
+    """Auth mode: a save names only the session's KB columns, so it cannot write
+    another column of the layer (the annotator name, frozen provenance, ...)."""
+    if not annotations:
+        raise HTTPException(400, "No annotations given.")
+    unknown = [k for k in annotations if k not in kb_names]
+    if unknown:
+        raise HTTPException(400, f"Unknown KB: {', '.join(unknown)} "
+                            f"(this session's KBs: {', '.join(kb_names)}).")
 
 
 def _row_states(out_df: pd.DataFrame, idx: int, kb_names: list[str],
@@ -652,6 +665,9 @@ def save_rows_batch(name: str, req: BatchAnnotateRequest, user=Depends(session_a
     who = _who(cfg, user)
     n = len(df)
     kb_names = [k.name for k in cfg.kbs]
+    if user is not None:               # auth mode: the whole batch is checked first
+        for u in req.updates:
+            _check_annotations(u.annotations, kb_names)
     with _WRITE_LOCK, metrics.timer("write.batch", name, rows=len(req.updates)), \
             _decision_log(user) as tx:
         out_df = init_output(out_path, df, kb_names, who)
@@ -747,6 +763,8 @@ def _provenance_for(cfg, req: AnnotateRequest) -> dict[str, str] | None:
 def save_row(name: str, idx: int, req: AnnotateRequest, user=Depends(session_access)):
     cfg = _load_cfg(name)
     df, _ = load_input(Path(cfg.input_path), cfg.delimiter)
+    if user is not None:
+        _check_annotations(req.annotations, [k.name for k in cfg.kbs])
     out_path = _out(name, user)
     who = _who(cfg, user)
     provenance = _provenance_for(cfg, req)
@@ -1563,14 +1581,14 @@ def metrics_export(name: str):
 
 # ── export & per-step snapshots ───────────────────────────────────────────────
 
-_STAGE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_STAGE_RE = re.compile(r"[A-Za-z0-9_-]+")   # always used with fullmatch
 
 
 @app.post("/api/sessions/{name}/snapshot")
 def snapshot_stage(name: str, stage: str, user=Depends(session_access)):
     """Copy the caller's current output to a per-step snapshot (e.g. 'retrieval', 'graph')."""
     _load_cfg(name)
-    if not _STAGE_RE.match(stage):
+    if not _STAGE_RE.fullmatch(stage):
         raise HTTPException(400, "Invalid stage name.")
     src = _out(name, user)
     if not src.exists():
@@ -1594,26 +1612,37 @@ def list_snapshots(name: str, user=Depends(session_access)):
     # parses unambiguously and a legacy annotated.<stage>.csv never matches.
     suffix = f".{user.id}.csv"
     stages = [p.name[len("annotated."):-len(suffix)] for p in d.glob(f"annotated.*{suffix}")]
-    return {"stages": sorted(s for s in stages if _STAGE_RE.match(s))}
+    return {"stages": sorted(s for s in stages if _STAGE_RE.fullmatch(s))}
 
 
 @app.get("/api/sessions/{name}/export")
 def export_csv(name: str, request: Request, stage: str = "", user: int | None = None,
-               final: bool = False, caller=Depends(session_access)):
+               final: bool = False, legacy: bool = False, caller=Depends(session_access)):
     """Download the caller's output, or a per-step snapshot via ?stage=retrieval|graph.
 
-    In auth mode an admin may name another user's layer with ?user=<id>, and a
-    reviewer or admin may download the reviewed set with ?final=1.
+    In auth mode an admin may name another user's layer with ?user=<id>, a
+    reviewer or admin may download the reviewed set with ?final=1, and an admin
+    may download the session's pre-accounts ``annotated.csv`` as-is with ?legacy=1.
+    In auth mode a layer's cells are spreadsheet-guarded (they come from users).
     """
     _require_session_name(name)
     if final:
         review_routes.reviewer_access(name, request)
-        if stage or user is not None:
-            raise HTTPException(400, "?final= cannot be combined with ?stage= or ?user=.")
+        if stage or user is not None or legacy:
+            raise HTTPException(400, "?final= cannot be combined with ?stage=, ?user= or "
+                                "?legacy=.")
         return review_routes.final_export(name)
+    if legacy:
+        require_admin(request)
+        if stage or user is not None:
+            raise HTTPException(400, "?legacy= cannot be combined with ?stage= or ?user=.")
+        path = output_csv_path(name, None)
+        if not path.exists():
+            raise HTTPException(404, "This session has no legacy annotated.csv")
+        return _csv_download(path.read_bytes(), f"{name}_legacy_annotated.csv")
     layer = _export_layer(caller, user)
     if stage:
-        if not _STAGE_RE.match(stage):
+        if not _STAGE_RE.fullmatch(stage):
             raise HTTPException(400, "Invalid stage name.")
         path = output_snapshot_path(name, stage, layer)
         fname = f"{name}_{stage}.csv"
@@ -1622,11 +1651,27 @@ def export_csv(name: str, request: Request, stage: str = "", user: int | None = 
         fname = f"{name}_annotated.csv"
     if not path.exists():
         raise HTTPException(404, "No output file for that stage yet")
+    data = _spreadsheet_safe_csv(path) if caller is not None else path.read_bytes()
+    return _csv_download(data, fname)
+
+
+def _csv_download(data: bytes, fname: str) -> StreamingResponse:
     return StreamingResponse(
-        io.BytesIO(path.read_bytes()),
+        io.BytesIO(data),
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
+
+
+def _spreadsheet_safe_csv(path: Path) -> bytes:
+    """A layer CSV with every cell passed through ``spreadsheet_safe_cell``."""
+    with open(path, newline="", encoding="utf-8") as f:
+        rows = list(csv.reader(f))
+    buf = io.StringIO()
+    out = csv.writer(buf, lineterminator="\n")
+    for row in rows:
+        out.writerow([spreadsheet_safe_cell(c) for c in row])
+    return buf.getvalue().encode("utf-8")
 
 
 def _export_layer(caller: userdb.User | None, user_id: int | None) -> int | None:
