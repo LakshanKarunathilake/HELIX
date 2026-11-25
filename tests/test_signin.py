@@ -272,8 +272,9 @@ def test_verify_id_token_maps_claims_and_wraps_failures(monkeypatch):
     monkeypatch.setenv("HELIX_FIREBASE_PROJECT_ID", "proj-1")
     seen = {}
 
-    def fake(token, request, audience=None):
+    def fake(token, request, audience=None, **kw):
         seen["audience"] = audience
+        seen.update(kw)
         return {"sub": "u1", "email": "A@x.org", "email_verified": True, "name": "A",
                 "iss": "https://securetoken.google.com/proj-1",
                 "firebase": {"sign_in_provider": "google.com"}}
@@ -282,8 +283,9 @@ def test_verify_id_token_maps_claims_and_wraps_failures(monkeypatch):
         "uid": "u1", "email": "A@x.org", "email_verified": True, "name": "A",
         "provider": "google.com"}
     assert seen["audience"] == "proj-1"
+    assert seen["clock_skew_in_seconds"] == 10
 
-    def boom(token, request, audience=None):
+    def boom(token, request, audience=None, **kw):
         raise ValueError("Token has wrong audience")
     monkeypatch.setattr(gid, "verify_firebase_token", boom)
     with pytest.raises(idtoken.IdTokenError) as e:
@@ -298,7 +300,7 @@ def _stub_verifier(monkeypatch, **overrides):
                "iss": "https://securetoken.google.com/proj-1",
                "firebase": {"sign_in_provider": "google.com"}}
     payload.update(overrides)
-    monkeypatch.setattr(gid, "verify_firebase_token", lambda t, r, audience=None: payload)
+    monkeypatch.setattr(gid, "verify_firebase_token", lambda t, r, audience=None, **kw: payload)
 
 
 def test_email_verified_must_be_the_boolean_true(monkeypatch):
@@ -383,3 +385,65 @@ def test_pending_invite_is_applied_when_the_email_became_registered_later(
     assert members(late.id) == ["alpha"]
     assert _invite_status("late@x.org") == ["accepted"]
     assert userdb.get_user(late.id).role == "annotator"  # the invite's role is not applied
+
+
+# ---- refusals are diagnosable from the server log, without leaking anything ----
+
+def test_token_refusal_logs_a_category_without_the_token(auth_env, client, monkeypatch, caplog):
+    import google.oauth2.id_token as gid
+    monkeypatch.setenv("HELIX_FIREBASE_PROJECT_ID", "proj-1")
+
+    def boom(token, request, audience=None, **kw):
+        raise ValueError(f"Token used too early: {token}")
+    monkeypatch.setattr(gid, "verify_firebase_token", boom)
+    with caplog.at_level("WARNING", logger="api.auth_routes"):
+        r = client.post("/api/auth/session", json={"id_token": "secret-token-value"})
+    assert (r.status_code, r.json()) == (403, REFUSAL)
+    (rec,) = [x for x in caplog.records if x.name == "api.auth_routes"]
+    assert rec.levelname == "WARNING"
+    assert rec.getMessage() == "sign-in refused: token (token rejected (ValueError))"
+    assert "secret-token-value" not in caplog.text
+
+
+@pytest.mark.parametrize("case, reason", [
+    ("uninvited", "not_invited"), ("unverified", "claims"), ("inactive", "inactive"),
+    ("other_uid", "uid_mismatch")])
+def test_provisioning_refusal_logs_its_category_only(admin, sign_in, caplog, case, reason):
+    if case == "inactive":
+        u = userdb.create_user("off@x.org", "Off", "annotator")
+        userdb.set_active(u.id, False)
+        c = claims("off@x.org", uid="uid-off")
+    elif case == "other_uid":
+        u = userdb.create_user("linked@x.org", "L", "annotator")
+        assert invites.provision(claims("linked@x.org", uid="uid-a")).id == u.id
+        c = claims("linked@x.org", uid="uid-b")
+    elif case == "unverified":
+        c = claims(verified=False)
+    else:
+        c = claims("nobody@x.org", uid="uid-secret")
+    with caplog.at_level("WARNING", logger="api.auth_routes"):
+        r = sign_in(c)
+    assert (r.status_code, r.json()) == (403, REFUSAL)
+    msgs = [x.getMessage() for x in caplog.records if x.name == "api.auth_routes"]
+    assert msgs == [f"sign-in refused: {reason}"]
+    assert "@x.org" not in caplog.text and "uid-" not in caplog.text
+
+
+def test_cert_fetch_uses_a_short_timeout_and_clock_skew(monkeypatch):
+    import google.auth.transport.requests as greq
+    import google.oauth2.id_token as gid
+    monkeypatch.setenv("HELIX_FIREBASE_PROJECT_ID", "proj-1")
+    seen = {}
+
+    def parent_call(self, url, method="GET", body=None, headers=None, timeout=120, **kw):
+        seen["timeout"] = timeout
+        raise RuntimeError("no network in tests")
+    monkeypatch.setattr(greq.Request, "__call__", parent_call)
+
+    def verify(token, request, audience=None, clock_skew_in_seconds=0):
+        seen["skew"] = clock_skew_in_seconds
+        request("https://www.googleapis.com/robot/v1/metadata/x509/x")   # like fetch_certs
+    monkeypatch.setattr(gid, "verify_firebase_token", verify)
+    with pytest.raises(idtoken.IdTokenError):
+        idtoken.verify_id_token("t")
+    assert seen == {"skew": 10, "timeout": 5}

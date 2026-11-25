@@ -17,7 +17,15 @@ ALLOWED_PROVIDERS = frozenset({"google.com"})
 
 
 class NotAuthorised(Exception):
-    """A sign-in was refused. Callers must not say which check failed."""
+    """A sign-in was refused. Callers must not tell the user which check failed.
+
+    ``reason`` is a fixed category for the server log only ("claims",
+    "not_invited", "inactive", "uid_mismatch", "invite_withdrawn", "conflict");
+    it never holds an email, uid or token."""
+
+    def __init__(self, reason: str = "refused"):
+        super().__init__(reason)
+        self.reason = reason
 
 
 class DuplicateInvite(ValueError):
@@ -154,7 +162,7 @@ def provision(claims: dict) -> userdb.User:
     email = userdb._norm_email(claims.get("email") or "")
     if (not uid or not email or claims.get("email_verified") is not True
             or claims.get("provider") not in ALLOWED_PROVIDERS):
-        raise NotAuthorised()
+        raise NotAuthorised("claims")
 
     user = userdb.get_user_by_uid(uid)
     if user is None:
@@ -163,7 +171,7 @@ def provision(claims: dict) -> userdb.User:
             user = userdb.get_user_by_email(email)
             if user is not None:
                 if not user.active:
-                    raise NotAuthorised()
+                    raise NotAuthorised("inactive")
                 # A registered row without a uid (bootstrap admin) links now; one
                 # already linked to another Google identity matches no row.
                 row = _pending_for(conn, email)
@@ -172,25 +180,25 @@ def provision(claims: dict) -> userdb.User:
                         "UPDATE users SET firebase_uid = ? WHERE id = ? AND firebase_uid IS NULL",
                         (uid, user.id))
                     if cur.rowcount != 1:
-                        raise NotAuthorised()
+                        raise NotAuthorised("uid_mismatch")
                     if row is not None:
                         _apply_invite(conn, _invite(row), user.id)
             else:
                 row = _pending_for(conn, email)
                 if row is None:
-                    raise NotAuthorised()
+                    raise NotAuthorised("not_invited")
                 invite = _invite(row)
                 name = (claims.get("name") or "").strip() or email.split("@")[0]
                 with conn:
                     user_id = userdb.insert_user(conn, email, name, invite.role, uid)
                     if not _apply_invite(conn, invite, user_id):
-                        raise NotAuthorised()
+                        raise NotAuthorised("invite_withdrawn")
                 user = userdb.get_user(user_id)
         except sqlite3.IntegrityError:
-            raise NotAuthorised() from None
+            raise NotAuthorised("conflict") from None
         finally:
             conn.close()
     if not user.active:
-        raise NotAuthorised()
+        raise NotAuthorised("inactive")
     userdb.touch_login(user.id)
     return user

@@ -9,7 +9,16 @@ import os
 
 
 class IdTokenError(Exception):
-    """The token could not be verified (bad, expired, foreign project, no config)."""
+    """The token could not be verified (bad, expired, foreign project, no config).
+
+    Messages are fixed strings (at most an exception type name), never token
+    content, so they are safe to log."""
+
+
+# Tolerated clock difference between this server and Google's token issuer.
+CLOCK_SKEW_SECONDS = 10
+# Timeout for fetching Google's signing certificates (google-auth defaults to 120 s).
+CERT_FETCH_TIMEOUT = 5
 
 
 def verify_id_token(token: str) -> dict:
@@ -21,8 +30,17 @@ def verify_id_token(token: str) -> dict:
         import google.auth.transport.requests as google_requests
         import google.oauth2.id_token as google_id_token
 
+        class _ShortTimeoutRequest(google_requests.Request):
+            """A transport whose calls default to a short timeout."""
+
+            def __call__(self, url, method="GET", body=None, headers=None,
+                         timeout=CERT_FETCH_TIMEOUT, **kwargs):
+                return super().__call__(url, method=method, body=body, headers=headers,
+                                        timeout=timeout, **kwargs)
+
         payload = google_id_token.verify_firebase_token(
-            token, google_requests.Request(), audience=project)
+            token, _ShortTimeoutRequest(), audience=project,
+            clock_skew_in_seconds=CLOCK_SKEW_SECONDS)
         if not payload:
             raise IdTokenError("empty token payload")
         if payload.get("iss") != f"https://securetoken.google.com/{project}":

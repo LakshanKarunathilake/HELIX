@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 import os
 from dataclasses import asdict
 
@@ -18,6 +19,7 @@ from eltool.session import list_sessions
 from eltool.store import spreadsheet_safe_cell
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # One message for every sign-in refusal: it must not reveal which check failed.
 _REFUSED = "This Google account is not authorised for HELIX"
@@ -47,7 +49,12 @@ def _invite_json(inv: invites.Invite) -> dict:
 def sign_in(body: SignInRequest, response: Response):
     try:
         user = invites.provision(idtoken.verify_id_token(body.id_token))
-    except (idtoken.IdTokenError, invites.NotAuthorised):
+    except idtoken.IdTokenError as e:
+        # IdTokenError messages are fixed strings (no token content).
+        logger.warning("sign-in refused: token (%s)", e)
+        raise HTTPException(403, _REFUSED) from None
+    except invites.NotAuthorised as e:
+        logger.warning("sign-in refused: %s", e.reason)
         raise HTTPException(403, _REFUSED) from None
     set_login_cookie(response, userdb.create_auth_session(user.id))
     return {"id": user.id, "email": user.email, "name": user.name, "role": user.role}
