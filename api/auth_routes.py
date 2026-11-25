@@ -1,13 +1,18 @@
-"""Account endpoints: sign in, who am I, sign out, and the admin's invites."""
+"""Account endpoints: sign in, who am I, sign out, the admin's invites and the decision log."""
 from __future__ import annotations
 
+import csv
+import io
+import json
 import os
+from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from eltool import idtoken, invites, userdb
+from eltool import decisions, idtoken, invites, userdb
 from eltool.auth import COOKIE_NAME, clear_login_cookie, current_user, require_admin, set_login_cookie
+from eltool.config import SLUG_RE
 from eltool.hosting import auth_enabled
 from eltool.session import list_sessions
 
@@ -134,6 +139,37 @@ def create_invite(body: InviteRequest, admin: userdb.User = Depends(require_admi
             dependencies=[Depends(_auth_mode_only), Depends(require_admin)])
 def list_invites():
     return [_invite_json(i) for i in invites.list_invites()]
+
+
+_DECISION_CSV_COLUMNS = [
+    "id", "ts", "session_name", "row_idx", "user_id", "user_name", "user_email", "actor",
+    "action", "kb_values", "previous", "llm_used", "method", "elapsed_ms", "selected_rank",
+    "revision"]
+
+
+@router.get("/api/admin/decisions",
+            dependencies=[Depends(_auth_mode_only), Depends(require_admin)])
+def list_decisions(session: str | None = None, user: int | None = None):
+    return [asdict(d) for d in decisions.list_decisions(session, user)]
+
+
+@router.get("/api/admin/decisions.csv",
+            dependencies=[Depends(_auth_mode_only), Depends(require_admin)])
+def export_decisions(session: str | None = None):
+    users = {u.id: u for u in userdb.list_users()}
+    buf = io.StringIO()
+    out = csv.writer(buf)
+    out.writerow(_DECISION_CSV_COLUMNS)
+    for d in decisions.list_decisions(session):
+        who = users.get(d.user_id)
+        row = {**asdict(d), "kb_values": json.dumps(d.kb_values),
+               "previous": json.dumps(d.previous),
+               "user_name": who.name if who else "", "user_email": who.email if who else ""}
+        out.writerow(["" if row[c] is None else row[c] for c in _DECISION_CSV_COLUMNS])
+    fname = f"{session}_decisions.csv" if session and SLUG_RE.fullmatch(session) \
+        else "decisions.csv"
+    return Response(buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
 @router.post("/api/admin/invites/{invite_id}/revoke",

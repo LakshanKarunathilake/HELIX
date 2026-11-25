@@ -152,18 +152,26 @@ def write_row(
         df.at[row_idx, LLM_COL] = llm_used
     for kb, val in kb_values.items():
         df.at[row_idx, kb] = val
-    if provenance and REVISION_COL in df.columns:
-        first_save = not str(df.at[row_idx, "_method"] or "").strip()
-        if first_save:
-            for col, val in provenance.items():
-                if col in df.columns:   # ignore unknown keys
-                    df.at[row_idx, col] = val
-            df.at[row_idx, REVISION_COL] = "0"
-        else:
-            prior = str(df.at[row_idx, REVISION_COL] or "0").strip() or "0"
-            df.at[row_idx, REVISION_COL] = str(int(prior) + 1)
+    revision = next_revision(df, row_idx, provenance)
+    if revision == 0:                   # first save: provenance is frozen here
+        for col, val in provenance.items():
+            if col in df.columns:   # ignore unknown keys
+                df.at[row_idx, col] = val
+    if revision is not None:
+        df.at[row_idx, REVISION_COL] = str(revision)
     save_output(out_path, df)
     return df
+
+
+def next_revision(df: pd.DataFrame, row_idx: int,
+                  provenance: dict[str, str] | None) -> int | None:
+    """The ``_revisions`` value ``write_row`` stamps for this save: 0 on the
+    first save, then one more each time; None when revisions are not tracked."""
+    if not provenance or REVISION_COL not in df.columns:
+        return None
+    if not str(df.at[row_idx, "_method"] or "").strip():
+        return 0
+    return int(str(df.at[row_idx, REVISION_COL] or "0").strip() or "0") + 1
 
 
 def write_feedback(

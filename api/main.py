@@ -16,6 +16,7 @@ import shutil
 import sys
 import threading
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -38,7 +39,7 @@ from eltool import feedback as fb
 from eltool.provenance import classify_method
 from eltool.review import review_payload
 from eltool.hosting import auth_enabled, check_neo4j_uri, check_outbound_url, cors_origins, hosted_mode
-from eltool import userdb
+from eltool import decisions, userdb
 from eltool.auth import auth_gate, current_user, require_admin, session_access
 from api import auth_routes
 from eltool.context_upload import ContextUploadError, extract_context_zip
@@ -55,7 +56,8 @@ from eltool.session import (
 )
 from eltool.store import (
     ANNOTATOR_COL, CONFIDENCE_COL, HINT_COL, LLM_COL, ROUTE_COL, detect_delimiter,
-    find_resume_index, init_output, load_input, save_output, write_feedback, write_row,
+    find_resume_index, init_output, load_input, next_revision, save_output, write_feedback,
+    write_row,
 )
 
 # Output CSVs are written by full-file read-modify-write, so concurrent saves
@@ -116,6 +118,25 @@ def _out(name: str, user: userdb.User | None) -> Path:
 def _who(cfg: SessionConfig, user: userdb.User | None) -> str:
     """The name stamped in the annotator column: the signed-in user, else the session's."""
     return user.name if user else cfg.annotator
+
+
+def _decision_log(user: userdb.User | None):
+    """The decision-log transaction for a layer write (a no-op with auth off).
+
+    Used inside the ``_WRITE_LOCK`` section, with ``tx.add`` before the CSV
+    write: a failed insert stops the save, a failed save rolls back the log.
+    """
+    return decisions.transaction() if user is not None else nullcontext()
+
+
+def _layer_values(out_df: pd.DataFrame, idx: int, kbs) -> dict[str, str]:
+    """The caller's current value for each of ``kbs`` on row ``idx`` ("" if none)."""
+    return {kb: str(out_df.at[idx, kb] or "")
+            if kb in out_df.columns and idx in out_df.index else "" for kb in kbs}
+
+
+def _int_or_none(value: str | None) -> int | None:
+    return int(value) if value not in (None, "") else None
 
 
 def _check_context_folder(folder: str | None, name: str) -> None:
@@ -392,7 +413,12 @@ def delete_session(name: str):
     path = session_dir(_require_session_name(name))
     if not path.exists():
         raise HTTPException(404, "Session not found")
-    shutil.rmtree(path)
+    with _WRITE_LOCK:   # no save can log a decision between the check and the delete
+        if auth_enabled() and decisions.has_decisions(name):
+            raise HTTPException(409, "This session has logged decisions and cannot be deleted")
+        shutil.rmtree(path)
+        if auth_enabled():
+            userdb.delete_memberships_for_session(name)
     return {"ok": True}
 
 
@@ -611,11 +637,15 @@ def save_rows_batch(name: str, req: BatchAnnotateRequest, user=Depends(session_a
     out_path = _out(name, user)
     who = _who(cfg, user)
     n = len(df)
-    with _WRITE_LOCK, metrics.timer("write.batch", name, rows=len(req.updates)):
+    with _WRITE_LOCK, metrics.timer("write.batch", name, rows=len(req.updates)), \
+            _decision_log(user) as tx:
         out_df = init_output(out_path, df, [k.name for k in cfg.kbs], who)
         for u in req.updates:
             if u.idx < 0 or u.idx >= n or _ai_accepted(cfg, out_df, u.idx):
                 continue
+            if tx:
+                tx.add(name, u.idx, user.id, "auto_match", "batch", u.annotations,
+                       _layer_values(out_df, u.idx, u.annotations), llm_used=u.llm_used)
             out_df.at[u.idx, ANNOTATOR_COL] = who
             if u.llm_used is not None:
                 out_df.at[u.idx, LLM_COL] = u.llm_used
@@ -700,7 +730,7 @@ def save_row(name: str, idx: int, req: AnnotateRequest, user=Depends(session_acc
     who = _who(cfg, user)
     provenance = _provenance_for(cfg, req)
     panels = fb.format_panels(req.panels) if cfg.collect_feedback else None
-    with _WRITE_LOCK:   # atomic read-modify-write
+    with _WRITE_LOCK, _decision_log(user) as tx:   # atomic read-modify-write
         out_df = init_output(out_path, df, [k.name for k in cfg.kbs], who,
                              provenance=_records_provenance(cfg),
                              feedback=cfg.collect_feedback, llm=_records_llm(cfg))
@@ -713,6 +743,14 @@ def save_row(name: str, idx: int, req: AnnotateRequest, user=Depends(session_acc
                 if col in provenance and col in out_df.columns \
                         and str(out_df.at[idx, col] or "").strip():
                     del provenance[col]
+        if tx:
+            prov = provenance or {}
+            tx.add(name, idx, user.id, "human", "save", req.annotations,
+                   _layer_values(out_df, idx, req.annotations), llm_used=req.llm_used,
+                   method=prov.get("_method", ""),
+                   elapsed_ms=_int_or_none(prov.get("_elapsed_ms")),
+                   selected_rank=_int_or_none(prov.get("_selected_rank")),
+                   revision=next_revision(out_df, idx, provenance))
         write_row(out_path, out_df, idx, who, req.annotations,
                   llm_used=req.llm_used, provenance=provenance, panels=panels)
     return {"ok": True}
@@ -746,12 +784,14 @@ def save_feedback(name: str, idx: int, req: FeedbackRequest, user=Depends(sessio
         raise HTTPException(404, "Row index out of range")
     out_path = _out(name, user)
     kb_names = [k.name for k in cfg.kbs]
-    with _WRITE_LOCK:
+    with _WRITE_LOCK, _decision_log(user) as tx:
         out_df = init_output(out_path, df, kb_names, _who(cfg, user),
                              provenance=_records_provenance(cfg), feedback=True,
                              llm=_records_llm(cfg))
         if not all(str(out_df.at[idx, kb] or "").strip() for kb in kb_names):
             raise HTTPException(409, "Save the annotation before recording feedback.")
+        if tx:
+            tx.add(name, idx, user.id, "human", "feedback", {}, {})
         write_feedback(out_path, out_df, idx, req.hint, req.confidence)
     return {"ok": True}
 
@@ -891,7 +931,8 @@ def auto_annotate_session(name: str, skip_annotated: bool = True,
     kb_names = [k.name for k in cfg.kbs]
     out_path = _out(name, user)
     who = _who(cfg, user)
-    out_df = init_output(out_path, df, kb_names, who)
+    with _WRITE_LOCK:
+        out_df = init_output(out_path, df, kb_names, who)
 
     threshold = float(cfg.score_tie_threshold or 0.02)
     entity_type_col = cfg.entity_type_col
@@ -940,7 +981,17 @@ def auto_annotate_session(name: str, skip_annotated: bool = True,
                 new_annotations[kb_cfg.name] = best.id
 
         if new_annotations:
-            write_row(out_path, out_df, idx, who, new_annotations)
+            # KB calls above run unlocked; the write re-reads the layer under the
+            # lock so a save made meanwhile is neither clobbered nor overwritten.
+            with _WRITE_LOCK, _decision_log(user) as tx:
+                out_df = init_output(out_path, df, kb_names, who)
+                if skip_annotated:
+                    new_annotations = {kb: str(out_df.at[idx, kb] or "").strip() or val
+                                       for kb, val in new_annotations.items()}
+                if tx:
+                    tx.add(name, idx, user.id, "auto_annotate", "auto", new_annotations,
+                           _layer_values(out_df, idx, new_annotations))
+                write_row(out_path, out_df, idx, who, new_annotations)
             annotated_count += 1
 
     return {"annotated": annotated_count, "skipped": skipped_count, "total": len(df)}
@@ -1316,11 +1367,15 @@ def graph_optimize_all(name: str, skip_annotated: bool = True,
             docs_done += 1
 
         # single atomic write of everything
-        for u in updates:
-            out_df.at[u["idx"], ANNOTATOR_COL] = who
-            out_df.at[u["idx"], LLM_COL] = ""        # graph-driven, not LLM
-            out_df.at[u["idx"], kb] = u["cui"]
-        save_output(out_path, out_df)
+        with _decision_log(user) as tx:
+            for u in updates:
+                if tx:
+                    tx.add(name, u["idx"], user.id, "auto_match", "auto", {kb: u["cui"]},
+                           _layer_values(out_df, u["idx"], [kb]))
+                out_df.at[u["idx"], ANNOTATOR_COL] = who
+                out_df.at[u["idx"], LLM_COL] = ""        # graph-driven, not LLM
+                out_df.at[u["idx"], kb] = u["cui"]
+            save_output(out_path, out_df)
 
     return {
         "enabled": True,

@@ -211,6 +211,16 @@ def remove_member(session_name: str, user_id: int) -> None:
         conn.close()
 
 
+def delete_memberships_for_session(session_name: str) -> None:
+    """Forget every membership of a deleted session, so a reused name starts empty."""
+    conn = connect()
+    try:
+        with conn:
+            conn.execute("DELETE FROM memberships WHERE session_name = ?", (session_name,))
+    finally:
+        conn.close()
+
+
 def members(session_name: str) -> list[User]:
     conn = connect()
     try:
