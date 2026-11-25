@@ -233,6 +233,29 @@ def test_export_user_param_is_admin_only(world, as_user):
     assert admin.get(f"/api/sessions/s1/export?user={b.id}").status_code == 404
 
 
+def test_export_keeps_plain_numbers_but_guards_formulas(world, as_user):
+    """-1 is BC5CDR's NIL id and must survive a download untouched; real formula
+    starts are still neutralised."""
+    ca = as_user(world["alice"])
+    _save(ca, "s1", "-1", idx=0)
+    _save(ca, "s1", "=SUM(A1)", idx=1)
+    out = _read(io.StringIO(ca.get("/api/sessions/s1/export").text))
+    assert out.at[0, "UMLS"] == "-1"
+    assert out.at[1, "UMLS"] == "'=SUM(A1)"
+
+
+@pytest.mark.parametrize("value", ["-1", "+5", "-3.5", "0", "12"])
+def test_spreadsheet_safe_cell_keeps_plain_numbers(value):
+    from eltool.store import spreadsheet_safe_cell
+    assert spreadsheet_safe_cell(value) == value
+
+
+@pytest.mark.parametrize("value", ["-1+1", "+1+cmd", "=1", "@x", "-", "-a", "-1.2.3"])
+def test_spreadsheet_safe_cell_guards_non_numbers(value):
+    from eltool.store import spreadsheet_safe_cell
+    assert spreadsheet_safe_cell(value) == "'" + value
+
+
 def test_save_row_stamps_user_name_in_annotator_column(world, as_user):
     a = world["alice"]
     ca = as_user(a)

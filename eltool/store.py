@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -43,14 +44,18 @@ REVIEW_COLS = [ROUTE_COL, "_llm_id", "_llm_level", "_llm_confidence", "_llm_labe
 
 
 _FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+# A signed plain number ("-1", the BC5CDR NIL id) is data, not a formula.
+_PLAIN_NUMBER = re.compile(r"[+-]?\d+(\.\d+)?")
 
 
 def spreadsheet_safe_cell(value):
     """A CSV cell a spreadsheet will not run as a formula: strings that start
-    like one get a leading ' (they can come from users). Numbers are kept."""
+    like one get a leading ' (they can come from users). Numbers, including
+    signed numeric strings such as "-1", are kept."""
     if value is None:
         return ""
-    if isinstance(value, str) and value.startswith(_FORMULA_START):
+    if (isinstance(value, str) and value.startswith(_FORMULA_START)
+            and not _PLAIN_NUMBER.fullmatch(value)):
         return "'" + value
     return value
 
