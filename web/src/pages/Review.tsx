@@ -66,21 +66,27 @@ export function Review() {
     enabled: !!sessionName,
   })
 
-  // Success or failure, show what the server holds now.
-  const refresh = () => Promise.all([
-    qc.invalidateQueries({ queryKey: ['review', sessionName] }),
-    qc.invalidateQueries({ queryKey: ['agreement', sessionName] }),
-    qc.invalidateQueries({ queryKey: ['review-summary', sessionName] }),
-  ])
+  // Success or failure, show what the server holds now. Agreement covers annotators'
+  // answers only, which a decision cannot change, and is slow on large sessions: it is
+  // refetched only when a refusal shows the answers may have moved, and never waited for.
+  const refresh = (answersMayHaveChanged: boolean) => {
+    if (answersMayHaveChanged) {
+      void qc.invalidateQueries({ queryKey: ['agreement', sessionName] })
+    }
+    return Promise.all([
+      qc.invalidateQueries({ queryKey: ['review', sessionName] }),
+      qc.invalidateQueries({ queryKey: ['review-summary', sessionName] }),
+    ])
+  }
   const save = useMutation({
     mutationFn: (v: { row_idx: number; kb_values: Record<string, string>; note: string; version: string }) =>
       api.postAdjudication(sessionName, v),
-    onSettled: refresh,
+    onSettled: (_data, error) => refresh(error instanceof api.ApiError && error.status === 409),
   })
   const bulk = useMutation({
     mutationFn: (rows: { row_idx: number; version: string }[]) =>
       api.postBulkAdjudications(sessionName, rows),
-    onSettled: refresh,
+    onSettled: result => refresh(!!result?.skipped.length),
   })
 
   const data = review.data

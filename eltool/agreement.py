@@ -4,6 +4,7 @@ Pure functions over human decisions only; no database or web imports.
 """
 from __future__ import annotations
 
+from collections import Counter
 from itertools import combinations
 
 from eltool.answers import join_ids, parse_ids
@@ -15,7 +16,8 @@ def _cohen_kappa(a: list[str], b: list[str]) -> float | None:
     if n < 2:
         return None
     p_o = sum(x == y for x, y in zip(a, b)) / n
-    p_e = sum((a.count(c) / n) * (b.count(c) / n) for c in set(a) | set(b))
+    count_a, count_b = Counter(a), Counter(b)
+    p_e = sum((count_a[c] / n) * (count_b[c] / n) for c in count_a.keys() | count_b.keys())
     if p_e == 1:
         return None
     return (p_o - p_e) / (1 - p_e)
