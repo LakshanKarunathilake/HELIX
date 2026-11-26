@@ -335,21 +335,37 @@ export interface AppInfo {
 
 // ── review (reviewer / admin) ─────────────────────────────────────────────────
 
-export interface ReviewDecision {
+/** A listed row's status; rows nobody has answered (`waiting`) are only counted. */
+export type ReviewStatus = 'disagree' | 'single' | 'agreed' | 'changed' | 'decided'
+
+/** How a decision was reached; the server derives it. `legacy`: saved before bases existed. */
+export type Basis = 'accepted' | 'combined' | 'override' | 'bulk_agreed' | 'legacy'
+
+/** One annotator's latest human answer, as sorted concept ids per KB. */
+export interface ReviewAnswer {
   user_id: number
   user_name: string
-  actor: string
-  /** True when a script, not the person, wrote the decision. */
-  script: boolean
-  kb_values: Record<string, string>
-  llm_used: string | null
+  kb_ids: Record<string, string[]>
+  /** Every KB has at least one id. */
+  complete: boolean
   ts: string
+}
+
+/** A concept some annotator proposed for one KB. */
+export interface ReviewOption {
+  id: string
+  user_ids: number[]
+  /** Two or more answered and every one of them chose it. */
+  preticked: boolean
 }
 
 export interface Adjudication {
   row_idx: number
   kb_values: Record<string, string>
+  kb_ids: Record<string, string[]>
   note: string
+  basis: Basis
+  source_users: number[]
   reviewer_id: number
   reviewer_name: string
   ts: string
@@ -358,15 +374,52 @@ export interface Adjudication {
 export interface ReviewRow {
   idx: number
   label: string
-  decisions: ReviewDecision[]
-  /** Two or more humans chose different values. */
-  disagree: boolean
-  adjudication: Adjudication | null
+  doc_id: string
+  status: ReviewStatus
+  /** Send back with a decision; changes when an answer or the decision changes. */
+  version: string
+  /** Current annotators without a complete answer. */
+  pending: number
+  bulk_eligible: boolean
+  answers: ReviewAnswer[]
+  options: Record<string, ReviewOption[]>
+  decision: Adjudication | null
+}
+
+export interface ReviewCounts {
+  to_decide: number
+  agreed: number
+  decided: number
+  waiting: number
 }
 
 export interface ReviewData {
   kb_names: string[]
+  total: number
+  has_context: boolean
+  counts: ReviewCounts
   rows: ReviewRow[]
+}
+
+export interface ReviewSummary extends ReviewCounts {
+  total: number
+}
+
+/** What the reviewer reads to judge one row. */
+export interface ReviewRowContext {
+  idx: number
+  label: string
+  doc_id: string
+  info: Record<string, unknown>
+  context_text: string | null
+  entity_span: string | null
+}
+
+export type BulkSkipReason = 'out_of_range' | 'changed' | 'not_agreed' | 'pending'
+
+export interface BulkResult {
+  confirmed: number[]
+  skipped: { row_idx: number; reason: BulkSkipReason }[]
 }
 
 export interface PairAgreement {
@@ -375,6 +428,8 @@ export interface PairAgreement {
   n: number
   percent: number | null
   kappa: number | null
+  /** Mean Jaccard overlap of the concept sets, 0-100. */
+  overlap: number | null
 }
 
 export interface AgreementData {

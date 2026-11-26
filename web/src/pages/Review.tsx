@@ -1,287 +1,51 @@
-import { memo, useCallback, useId, useMemo, useState } from 'react'
-import type { FormEvent } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Download, Gavel, Loader2 } from 'lucide-react'
+import { ArrowLeft, ChevronLeft, ChevronRight, Download, Loader2 } from 'lucide-react'
 import * as api from '@/api/client'
-import type { AgreementData, ReviewDecision, ReviewRow } from '@/types'
+import { AgreementPanel } from '@/components/review/AgreementPanel'
+import { DecisionCard } from '@/components/review/DecisionCard'
+import { PAGE_SIZE, RowList } from '@/components/review/RowList'
+import type { BulkResult, BulkSkipReason, ReviewRow } from '@/types'
 
-type Filter = 'all' | 'disagree' | 'script' | 'needs'
+type Filter = 'to_decide' | 'agreed' | 'decided' | 'all'
 
-const FILTERS: { id: Filter; label: string }[] = [
-  { id: 'all', label: 'All' },
-  { id: 'disagree', label: 'Disagreements' },
-  { id: 'script', label: 'Script-only' },
-  { id: 'needs', label: 'Needs review' },
+const FILTERS: { id: Filter; label: string; matches: (r: ReviewRow) => boolean }[] = [
+  { id: 'to_decide', label: 'To decide',
+    matches: r => r.status === 'disagree' || r.status === 'single' || r.status === 'changed' },
+  { id: 'agreed', label: 'Agreed', matches: r => r.status === 'agreed' },
+  { id: 'decided', label: 'Decided', matches: r => r.status === 'decided' },
+  { id: 'all', label: 'All', matches: () => true },
 ]
+
+const SKIP_REASON: Record<BulkSkipReason, string> = {
+  changed: 'its answers changed after you ticked it',
+  not_agreed: 'it is no longer an agreed row waiting for review',
+  pending: 'an annotator has not finished it yet',
+  out_of_range: 'the row no longer exists',
+}
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : 'Something went wrong')
 
-/** A review row plus what the filters and the table need, computed once per fetch. */
-interface RowView {
-  row: ReviewRow
-  /** Every decision on the row was written by a script (and there is at least one). */
-  scriptOnly: boolean
-  needsReview: boolean
-  byUser: Map<number, ReviewDecision>
-  /** Inputs the adjudication form starts from. */
-  prefill: Record<string, string>
+/** The rows being stepped through: the filtered order when a row was opened, frozen
+ *  so that deciding a row (which moves it to another filter) does not reshuffle it. */
+interface OpenState {
+  queue: number[]
+  idx: number
 }
-
-/**
- * Derives the filter flags for one row.
- *
- * - Disagreements: the server's `disagree` (two or more humans chose different values).
- * - Script-only: at least one decision, and every decision has `script: true`.
- * - Needs review: no adjudication, and (`disagree`, or fewer than two non-script decisions,
- *   which includes script-only rows). Each decision is one user's latest, so the non-script
- *   count is the number of distinct humans. This matches the `_needs_review` column of the
- *   final export for every case except two humans who agree on some KBs but not others,
- *   which `disagree` already covers.
- *
- * Adjudication prefill: the current adjudication; else the agreed value (all humans match,
- * which is the first human's value); else the first human decision's value; else empty.
- * A script's value is never offered: a script-only row starts with empty inputs.
- */
-function toView(row: ReviewRow, kbNames: string[]): RowView {
-  const humans = row.decisions.filter(d => !d.script)
-  const scriptOnly = row.decisions.length > 0 && humans.length === 0
-  const source = row.adjudication?.kb_values ?? humans[0]?.kb_values ?? {}
-  return {
-    row,
-    scriptOnly,
-    needsReview: !row.adjudication && (row.disagree || humans.length < 2),
-    byUser: new Map(row.decisions.map(d => [d.user_id, d])),
-    prefill: Object.fromEntries(kbNames.map(kb => [kb, source[kb] ?? ''])),
-  }
-}
-
-const matches: Record<Filter, (v: RowView) => boolean> = {
-  all: () => true,
-  disagree: v => v.row.disagree,
-  script: v => v.scriptOnly,
-  needs: v => v.needsReview,
-}
-
-const pct = (v: number | null) => (v === null ? 'n/a' : `${v.toFixed(1)}%`)
-const kappa = (v: number | null) => (v === null ? 'n/a' : v.toFixed(2))
-
-function Loading() {
-  return (
-    <div className="flex items-center justify-center py-16 text-gray-400 gap-2 text-sm">
-      <Loader2 className="w-4 h-4 animate-spin" /> Loading…
-    </div>
-  )
-}
-
-function AgreementStrip({ agreement, kbNames, names }: {
-  agreement: { data?: AgreementData; error: unknown; isLoading: boolean }
-  kbNames: string[]
-  names: Map<number, string>
-}) {
-  const who = (id: number) => names.get(id) ?? `user ${id}`
-  return (
-    <section className="card p-5 mb-5" aria-label="Agreement">
-      <h2 className="text-sm font-semibold text-gray-800 mb-3">Agreement between annotators</h2>
-      {agreement.isLoading && <Loading />}
-      {!!agreement.error && (
-        <p className="text-sm text-red-600" role="alert">
-          Could not load agreement: {errorText(agreement.error)}
-        </p>
-      )}
-      {agreement.data && (
-        <>
-          <div className="grid gap-3 sm:grid-cols-2">
-            {kbNames.map(kb => {
-              const pairs = agreement.data?.by_kb[kb] ?? []
-              return (
-                <div key={kb}>
-                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-1">{kb}</p>
-                  {pairs.length === 0 && (
-                    <p className="text-sm text-gray-400">Needs two annotators with decisions.</p>
-                  )}
-                  <ul className="text-sm text-gray-700 space-y-0.5">
-                    {pairs.map(p => (
-                      <li key={`${p.a}-${p.b}`}>
-                        {who(p.a)} and {who(p.b)}:{' '}
-                        <span className="font-medium">{pct(p.percent)}</span> agreement,
-                        {' '}kappa <span className="font-medium">{kappa(p.kappa)}</span>
-                        <span className="text-gray-400"> (n={p.n})</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )
-            })}
-          </div>
-          <p className="text-xs text-gray-500 mt-3">
-            {agreement.data.excluded_script_rows} script-written rows excluded
-          </p>
-        </>
-      )}
-    </section>
-  )
-}
-
-function ScriptBadge() {
-  return (
-    <span className="ml-1.5 text-[10px] font-semibold uppercase tracking-wide border rounded-full px-1.5 py-0.5 bg-violet-50 text-violet-700 border-violet-200">
-      script
-    </span>
-  )
-}
-
-/** One input per KB (the server rejects partial adjudications) plus an optional note. */
-function AdjudicationForm({ kbNames, prefill, saving, onSave, onCancel }: {
-  kbNames: string[]
-  prefill: Record<string, string>
-  saving: boolean
-  onSave: (kbValues: Record<string, string>, note: string) => Promise<unknown>
-  onCancel: () => void
-}) {
-  const [values, setValues] = useState(prefill)
-  const [note, setNote] = useState('')
-  const uid = useId()
-  // The server rejects blank values: every KB needs a value, or NIL for no match.
-  const incomplete = kbNames.some(kb => !(values[kb] ?? '').trim())
-
-  const submit = (e: FormEvent) => {
-    e.preventDefault()
-    if (incomplete) return
-    // A failed save drops the typed values back to what the server holds; the row shows the error.
-    onSave(values, note.trim()).then(onCancel, () => { setValues(prefill); setNote('') })
-  }
-
-  return (
-    <form onSubmit={submit} className="grid gap-2 sm:grid-cols-2 max-w-2xl">
-      {kbNames.map(kb => (
-        <div key={kb}>
-          <label className="label !text-xs" htmlFor={`${uid}-${kb}`}>{kb}</label>
-          <input
-            id={`${uid}-${kb}`}
-            className="input"
-            value={values[kb] ?? ''}
-            disabled={saving}
-            onChange={e => setValues(prev => ({ ...prev, [kb]: e.target.value }))}
-          />
-        </div>
-      ))}
-      <div className="sm:col-span-2">
-        <label className="label !text-xs" htmlFor={`${uid}-note`}>Note (optional)</label>
-        <input
-          id={`${uid}-note`}
-          className="input"
-          value={note}
-          disabled={saving}
-          onChange={e => setNote(e.target.value)}
-        />
-      </div>
-      <div className="sm:col-span-2 flex gap-2">
-        <button
-          className="btn-primary !py-1"
-          type="submit"
-          disabled={saving || incomplete}
-          aria-describedby={incomplete ? `${uid}-hint` : undefined}
-        >
-          {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />} Save adjudication
-        </button>
-        <button className="btn-secondary !py-1" type="button" disabled={saving} onClick={onCancel}>
-          Cancel
-        </button>
-      </div>
-      {incomplete && (
-        <p id={`${uid}-hint`} className="sm:col-span-2 text-xs text-gray-500">
-          Enter a value for every KB, or NIL for no match.
-        </p>
-      )}
-    </form>
-  )
-}
-
-interface RowProps {
-  view: RowView
-  kbNames: string[]
-  userIds: number[]
-  saving: boolean
-  onSave: (idx: number, kbValues: Record<string, string>, note: string) => Promise<unknown>
-}
-
-const ReviewTableRow = memo(function ReviewTableRow({ view, kbNames, userIds, saving, onSave }: RowProps) {
-  const { row } = view
-  const [open, setOpen] = useState(false)
-  const [error, setError] = useState('')
-  const adj = row.adjudication
-  const highlight = row.disagree && !adj
-
-  const save = useCallback(
-    (kbValues: Record<string, string>, note: string) =>
-      onSave(row.idx, kbValues, note).then(
-        () => setError(''),
-        (e: unknown) => { setError(errorText(e)); throw e },
-      ),
-    [onSave, row.idx],
-  )
-
-  return (
-    <tr className={`align-top ${highlight ? 'bg-red-50' : ''}`} data-disagree={highlight || undefined}>
-      <td className="px-4 py-2 text-gray-400 tabular-nums">{row.idx + 1}</td>
-      <td className="px-3 py-2 min-w-[12rem]">
-        <p className="text-gray-900 font-medium">{row.label}</p>
-        {highlight && (
-          <span className="text-[10px] font-semibold uppercase tracking-wide text-red-700">Disagreement</span>
-        )}
-        {adj && (
-          <div className="mt-1 text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-md px-2 py-1">
-            <p className="font-semibold">Adjudicated by {adj.reviewer_name}</p>
-            {kbNames.map(kb => <p key={kb}>{kbNames.length > 1 && `${kb}: `}{adj.kb_values[kb] || '—'}</p>)}
-            {adj.note && <p className="italic">{adj.note}</p>}
-          </div>
-        )}
-      </td>
-      {userIds.map(id => {
-        const d = view.byUser.get(id)
-        return (
-          <td key={id} className="px-3 py-2 text-gray-700">
-            {d ? (
-              <>
-                {kbNames.map(kb => (
-                  <p key={kb}>
-                    {kbNames.length > 1 && <span className="text-gray-400">{kb}: </span>}
-                    {d.kb_values[kb] || '—'}
-                  </p>
-                ))}
-                {d.script && <ScriptBadge />}
-              </>
-            ) : <span className="text-gray-300">—</span>}
-          </td>
-        )
-      })}
-      <td className="px-4 py-2 min-w-[8rem]">
-        {open ? (
-          <AdjudicationForm
-            // A refetch that changes what the server holds restarts the form from that state.
-            key={JSON.stringify(view.prefill)}
-            kbNames={kbNames}
-            prefill={view.prefill}
-            saving={saving}
-            onSave={save}
-            onCancel={() => setOpen(false)}
-          />
-        ) : (
-          <button className="btn-secondary !py-1" onClick={() => { setError(''); setOpen(true) }}>
-            <Gavel className="w-3.5 h-3.5" /> {adj ? 'Re-adjudicate' : 'Adjudicate'}
-          </button>
-        )}
-        {error && <p className="text-xs text-red-600 mt-1" role="alert">{error}</p>}
-      </td>
-    </tr>
-  )
-})
 
 export function Review() {
   const { sessionName = '' } = useParams<{ sessionName: string }>()
   const qc = useQueryClient()
-  const [filter, setFilter] = useState<Filter>('all')
+  const [filter, setFilter] = useState<Filter>('to_decide')
+  const [page, setPage] = useState(0)
+  /** Row idx -> the row's version when it was ticked. */
+  const [selected, setSelected] = useState<Map<number, string>>(() => new Map())
+  const [bulkResult, setBulkResult] = useState<BulkResult | null>(null)
+  const [bulkError, setBulkError] = useState('')
+  const [open, setOpen] = useState<OpenState | null>(null)
+  /** Kept here, not in the card, so it survives the card restarting on a new version. */
+  const [saveError, setSaveError] = useState('')
 
   const review = useQuery({
     queryKey: ['review', sessionName],
@@ -294,119 +58,255 @@ export function Review() {
     enabled: !!sessionName,
   })
 
+  // Success or failure, show what the server holds now.
+  const refresh = () => Promise.all([
+    qc.invalidateQueries({ queryKey: ['review', sessionName] }),
+    qc.invalidateQueries({ queryKey: ['agreement', sessionName] }),
+    qc.invalidateQueries({ queryKey: ['review-summary', sessionName] }),
+  ])
   const save = useMutation({
-    mutationFn: (v: { row_idx: number; kb_values: Record<string, string>; note: string }) =>
+    mutationFn: (v: { row_idx: number; kb_values: Record<string, string>; note: string; version: string }) =>
       api.postAdjudication(sessionName, v),
-    // Success or failure, show what the server holds (no optimistic value is ever kept).
-    onSettled: () => Promise.all([
-      qc.invalidateQueries({ queryKey: ['review', sessionName] }),
-      qc.invalidateQueries({ queryKey: ['agreement', sessionName] }),
-    ]),
+    onSettled: refresh,
   })
-  const { mutateAsync } = save
-  const onSave = useCallback(
-    (idx: number, kbValues: Record<string, string>, note: string) =>
-      mutateAsync({ row_idx: idx, kb_values: kbValues, note }),
-    [mutateAsync],
-  )
+  const bulk = useMutation({
+    mutationFn: (rows: { row_idx: number; version: string }[]) =>
+      api.postBulkAdjudications(sessionName, rows),
+    onSettled: refresh,
+  })
 
-  const kbNames = review.data?.kb_names
-  const views = useMemo(
-    () => (review.data ? review.data.rows.map(r => toView(r, review.data.kb_names)) : []),
-    [review.data],
+  const data = review.data
+  const kbNames = data?.kb_names
+  const rowsByIdx = useMemo(() => new Map((data?.rows ?? []).map(r => [r.idx, r])), [data])
+  const names = useMemo(() => {
+    const m = new Map<number, string>()
+    for (const r of data?.rows ?? []) for (const a of r.answers) m.set(a.user_id, a.user_name)
+    return m
+  }, [data])
+  const counts = useMemo(() => Object.fromEntries(FILTERS.map(f =>
+    [f.id, (data?.rows ?? []).filter(f.matches).length])) as Record<Filter, number>, [data])
+  const shown = useMemo(
+    () => (data?.rows ?? []).filter(FILTERS.find(f => f.id === filter)!.matches),
+    [data, filter],
   )
-  // One column per user who appears in the decisions, by name.
-  const { users, names } = useMemo(() => {
-    const byId = new Map<number, string>()
-    for (const v of views) for (const d of v.row.decisions) byId.set(d.user_id, d.user_name)
-    const sorted = [...byId.entries()].sort((x, y) => x[1].localeCompare(y[1]) || x[0] - y[0])
-    return { users: sorted.map(([id]) => id), names: byId }
-  }, [views])
-  const counts = useMemo(() => {
-    const c: Record<Filter, number> = { all: 0, disagree: 0, script: 0, needs: 0 }
-    for (const v of views) for (const f of FILTERS) if (matches[f.id](v)) c[f.id] += 1
-    return c
-  }, [views])
-  const shown = useMemo(() => views.filter(matches[filter]), [views, filter])
+  // A refetch can shrink the list under the current page.
+  const pageNow = Math.min(page, Math.max(0, Math.ceil(shown.length / PAGE_SIZE) - 1))
 
-  const savingIdx = save.isPending ? save.variables?.row_idx : undefined
+  useEffect(() => { window.scrollTo(0, 0) }, [open?.idx])
+
+  const changeFilter = (f: Filter) => {
+    setFilter(f)
+    setPage(0)
+    setSelected(new Map())
+    setBulkResult(null)
+    setBulkError('')
+  }
+  const changePage = (p: number) => {
+    setPage(p)
+    setSelected(new Map())
+  }
+
+  const openRow = (idx: number) => {
+    setSaveError('')
+    setOpen({ queue: shown.map(r => r.idx), idx })
+  }
+  const step = (delta: number) => {
+    if (!open) return
+    const next = open.queue[open.queue.indexOf(open.idx) + delta]
+    if (next === undefined) return
+    setSaveError('')
+    setOpen({ ...open, idx: next })
+  }
+  const backToList = () => {
+    setSaveError('')
+    setOpen(null)
+  }
+
+  const decide = (row: ReviewRow, kbValues: Record<string, string>, note: string) => {
+    setSaveError('')
+    save.mutate(
+      { row_idx: row.idx, kb_values: kbValues, note, version: row.version },
+      {
+        // Next row of the frozen queue; after the last, back to the list.
+        onSuccess: () => setOpen(prev => {
+          if (!prev || prev.idx !== row.idx) return prev
+          const next = prev.queue[prev.queue.indexOf(row.idx) + 1]
+          return next === undefined ? null : { ...prev, idx: next }
+        }),
+        onError: e => setSaveError(errorText(e)),
+      },
+    )
+  }
+
+  const confirmSelected = () => {
+    setBulkResult(null)
+    setBulkError('')
+    bulk.mutate(
+      [...selected].map(([row_idx, version]) => ({ row_idx, version })),
+      {
+        onSuccess: result => {
+          setBulkResult(result)
+          setSelected(new Map())
+        },
+        onError: e => setBulkError(errorText(e)),
+      },
+    )
+  }
+  const toggleRow = (row: ReviewRow, ticked: boolean) => setSelected(prev => {
+    const next = new Map(prev)
+    if (ticked) next.set(row.idx, row.version)
+    else next.delete(row.idx)
+    return next
+  })
+  const selectPage = (rows: ReviewRow[], ticked: boolean) => setSelected(prev => {
+    const next = new Map(prev)
+    for (const r of rows) {
+      if (ticked) { if (!next.has(r.idx)) next.set(r.idx, r.version) }
+      else next.delete(r.idx)
+    }
+    return next
+  })
+
+  const openRowData = open ? rowsByIdx.get(open.idx) : undefined
+  const position = open ? open.queue.indexOf(open.idx) : -1
 
   return (
-    <div className="max-w-6xl mx-auto px-6 py-10">
+    <div className="max-w-5xl mx-auto px-4 sm:px-6 py-8 sm:py-10">
       <Link to="/" className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-brand-600 mb-3">
         <ArrowLeft className="w-4 h-4" /> Sessions
       </Link>
-      <div className="flex items-center justify-between gap-4 mb-6">
-        <h1 className="text-2xl font-bold text-gray-900 truncate">Review: {sessionName}</h1>
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
+        <h1 className="text-2xl font-bold text-gray-900 break-words min-w-0">Review: {sessionName}</h1>
         <a className="btn-secondary shrink-0" href={api.finalExportUrl(sessionName)}>
           <Download className="w-4 h-4" /> Export final
         </a>
       </div>
 
-      {review.isLoading && <Loading />}
+      {review.isLoading && (
+        <div className="flex items-center justify-center py-16 text-gray-400 gap-2 text-sm">
+          <Loader2 className="w-4 h-4 animate-spin" /> Loading…
+        </div>
+      )}
       {review.isError && (
-        <div className="card p-4 text-sm text-red-600" role="alert">
+        <div className="card p-4 text-sm text-red-600 mb-4" role="alert">
           Could not load the review: {errorText(review.error)}
         </div>
       )}
 
-      {kbNames && (
+      {data && kbNames && !open && (
         <>
-          <AgreementStrip agreement={agreement} kbNames={kbNames} names={names} />
+          <AgreementPanel
+            data={agreement.data}
+            error={agreement.error}
+            isLoading={agreement.isLoading}
+            kbNames={kbNames}
+            names={names}
+          />
 
-          {views.length === 0 ? (
-            <div className="card p-10 text-center text-sm text-gray-500">
-              No decisions logged for this session yet.
+          <div className="flex flex-wrap items-center gap-2 mb-3">
+            <div className="flex flex-wrap gap-2" role="group" aria-label="Filter rows">
+              {FILTERS.map(f => (
+                <button
+                  key={f.id}
+                  type="button"
+                  aria-pressed={filter === f.id}
+                  onClick={() => changeFilter(f.id)}
+                  className={`text-sm rounded-full border px-3 py-1 transition-colors ${
+                    filter === f.id
+                      ? 'bg-brand-600 border-brand-600 text-white'
+                      : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'
+                  }`}
+                >
+                  {f.label} <span className="opacity-70">{counts[f.id]}</span>
+                </button>
+              ))}
             </div>
-          ) : (
-            <>
-              <div className="flex flex-wrap gap-2 mb-3" role="group" aria-label="Filter rows">
-                {FILTERS.map(f => (
-                  <button
-                    key={f.id}
-                    aria-pressed={filter === f.id}
-                    onClick={() => setFilter(f.id)}
-                    className={`text-sm rounded-full border px-3 py-1 transition-colors ${
-                      filter === f.id
-                        ? 'bg-brand-600 border-brand-600 text-white'
-                        : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'
-                    }`}
-                  >
-                    {f.label} <span className="opacity-70">{counts[f.id]}</span>
-                  </button>
-                ))}
-              </div>
+            {data.counts.waiting > 0 && (
+              <span className="text-sm text-gray-500">
+                {data.counts.waiting} row{data.counts.waiting === 1 ? '' : 's'} waiting for annotators
+              </span>
+            )}
+          </div>
 
-              <div className="card overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead className="text-left text-xs uppercase tracking-wide text-gray-500 bg-gray-50">
-                    <tr>
-                      <th className="px-4 py-2 font-medium">#</th>
-                      <th className="px-3 py-2 font-medium">Mention</th>
-                      {users.map(id => (
-                        <th key={id} className="px-3 py-2 font-medium">{names.get(id)}</th>
-                      ))}
-                      <th className="px-4 py-2 font-medium">Adjudication</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-100">
-                    {shown.map(v => (
-                      <ReviewTableRow
-                        key={v.row.idx}
-                        view={v}
-                        kbNames={kbNames}
-                        userIds={users}
-                        saving={savingIdx === v.row.idx}
-                        onSave={onSave}
-                      />
-                    ))}
-                  </tbody>
-                </table>
-                {shown.length === 0 && (
-                  <p className="p-6 text-center text-sm text-gray-500">No rows match this filter.</p>
-                )}
-              </div>
-            </>
+          {bulkError && (
+            <p className="card p-3 mb-3 text-sm text-red-600" role="alert">{bulkError}</p>
+          )}
+          {bulkResult && (
+            <div className="card p-3 mb-3 text-sm text-gray-700" role="status">
+              <p>
+                Confirmed {bulkResult.confirmed.length} row{bulkResult.confirmed.length === 1 ? '' : 's'}.
+                {bulkResult.skipped.length > 0 && ` Skipped ${bulkResult.skipped.length}:`}
+              </p>
+              {bulkResult.skipped.length > 0 && (
+                <ul className="mt-1 list-disc pl-5 text-gray-600">
+                  {bulkResult.skipped.map(s => (
+                    <li key={s.row_idx}>Row {s.row_idx + 1}: {SKIP_REASON[s.reason] ?? s.reason}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+
+          <RowList
+            rows={shown}
+            page={pageNow}
+            onPage={changePage}
+            kbNames={kbNames}
+            session={sessionName}
+            onOpen={openRow}
+            bulk={filter === 'agreed' ? {
+              selected,
+              onToggle: toggleRow,
+              onSelectPage: selectPage,
+              onConfirm: confirmSelected,
+              busy: bulk.isPending,
+            } : undefined}
+          />
+        </>
+      )}
+
+      {data && kbNames && open && (
+        <>
+          <nav className="flex flex-wrap items-center gap-2 mb-4" aria-label="Rows in this queue">
+            <button type="button" className="btn-secondary !py-1" disabled={save.isPending} onClick={backToList}>
+              <ArrowLeft className="w-4 h-4" /> Back to list
+            </button>
+            <button
+              type="button"
+              className="btn-secondary !py-1"
+              disabled={save.isPending || position <= 0}
+              onClick={() => step(-1)}
+            >
+              <ChevronLeft className="w-4 h-4" /> Previous
+            </button>
+            <button
+              type="button"
+              className="btn-secondary !py-1"
+              disabled={save.isPending || position >= open.queue.length - 1}
+              onClick={() => step(1)}
+            >
+              Next <ChevronRight className="w-4 h-4" />
+            </button>
+            <span className="text-sm text-gray-500">{position + 1} of {open.queue.length} in this queue</span>
+          </nav>
+
+          {saveError && (
+            <p className="card p-3 mb-4 text-sm text-red-600" role="alert">{saveError}</p>
+          )}
+
+          {openRowData ? (
+            <DecisionCard
+              key={`${openRowData.idx}-${openRowData.version}`}
+              session={sessionName}
+              row={openRowData}
+              kbNames={kbNames}
+              saving={save.isPending}
+              onSave={(kbValues, note) => decide(openRowData, kbValues, note)}
+            />
+          ) : (
+            <div className="card p-6 text-sm text-gray-600">
+              Row {open.idx + 1} is no longer listed: no annotator has answered it.
+            </div>
           )}
         </>
       )}

@@ -1,4 +1,4 @@
-import type { AdminUser, Adjudication, AgreementData, AppInfo, Candidate, DocumentMentions, FeedbackOptions, GraphConnection, GraphData, Invite, InviteCreated, KBConfig, LLMRerank, PanelName, ParsedFile, Progress, Reflection, ReviewData, Role, RowData, SessionConfig, User } from '@/types'
+import type { AdminUser, Adjudication, AgreementData, BulkResult, AppInfo, Candidate, DocumentMentions, FeedbackOptions, GraphConnection, GraphData, Invite, InviteCreated, KBConfig, LLMRerank, PanelName, ParsedFile, Progress, Reflection, ReviewData, ReviewRowContext, ReviewSummary, Role, RowData, SessionConfig, User } from '@/types'
 
 const BASE = '/api'
 
@@ -72,13 +72,28 @@ const sessionPath = (name: string) => `/sessions/${encodeURIComponent(name)}`
 
 export const getReview = (name: string) => req<ReviewData>(`${sessionPath(name)}/review`)
 
+export const getReviewSummary = (name: string) =>
+  req<ReviewSummary>(`${sessionPath(name)}/review/summary`)
+
+export const getReviewRow = (name: string, idx: number) =>
+  req<ReviewRowContext>(`${sessionPath(name)}/review/rows/${idx}`)
+
 export const getAgreement = (name: string) => req<AgreementData>(`${sessionPath(name)}/agreement`)
 
-/** `kb_values` must hold exactly the session's KB names: the server rejects partial adjudications. */
+/**
+ * `kb_values` must hold exactly the session's KB names. `version` is the row's version
+ * on the screen the reviewer decided from; the server refuses (409) when it moved on.
+ */
 export const postAdjudication = (
   name: string,
-  body: { row_idx: number; kb_values: Record<string, string>; note: string },
+  body: { row_idx: number; kb_values: Record<string, string>; note: string; version: string },
 ) => req<Adjudication>(`${sessionPath(name)}/adjudications`, jsonInit('POST', body))
+
+/** Confirm the shared answer of agreed rows; the server says why it skipped any. */
+export const postBulkAdjudications = (
+  name: string,
+  rows: { row_idx: number; version: string }[],
+) => req<BulkResult>(`${sessionPath(name)}/adjudications/bulk`, jsonInit('POST', { rows }))
 
 /** Download link for the reviewed set (cookie-authenticated, so a plain link works). */
 export const finalExportUrl = (name: string) => `${BASE}${sessionPath(name)}/export?final=1`
