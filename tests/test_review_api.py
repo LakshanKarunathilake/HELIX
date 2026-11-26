@@ -562,6 +562,23 @@ def test_answer_change_marks_decided_row_changed(world, as_user):
             first["_review_reason"]) == ("", "", "", "1", "changed_since_review")
 
 
+def test_blanked_answer_leaves_a_decided_row_undecidable(world, as_user):
+    alice = as_user(world["alice"])
+    _save(alice, "C1")
+    rev = as_user(world["rev"])
+    assert _decide(rev, 0, {"UMLS": "C1"}).status_code == 200
+    _save(alice, "")                              # the only annotator blanks the answer
+    row = _row(rev, 0)
+    assert (row["status"], row["answers"]) == ("changed", [])
+    # with a note, so that only the no-answer check can refuse it
+    r = _decide(rev, 0, {"UMLS": "C1"}, note="still right", version=row["version"])
+    assert (r.status_code, r.json()["detail"]) == (409, WAITING_MSG)
+    assert _adjudication_count() == 1
+    first = _final_csv(rev)[0]
+    assert (first["UMLS"], first["_needs_review"], first["_review_reason"]) == \
+        ("", "1", "changed_since_review")
+
+
 # ── bulk confirm ─────────────────────────────────────────────────────────────
 
 def test_bulk_confirms_only_qualifying_rows(world, as_user, make_user):
