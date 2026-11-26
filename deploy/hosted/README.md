@@ -4,7 +4,9 @@ Run HELIX on one server for a team. It runs only the web app and the API, behind
 handles HTTPS. Access control is HELIX's own: invite-only accounts (admin, reviewer, annotator)
 that sign in with Google through Firebase. Session creators bring their own KB servers and
 Neo4j (see [`../kb-kit/README.md`](../kb-kit/README.md)). The design is in
-[`../../docs/superpowers/specs/2026-11-25-user-management-design.md`](../../docs/superpowers/specs/2026-11-25-user-management-design.md).
+[`../../docs/superpowers/specs/2026-11-25-user-management-design.md`](../../docs/superpowers/specs/2026-11-25-user-management-design.md);
+reviewing and the final export follow
+[`../../docs/superpowers/specs/2026-11-26-reviewer-workflow-design.md`](../../docs/superpowers/specs/2026-11-26-reviewer-workflow-design.md).
 
 The API runs a single uvicorn worker, and it must stay that way: the SQLite database and the
 in-process locks that guard writes assume one process.
@@ -96,23 +98,86 @@ an invite: it only adds the chosen sessions to that account and leaves its role 
 
 * **Annotators** see only the sessions they are members of, and only their own annotations.
   Their layer is `annotations/<user_id>.csv` in the session folder.
-* **Reviewers and admins** use the **Review** page of a session: every user's decisions per
-  row, pairwise agreement, and an adjudication box (every KB needs a value; enter `NIL` for no
-  match). Only admins create, configure and delete sessions and manage users.
+* **Reviewers** judge the annotators' work on the **Review** page (below) and cannot annotate:
+  the API refuses their annotation writes with 403 (row and batch save, feedback, reflection,
+  Auto-annotate, graph optimise, snapshot). Their session list shows how many rows are decided
+  and a **Review** button, and an annotation link opens the Review page instead. Answers a
+  person saved before becoming a reviewer still count as annotator answers.
+* **Admins** can both annotate and review; their own saved answers count in review like anyone
+  else's. Only admins create, configure and delete sessions and manage users.
 * **Decision log** (`GET /api/admin/decisions` as JSON, `GET /api/admin/decisions.csv`): an
   admin reads the whole log or any one session's with `?session=<name>`. A reviewer reads only
   a session they are a member of and must name it with `?session=<name>` (another session gives
   404, no `session=` gives 403). Annotators cannot read it.
-* **Final export** (Review page, or `GET /api/sessions/<name>/export?final=1`): a row gets a
-  value when two human annotators made the same decision in every KB column, or when a
-  reviewer adjudicated it. Every other row has blank KB columns, `_needs_review` set to `1`,
-  and `_review_reason` set to one of `disagree`, `single_annotator`, `script_only` or
-  `no_decisions`.
-* Rows written by a script (Auto-annotate, Auto-match) do not count towards agreement or the
-  final export until the annotator opens the row and saves it.
+* Rows written by a script (Auto-annotate, Auto-match) do not count towards agreement, review
+  or the final export until the annotator opens the row and saves it.
 * A session that has logged decisions or adjudications cannot be deleted. Deleting a session
   also removes its name from every invite, so a later session with the same name starts with
   no members and no history.
+
+### The Review page
+
+Admins, and reviewers who are members of the session, open it with **Review** in the session
+list. It shows agreement for each pair of people and each KB (exact-set match, Cohen's kappa
+and mean overlap), the **Export final** button, and the rows filtered by **To decide**,
+**Agreed**, **Decided** or **All**. Answers are compared as sets of concept ids, so the order
+of pipe-joined ids does not matter. Nothing is final until a reviewer or admin decides it.
+
+| Row status | Meaning | Filter |
+|---|---|---|
+| Disagree | Two or more people answered and their answers differ | To decide |
+| One annotator | Exactly one person has answered | To decide |
+| Changed | Decided, then an answer changed, appeared or disappeared | To decide |
+| Agreed | Two or more people gave the same answer; not yet confirmed | Agreed |
+| Decided | Has a current decision (it can be decided again) | Decided |
+
+Rows nobody has answered are not listed, only counted as waiting for annotators.
+
+* **Accept or combine.** Open a row, then either press **Accept** on one person's whole answer
+  (enabled only when it has a value for every KB), or tick concepts from one or more answers
+  and press **Confirm**. A concept nobody chose can be added by its id (the page warns if the
+  KB does not know it). Every KB needs a concept or `NIL`, and `NIL` is never combined with a
+  concept. Concepts start ticked only when two or more people answered and all of them chose
+  it; a decided row starts from its current decision.
+* **How a decision is recorded.** The server works this out: `accepted` (equals the whole
+  answer of one or more people), `combined` (every concept was proposed by someone for that
+  KB), `override` (anything else, including `NIL` when nobody chose it) or `bulk_agreed`. An
+  override is refused without a note.
+* **Bulk confirm.** Under **Agreed**, tick rows and press **Confirm selected**. A row has a
+  checkbox only when the shared answer has a value for every KB and every active member of the
+  session with the `annotator` role has answered every KB; otherwise it shows how many are
+  pending, or that the answer is incomplete. The server checks each row again when saving, and
+  skips and reports any that no longer qualify.
+* **Changes after a decision.** A decided row returns to **To decide** as *Changed* if an
+  annotator's answer changes, appears or disappears. A row with no annotator answer cannot be
+  decided. That includes a previously decided row whose answers have all gone: it shows as
+  *Changed* and exports blank as `changed_since_review`. A *Changed* row counts as decided
+  again if the answers return to exactly what they were at decision time. A decision sent from
+  an out-of-date screen is refused.
+* **Older decisions.** Decisions saved before this workflow are kept, shown as `legacy`, and
+  never marked changed.
+* **Added KBs.** A decision with no value for one of the session's current KBs (a KB added
+  since) does not decide the row.
+
+### Final export
+
+**Export final** on the Review page (or `GET /api/sessions/<name>/export?final=1`) downloads one
+line per input row: the input columns, one column per KB, then `_basis`, `_decided_by`,
+`_needs_review` and `_review_reason`. Only decided rows have KB values, with `_basis` (as above,
+or `legacy`) and `_decided_by` (the name of the person who decided). On every other row the KB
+columns, `_basis` and `_decided_by` are blank, `_needs_review` is `1`, and `_review_reason`
+says why:
+
+| `_review_reason` | The row |
+|---|---|
+| `disagree` | has differing answers |
+| `single_annotator` | has one person's answer |
+| `awaiting_review` | has agreeing answers that nobody has confirmed |
+| `changed_since_review` | was decided, and the answers changed afterwards |
+| `script_only` | has no answer, only script-written values |
+| `no_decisions` | has no answer |
+
+Decision notes are kept in `helix.db`; this file does not include them.
 
 ### Limits to know about
 
@@ -128,8 +193,8 @@ an invite: it only adds the chosen sessions to that account and leaves its role 
 * Countdown auto-accept saves (the Annotate page timer running out with no interaction) are
   logged as `human` decisions with method `auto_accept`, and they DO count towards agreement
   and the final export.
-* In the final export, a KB column with the same name as an input column overwrites that
-  input column.
+* In the final export, a KB column, `_basis`, `_decided_by`, `_needs_review` or
+  `_review_reason` with the same name as an input column overwrites that input column.
 * The login cookie's `Secure` attribute follows `HELIX_HOSTED`: run with `HELIX_HOSTED=1`
   behind TLS (as this compose file does), or the cookie is also sent over plain HTTP.
 * A re-created Google account (same email, new Google uid) is refused at sign-in. There is no
@@ -183,6 +248,22 @@ integrity_check` on it, and archives the snapshot in place of `helix.db`, `helix
 snapshot is removed from the volume afterwards, on failure too. It is safe to run while people
 are annotating; no particular time of night is needed. If `api` is not running the snapshot is
 taken from a one-off `python:3.11-alpine` container instead (nothing is writing then).
+
+### Before upgrading
+
+**Back up `sessions/helix.db` before you upgrade.** The first time a version with this review
+workflow opens the database, it adds three columns (`basis`, `source_users`, `based_on`) to the
+table of reviewer decisions; existing rows are kept. Run `backup.sh` before rebuilding, and
+copy the archive to another name: a later run on the same day overwrites
+`sessions-<date>.tgz`, and the script deletes `sessions-*.tgz` archives older than 14 days.
+From the repo root:
+
+```
+BACKUP_DIR=/var/backups/helix deploy/hosted/backup.sh
+cp -p /var/backups/helix/sessions-$(date +%F).tgz /var/backups/helix/pre-upgrade.tgz
+git pull
+docker compose -f deploy/hosted/docker-compose.yml --env-file deploy/hosted/.env up -d --build
+```
 
 ### Restoring a backup
 
@@ -293,7 +374,7 @@ account; the rest are commands.
    under `annotations/` in the sessions volume (check with
    `docker compose -f deploy/hosted/docker-compose.yml --env-file deploy/hosted/.env exec api ls /app/sessions/<session>/annotations`),
    named by user id, and the session's Review page (as a reviewer or administrator) shows both
-   decisions.
+   answers on that row (under **All**).
 7. `docker compose -f deploy/hosted/docker-compose.yml --env-file deploy/hosted/.env ps` shows no
    published port other than 80 and 443.
 8. `BACKUP_DIR=$(mktemp -d) deploy/hosted/backup.sh` writes one `sessions-<date>.tgz`, and

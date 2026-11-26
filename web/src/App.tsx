@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useParams } from 'react-router-dom'
 import { NavBar } from '@/components/NavBar'
 import { Home } from '@/pages/Home'
 import { Configure } from '@/pages/Configure'
@@ -11,6 +11,20 @@ import { AuthProvider, RequireAuth, RequireRole } from '@/hooks/useAuth'
 const adminOnly = (page: JSX.Element) => (
   <RequireRole roles={['admin']} fallback={<Navigate to="/" replace />}>{page}</RequireRole>
 )
+
+/** The annotation page, except for a signed-in reviewer, who cannot annotate and is
+ *  sent to the session's review instead. With auth off it is always the page. */
+function AnnotateRoute() {
+  const { sessionName = '' } = useParams<{ sessionName: string }>()
+  return (
+    <RequireRole
+      roles={['admin', 'annotator']}
+      fallback={<Navigate to={`/review/${encodeURIComponent(sessionName)}`} replace />}
+    >
+      <Annotate />
+    </RequireRole>
+  )
+}
 
 export default function App() {
   return (
@@ -26,7 +40,7 @@ export default function App() {
                 <Route path="/configure" element={adminOnly(<Configure />)} />
                 <Route path="/configure/:sessionName" element={adminOnly(<Configure />)} />
                 <Route path="/admin/users" element={adminOnly(<Users />)} />
-                <Route path="/annotate/:sessionName" element={<Annotate />} />
+                <Route path="/annotate/:sessionName" element={<AnnotateRoute />} />
                 <Route
                   path="/review/:sessionName"
                   element={

@@ -5,11 +5,13 @@ import { ClipboardCheck, PenLine, Settings, ArrowRight, PlusCircle, Loader2, Dow
 import * as api from '@/api/client'
 import { useAuth } from '@/hooks/useAuth'
 
+const reviewPath = (name: string) => `/review/${encodeURIComponent(name)}`
+
 export function Home() {
   const navigate = useNavigate()
   const { isAdmin, auth, user, loading } = useAuth()
   // Reviewing exists only with accounts: never offered when auth is off or still loading.
-  const canReview = !loading && auth && (user?.role === 'admin' || user?.role === 'reviewer')
+  const role = !loading && auth ? user?.role : undefined
   const { data: sessions, isLoading, error } = useQuery({
     queryKey: ['sessions'],
     queryFn: api.getSessions,
@@ -69,8 +71,10 @@ export function Home() {
       )}
       {sessions && sessions.length > 0 && (
         <div className="grid gap-3">
-          {sessions.map(name => (
-            <SessionCard key={name} name={name} canConfigure={isAdmin} canReview={canReview} />
+          {sessions.map(name => role === 'reviewer' ? (
+            <ReviewerCard key={name} name={name} />
+          ) : (
+            <SessionCard key={name} name={name} canConfigure={isAdmin} canReview={role === 'admin'} />
           ))}
         </div>
       )}
@@ -91,33 +95,14 @@ function SessionCard({ name, canConfigure, canReview }: {
     staleTime: 0,
   })
 
-  const pct = progress ? Math.round((progress.done / progress.total) * 100) : 0
   const complete = !!progress && progress.total > 0 && progress.done >= progress.total
 
   return (
     <div className="card p-5 flex items-center gap-4 hover:shadow-md transition-shadow">
       <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <p className="font-semibold text-gray-900 truncate">{name}</p>
-          {complete && (
-            <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">
-              <CheckCircle2 className="w-3 h-3" /> Complete
-            </span>
-          )}
-        </div>
+        <CardTitle name={name} complete={complete} />
         {progress ? (
-          <div className="mt-2">
-            <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
-              <span>{progress.done} / {progress.total} annotated</span>
-              <span>{pct}%</span>
-            </div>
-            <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-brand-500 rounded-full transition-all"
-                style={{ width: `${pct}%` }}
-              />
-            </div>
-          </div>
+          <ProgressBar done={progress.done} total={progress.total} unit="annotated" />
         ) : (
           <p className="text-xs text-gray-400 mt-1 animate-pulse">Loading progress…</p>
         )}
@@ -125,7 +110,7 @@ function SessionCard({ name, canConfigure, canReview }: {
       <div className="flex items-center gap-2 flex-shrink-0">
         <ExportMenu name={name} />
         {canReview && (
-          <Link className="btn-secondary" to={`/review/${encodeURIComponent(name)}`}>
+          <Link className="btn-secondary" to={reviewPath(name)}>
             <ClipboardCheck className="w-4 h-4" /> Review
           </Link>
         )}
@@ -144,6 +129,66 @@ function SessionCard({ name, canConfigure, canReview }: {
         >
           Annotate <ArrowRight className="w-4 h-4" />
         </button>
+      </div>
+    </div>
+  )
+}
+
+/** A reviewer's card: how many rows are decided, and the way into the review. */
+function ReviewerCard({ name }: { name: string }) {
+  const { data: summary, isError } = useQuery({
+    queryKey: ['review-summary', name],
+    queryFn: () => api.getReviewSummary(name),
+    refetchOnMount: 'always',
+    staleTime: 0,
+  })
+  const complete = !!summary && summary.total > 0 && summary.decided === summary.total
+
+  return (
+    <div className="card p-5 flex flex-wrap items-center gap-4 hover:shadow-md transition-shadow">
+      <div className="flex-1 min-w-[10rem]">
+        <CardTitle name={name} complete={complete} />
+        {summary ? (
+          <ProgressBar done={summary.decided} total={summary.total} unit="decided" />
+        ) : isError ? (
+          <p className="text-xs text-red-600 mt-1">Could not load review progress.</p>
+        ) : (
+          <p className="text-xs text-gray-400 mt-1 animate-pulse">Loading progress…</p>
+        )}
+      </div>
+      <Link className="btn-primary flex-shrink-0" to={reviewPath(name)}>
+        <ClipboardCheck className="w-4 h-4" /> Review
+      </Link>
+    </div>
+  )
+}
+
+function CardTitle({ name, complete }: { name: string; complete: boolean }) {
+  return (
+    <div className="flex items-center gap-2">
+      <p className="font-semibold text-gray-900 truncate">{name}</p>
+      {complete && (
+        <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">
+          <CheckCircle2 className="w-3 h-3" /> Complete
+        </span>
+      )}
+    </div>
+  )
+}
+
+function ProgressBar({ done, total, unit }: { done: number; total: number; unit: string }) {
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0
+  return (
+    <div className="mt-2">
+      <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+        <span>{done} / {total} {unit}</span>
+        <span>{pct}%</span>
+      </div>
+      <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+        <div
+          className="h-full bg-brand-500 rounded-full transition-all"
+          style={{ width: `${pct}%` }}
+        />
       </div>
     </div>
   )
