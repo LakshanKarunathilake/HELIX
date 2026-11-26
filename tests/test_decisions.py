@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import sqlite3
 import threading
 from types import SimpleNamespace
 
@@ -322,6 +323,68 @@ def test_transaction_rolls_back_on_exception(world):
             tx.add("s1", 0, world["alice"].id, "human", "save", {"UMLS": "A"}, {"UMLS": ""})
             raise RuntimeError("boom")
     assert decisions.list_decisions("s1") == []
+
+
+def test_adjudication_stores_basis_sources_and_based_on(world):
+    admin, alice = world["admin"], world["alice"]
+    based_on = {str(alice.id): {"UMLS": "C1|C2"}}
+    made = decisions.add_adjudication(
+        "s1", 0, admin.id, {"UMLS": "C1|C2"}, "why", basis="accepted",
+        source_users=[alice.id], based_on=based_on)
+    assert set(made) == {"id", "ts", "row_idx", "reviewer_id", "kb_values", "note",
+                         "basis", "source_users", "based_on"}
+    assert (made["row_idx"], made["reviewer_id"], made["kb_values"], made["note"]) == \
+        (0, admin.id, {"UMLS": "C1|C2"}, "why")
+    assert (made["basis"], made["source_users"], made["based_on"]) == \
+        ("accepted", [alice.id], based_on)
+    assert decisions.current_adjudications("s1") == {0: made}
+    plain = decisions.add_adjudication("s1", 1, admin.id, {"UMLS": "C3"})
+    assert (plain["basis"], plain["source_users"], plain["based_on"], plain["note"]) == \
+        ("legacy", [], None, "")
+
+
+def test_review_transaction_reads_and_writes_one_session(world):
+    admin, alice = world["admin"], world["alice"]
+    with decisions.transaction() as tx:
+        tx.add("s1", 0, alice.id, "human", "save", {"UMLS": "A"}, {"UMLS": ""})
+        tx.add("s1", 0, alice.id, "human", "feedback", {}, {})
+        tx.add("other", 0, alice.id, "human", "save", {"UMLS": "Z"}, {"UMLS": ""})
+    decisions.add_adjudication("other", 5, admin.id, {"UMLS": "Z"})
+    with decisions.review_transaction("s1") as tx:
+        assert tx.latest() == decisions.latest_human_or_script("s1")
+        assert {k: d.kb_values for k, d in tx.latest().items()} == {
+            (alice.id, 0): {"UMLS": "A"}}
+        assert tx.adjudications() == {}
+        first = tx.add(0, admin.id, {"UMLS": "A"}, "", basis="accepted",
+                       source_users=[alice.id], based_on={str(alice.id): {"UMLS": "A"}})
+        second = tx.add(0, admin.id, {"UMLS": "B"}, "n", basis="override",
+                        source_users=[], based_on={})
+        assert tx.adjudications() == {0: second}
+    assert first["basis"] == "accepted"
+    assert (second["source_users"], second["based_on"]) == ([], {})
+    assert decisions.current_adjudications("s1") == {0: second}
+    assert list(decisions.current_adjudications("other")) == [5]
+
+
+def test_review_transaction_holds_the_write_lock(world):
+    with decisions.review_transaction("s1"):
+        other = userdb.connect()
+        other.execute("PRAGMA busy_timeout=0")
+        try:
+            with pytest.raises(sqlite3.OperationalError):
+                other.execute("BEGIN IMMEDIATE")
+        finally:
+            other.close()
+
+
+def test_review_transaction_rolls_back(world):
+    with pytest.raises(RuntimeError):
+        with decisions.review_transaction("s1") as tx:
+            tx.add(0, world["admin"].id, {"UMLS": "A"}, "", basis="override",
+                   source_users=[], based_on={})
+            raise RuntimeError("boom")
+    assert decisions.current_adjudications("s1") == {}
+    assert not decisions.has_adjudications("s1")
 
 
 def _fake_kb(main, monkeypatch):

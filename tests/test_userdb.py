@@ -1,6 +1,9 @@
+import sqlite3
+import threading
+
 import pytest
 
-from eltool import userdb
+from eltool import decisions, userdb
 from eltool.hosting import auth_enabled
 
 
@@ -62,7 +65,7 @@ def test_schema_is_idempotent(auth_env):
     tables = {r["name"] for r in c2.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"users", "invites", "auth_sessions", "memberships",
             "decisions", "adjudications"} <= tables
-    assert c2.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert c2.execute("PRAGMA user_version").fetchone()[0] == 2
     assert c2.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     assert c2.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1
     c2.close()
@@ -108,6 +111,98 @@ def test_connect_on_an_existing_db_does_not_take_the_write_lock(auth_env):
     finally:
         writer.rollback()
         writer.close()
+
+
+_V1_DATABASE = """
+CREATE TABLE users (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    email         TEXT NOT NULL UNIQUE,
+    name          TEXT NOT NULL,
+    role          TEXT NOT NULL CHECK (role IN ('admin', 'reviewer', 'annotator')),
+    firebase_uid  TEXT UNIQUE,
+    active        INTEGER NOT NULL DEFAULT 1,
+    created_at    TEXT NOT NULL,
+    last_login_at TEXT
+);
+CREATE TABLE adjudications (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           TEXT NOT NULL,
+    session_name TEXT NOT NULL,
+    row_idx      INTEGER NOT NULL,
+    reviewer_id  INTEGER NOT NULL REFERENCES users(id),
+    kb_values    TEXT,
+    note         TEXT
+);
+INSERT INTO users (email, name, role, created_at)
+    VALUES ('r@x.org', 'Rev', 'reviewer', 'then');
+INSERT INTO adjudications (ts, session_name, row_idx, reviewer_id, kb_values, note)
+    VALUES ('then', 's1', 0, 1, '{"UMLS": "C1"}', 'old');
+PRAGMA user_version=1;
+"""
+
+
+def _open_from_threads(count=8):
+    """Call userdb.connect() from ``count`` threads at once; returns the errors."""
+    errors = []
+    start = threading.Barrier(count)
+
+    def open_db():
+        start.wait()
+        try:
+            userdb.connect().close()
+        except Exception as e:      # returned to the test
+            errors.append(e)
+
+    threads = [threading.Thread(target=open_db) for _ in range(count)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return errors
+
+
+def _assert_v2(conn):
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    columns = [r["name"] for r in conn.execute("PRAGMA table_info(adjudications)")]
+    for name in ("basis", "source_users", "based_on"):
+        assert columns.count(name) == 1
+
+
+# "wal" is how connect() leaves an existing deployment; "delete" is SQLite's default
+@pytest.mark.parametrize("journal_mode", ["wal", "delete"])
+def test_v1_database_gains_decision_columns(auth_env, journal_mode):
+    old = sqlite3.connect(auth_env / "helix.db")
+    old.execute(f"PRAGMA journal_mode={journal_mode}")
+    old.executescript(_V1_DATABASE)
+    old.close()
+
+    assert _open_from_threads() == []
+
+    conn = userdb.connect()
+    try:
+        _assert_v2(conn)
+        assert conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM adjudications").fetchone()[0] == 1
+        tables = {r["name"] for r in
+                  conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {"invites", "auth_sessions", "memberships", "decisions"} <= tables
+    finally:
+        conn.close()
+    adj = decisions.current_adjudications("s1")[0]
+    assert (adj["kb_values"], adj["note"]) == ({"UMLS": "C1"}, "old")
+    assert (adj["basis"], adj["source_users"], adj["based_on"]) == ("legacy", [], None)
+
+
+def test_new_database_is_complete_after_concurrent_first_opens(auth_env, monkeypatch):
+    # repeated: the race this guards against only shows up in some runs
+    for attempt in range(60):
+        monkeypatch.setattr("eltool.session.SESSIONS_DIR", auth_env / str(attempt))
+        assert _open_from_threads(16) == []
+        conn = userdb.connect()
+        try:
+            _assert_v2(conn)
+        finally:
+            conn.close()
 
 
 def test_token_hash_is_sha256_hex():

@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 import sqlite3
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -16,6 +17,12 @@ import eltool.session as session_mod
 
 ROLES = ("admin", "reviewer", "annotator")
 AUTH_SESSION_DAYS = 14
+SCHEMA_VERSION = 2
+# added to ``adjudications`` in version 2; NULL on decisions saved before it
+_V2_COLUMNS = ("basis", "source_users", "based_on")
+# SQLite fails the switch to WAL with "database is locked", without waiting, when
+# threads make it at once, so they take turns (the app runs a single worker)
+_wal_lock = threading.Lock()
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -73,7 +80,10 @@ CREATE TABLE IF NOT EXISTS adjudications (
     row_idx      INTEGER NOT NULL,
     reviewer_id  INTEGER NOT NULL REFERENCES users(id),
     kb_values    TEXT,
-    note         TEXT
+    note         TEXT,
+    basis        TEXT,
+    source_users TEXT,
+    based_on     TEXT
 );
 CREATE INDEX IF NOT EXISTS adjudications_by_row ON adjudications (session_name, row_idx);
 """
@@ -106,17 +116,35 @@ def _check_role(role: str) -> None:
         raise ValueError(f"Unknown role '{role}'")
 
 
+def _upgrade(conn: sqlite3.Connection) -> None:
+    """Create the schema, or bring a version-1 database up to date, in one
+    write transaction. Only adds tables and columns; existing rows are kept."""
+    conn.execute("BEGIN IMMEDIATE")
+    with conn:
+        # read again under the lock: another connection may have just done it
+        if conn.execute("PRAGMA user_version").fetchone()[0] >= SCHEMA_VERSION:
+            return
+        # one statement at a time: executescript() would commit and drop the lock
+        for statement in _SCHEMA.split(";"):
+            conn.execute(statement)
+        present = {r["name"] for r in conn.execute("PRAGMA table_info(adjudications)")}
+        for column in _V2_COLUMNS:
+            if column not in present:
+                conn.execute(f"ALTER TABLE adjudications ADD COLUMN {column} TEXT")
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+
 def connect() -> sqlite3.Connection:
-    """Open helix.db (created with its schema if missing)."""
+    """Open helix.db (created if missing, upgraded if its schema is older)."""
     path = session_mod.SESSIONS_DIR / "helix.db"
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    with _wal_lock:
+        conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    if conn.execute("PRAGMA user_version").fetchone()[0] == 0:
-        conn.executescript(_SCHEMA)
-        conn.execute("PRAGMA user_version=1")
+    if conn.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
+        _upgrade(conn)
     return conn
 
 
