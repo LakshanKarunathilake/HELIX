@@ -84,3 +84,12 @@ def session_access(name: str, request: Request) -> userdb.User | None:
     if user.role == "admin" or userdb.is_member(name, user.id):
         return user
     raise HTTPException(404, "Session not found")
+
+
+def annotator_access(name: str, request: Request) -> userdb.User | None:
+    """Dependency: ``session_access`` (404 first), then 403 for a reviewer, who
+    judges the annotators' work and so writes none. With auth off it passes."""
+    user = session_access(name, request)
+    if user is not None and user.role == "reviewer":
+        raise HTTPException(403, "Reviewers cannot annotate")
+    return user

@@ -41,7 +41,8 @@ from eltool.provenance import classify_method
 from eltool.review import review_payload
 from eltool.hosting import auth_enabled, check_neo4j_uri, check_outbound_url, cors_origins, hosted_mode
 from eltool import decisions, invites, userdb
-from eltool.auth import auth_gate, current_user, require_admin, session_access
+from eltool.auth import (annotator_access, auth_gate, current_user, require_admin,
+                         session_access)
 from api import auth_routes, review_routes
 from eltool.context_upload import ContextUploadError, extract_context_zip
 from eltool.graph_client import GraphError, Neo4jGraphClient, load_neo4j_settings
@@ -657,7 +658,7 @@ class BatchAnnotateRequest(BaseModel):
 # FastAPI matches "/rows/batch" against the parameterised route (idx="batch")
 # and 422s on the int-parse.
 @app.post("/api/sessions/{name}/rows/batch")
-def save_rows_batch(name: str, req: BatchAnnotateRequest, user=Depends(session_access)):
+def save_rows_batch(name: str, req: BatchAnnotateRequest, user=Depends(annotator_access)):
     """Apply many row updates in ONE atomic write (used by Auto-match)."""
     cfg = _load_cfg(name)
     df, _ = load_input(Path(cfg.input_path), cfg.delimiter)
@@ -760,7 +761,7 @@ def _provenance_for(cfg, req: AnnotateRequest) -> dict[str, str] | None:
 
 
 @app.post("/api/sessions/{name}/rows/{idx}")
-def save_row(name: str, idx: int, req: AnnotateRequest, user=Depends(session_access)):
+def save_row(name: str, idx: int, req: AnnotateRequest, user=Depends(annotator_access)):
     cfg = _load_cfg(name)
     df, _ = load_input(Path(cfg.input_path), cfg.delimiter)
     if user is not None:
@@ -810,7 +811,7 @@ class FeedbackRequest(BaseModel):
 
 
 @app.post("/api/sessions/{name}/rows/{idx}/feedback")
-def save_feedback(name: str, idx: int, req: FeedbackRequest, user=Depends(session_access)):
+def save_feedback(name: str, idx: int, req: FeedbackRequest, user=Depends(annotator_access)):
     """Hint + confidence for a row that has already been saved. Recorded after
     the save so it never counts toward the measured decision time."""
     cfg = _load_cfg(name)
@@ -850,7 +851,7 @@ def get_reflection(name: str, user=Depends(session_access)):
 
 
 @app.put("/api/sessions/{name}/reflection")
-def save_reflection(name: str, req: ReflectionRequest, user=Depends(session_access)):
+def save_reflection(name: str, req: ReflectionRequest, user=Depends(annotator_access)):
     """End-of-session reflection: hint types ranked by usefulness, plus a
     short comment on what helped or misled."""
     cfg = _load_cfg(name)
@@ -965,7 +966,7 @@ def lookup_entity(name: str, kb_name: str, entity_id: str, user=Depends(session_
 
 @app.post("/api/sessions/{name}/auto-annotate")
 def auto_annotate_session(name: str, skip_annotated: bool = True,
-                          user=Depends(session_access)):
+                          user=Depends(annotator_access)):
     """Automatically pick and save the best candidate for every unannotated row."""
     cfg = _load_cfg(name)
     df, _ = load_input(Path(cfg.input_path), cfg.delimiter)
@@ -1283,7 +1284,7 @@ def _saved_pins(out_df, idxs, kb: str) -> tuple[dict[int, str], set[int]]:
 
 
 @app.post("/api/sessions/{name}/graph/optimize")
-def graph_optimize(name: str, req: GraphOptimizeRequest, user=Depends(session_access)):
+def graph_optimize(name: str, req: GraphOptimizeRequest, user=Depends(annotator_access)):
     """Auto-match: break retrieval ties across the document with the graph.
 
     Saved annotations are kept: they anchor the graph but are never returned,
@@ -1340,7 +1341,7 @@ def graph_optimize(name: str, req: GraphOptimizeRequest, user=Depends(session_ac
 
 @app.post("/api/sessions/{name}/graph/optimize-all")
 def graph_optimize_all(name: str, skip_annotated: bool = True,
-                       user=Depends(session_access)):
+                       user=Depends(annotator_access)):
     """
     Bulk graph match — run the connection-maximising optimiser over EVERY document
     in the session and write all results in one atomic pass. Already-annotated
@@ -1585,7 +1586,7 @@ _STAGE_RE = re.compile(r"[A-Za-z0-9_-]+")   # always used with fullmatch
 
 
 @app.post("/api/sessions/{name}/snapshot")
-def snapshot_stage(name: str, stage: str, user=Depends(session_access)):
+def snapshot_stage(name: str, stage: str, user=Depends(annotator_access)):
     """Copy the caller's current output to a per-step snapshot (e.g. 'retrieval', 'graph')."""
     _load_cfg(name)
     if not _STAGE_RE.fullmatch(stage):
