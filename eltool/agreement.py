@@ -1,22 +1,12 @@
-"""Inter-annotator agreement and the final-value rule for reviewed exports.
+"""Inter-annotator agreement.
 
 Pure functions over human decisions only; no database or web imports.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from itertools import combinations
 
 from eltool.answers import join_ids, parse_ids
-
-
-@dataclass
-class FinalRow:
-    """Final value per KB column for one row, and whether it needs review."""
-
-    values: dict[str, str]
-    needs_review: bool
-    reason: str
 
 
 def _cohen_kappa(a: list[str], b: list[str]) -> float | None:
@@ -54,44 +44,4 @@ def pairwise_agreement(values: dict[int, dict[int, str]]) -> list[dict]:
                              [join_ids(y) for _, y in shared])
         out.append({"a": a, "b": b, "n": n, "percent": percent,
                     "kappa": kappa, "overlap": overlap})
-    return out
-
-
-def final_rows(
-    human: dict[int, dict[int, dict[str, str]]],
-    adjudications: dict[int, dict[str, str]],
-    row_count: int,
-    kb_names: list[str],
-    script_only_rows: frozenset[int] = frozenset(),
-) -> dict[int, FinalRow]:
-    """Final values for rows 0..row_count-1, applying in order:
-
-    1. an adjudication wins (reason "");
-    2. two or more humans matching in every KB column give that value (reason "");
-    3. two or more humans that differ: blank, needs review, "disagree";
-    4. exactly one human: blank, needs review, "single_annotator";
-    5. no humans and the row is in ``script_only_rows``: blank, "script_only";
-    6. otherwise: blank, "no_decisions".
-
-    A decision missing a KB counts as "" for that KB.
-    """
-    out: dict[int, FinalRow] = {}
-    for row in range(row_count):
-        if row in adjudications:
-            adj = adjudications[row]
-            out[row] = FinalRow({kb: adj.get(kb, "") for kb in kb_names}, False, "")
-            continue
-        decisions = [tuple(d[row].get(kb, "") for kb in kb_names)
-                     for d in human.values() if row in d]
-        blank = {kb: "" for kb in kb_names}
-        if len(decisions) >= 2 and len(set(decisions)) == 1:
-            out[row] = FinalRow(dict(zip(kb_names, decisions[0])), False, "")
-        elif len(decisions) >= 2:
-            out[row] = FinalRow(blank, True, "disagree")
-        elif len(decisions) == 1:
-            out[row] = FinalRow(blank, True, "single_annotator")
-        elif row in script_only_rows:
-            out[row] = FinalRow(blank, True, "script_only")
-        else:
-            out[row] = FinalRow(blank, True, "no_decisions")
     return out

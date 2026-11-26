@@ -103,23 +103,36 @@ def test_pilot_workflow_two_annotators_two_kbs(pilot):
     assert umls["percent"] == pytest.approx(200 / 3)
     assert (mesh["n"], mesh["percent"]) == (3, 100.0)
 
-    # ── review flags ──
-    rows = {r["idx"]: r for r in _ok(cr.get("/api/sessions/pilot/review")).json()["rows"]}
-    assert sorted(rows) == [0, 1, 2, 3, 4]
-    assert {i: r["disagree"] for i, r in rows.items()} == {
-        0: False, 1: True, 2: False, 3: False, 4: False}
-    assert all(d["script"] for d in rows[4]["decisions"])
-    assert {d["user_id"]: d["script"] for d in rows[3]["decisions"]} == {
-        alice.id: False, bob.id: True}
+    # ── review statuses ──
+    review = _ok(cr.get("/api/sessions/pilot/review")).json()
+    assert review["counts"] == {"to_decide": 2, "agreed": 2, "decided": 0, "waiting": 2}
+    rows = {r["idx"]: r for r in review["rows"]}
+    assert {i: r["status"] for i, r in rows.items()} == {      # row 4 is script-only
+        0: "agreed", 1: "disagree", 2: "agreed", 3: "single"}
+    assert [a["user_id"] for a in rows[3]["answers"]] == [alice.id]   # bob's is a script row
 
-    # ── final export ──
-    r = _ok(cr.get("/api/sessions/pilot/export?final=1"))
-    final = list(csv.DictReader(io.StringIO(r.text)))
-    assert [(x["entity_text"], x["UMLS"], x["MESH"], x["_needs_review"], x["_review_reason"])
-            for x in final] == [
-        ("cold", "G0", "D0", "", ""),
-        ("flu", "", "", "1", "disagree"),
-        ("virus", "X2", "D2", "", ""),
-        ("fever", "", "", "1", "single_annotator"),
-        ("cough", "", "", "1", "script_only"),
-        ("rash", "", "", "1", "no_decisions")]
+    # ── final export: nothing is final before the reviewer decides ──
+    def final():
+        r = _ok(cr.get("/api/sessions/pilot/export?final=1"))
+        return [(x["entity_text"], x["UMLS"], x["MESH"], x["_basis"], x["_decided_by"],
+                 x["_needs_review"], x["_review_reason"])
+                for x in csv.DictReader(io.StringIO(r.text))]
+
+    def unreviewed(label, reason):
+        return (label, "", "", "", "", "1", reason)
+    rest = [unreviewed("fever", "single_annotator"), unreviewed("cough", "script_only"),
+            unreviewed("rash", "no_decisions")]
+    assert final() == [unreviewed("cold", "awaiting_review"), unreviewed("flu", "disagree"),
+                       unreviewed("virus", "awaiting_review")] + rest
+
+    # ── review: confirm the agreed rows together, then decide the disagreement ──
+    got = _ok(cr.post("/api/sessions/pilot/adjudications/bulk", json={"rows": [
+        {"row_idx": i, "version": rows[i]["version"]} for i in (0, 2)]})).json()
+    assert got == {"confirmed": [0, 2], "skipped": []}
+    _ok(cr.post("/api/sessions/pilot/adjudications", json={
+        "row_idx": 1, "kb_values": {"UMLS": "G1", "MESH": "D1"},
+        "version": rows[1]["version"]}))
+    assert final() == [
+        ("cold", "G0", "D0", "bulk_agreed", "Rev", "", ""),
+        ("flu", "G1", "D1", "accepted", "Rev", "", ""),
+        ("virus", "X2", "D2", "bulk_agreed", "Rev", "", "")] + rest

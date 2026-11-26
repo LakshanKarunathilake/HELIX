@@ -68,6 +68,20 @@ def _final(client, name):
     return list(csv.DictReader(io.StringIO(r.text)))
 
 
+def _review_rows(client, name):
+    r = client.get(f"/api/sessions/{name}/review")
+    assert r.status_code == 200, r.text
+    return r.json()["rows"]
+
+
+def _confirm(client, name, idx, values):
+    """The reviewer settles one row with ``values``, which must follow from the answers."""
+    row = next(r for r in _review_rows(client, name) if r["idx"] == idx)
+    r = client.post(f"/api/sessions/{name}/adjudications", json={
+        "row_idx": idx, "kb_values": values, "version": row["version"]})
+    assert r.status_code == 200, r.text
+
+
 # ── C1: the Auto-annotate modal's saves are script decisions ─────────────────
 
 def test_modal_save_is_logged_as_auto_annotate(world, as_user):
@@ -86,8 +100,9 @@ def test_modal_save_is_logged_as_auto_annotate(world, as_user):
     body = rev.get("/api/sessions/s1/agreement").json()
     assert body["excluded_script_rows"] == 2
     assert body["by_kb"]["UMLS"] == []
-    (row,) = rev.get("/api/sessions/s1/review").json()["rows"]
-    assert all(d["script"] for d in row["decisions"]) and row["disagree"] is False
+    review = rev.get("/api/sessions/s1/review").json()
+    assert review["rows"] == [] and review["counts"] == {
+        "to_decide": 0, "agreed": 0, "decided": 0, "waiting": 3}
     # two users' identical modal picks are NOT published as an agreed value
     first = _final(rev, "s1")[0]
     assert (first["UMLS"], first["_needs_review"], first["_review_reason"]) == \
@@ -114,7 +129,11 @@ def test_human_confirming_a_modal_pick_counts(world, as_user):
     rev = as_user(world["rev"])
     assert rev.get("/api/sessions/s1/agreement").json()["excluded_script_rows"] == 0
     first = _final(rev, "s1")[0]
-    assert (first["UMLS"], first["_needs_review"]) == ("C1", "")
+    assert (first["UMLS"], first["_needs_review"], first["_review_reason"]) == \
+        ("", "1", "awaiting_review")
+    _confirm(rev, "s1", 0, {"UMLS": "C1"})
+    first = _final(rev, "s1")[0]
+    assert (first["UMLS"], first["_basis"], first["_needs_review"]) == ("C1", "accepted", "")
 
 
 def test_auto_flag_with_auth_off_changes_nothing(tmp_path, monkeypatch):
@@ -143,11 +162,16 @@ def test_correcting_one_kb_keeps_the_other_in_the_log(world, as_user):
         ({"UMLS": "C2", "MESH": "D1"}, {"UMLS": "C1", "MESH": "D1"})]
 
     rev = as_user(world["rev"])
+    (row,) = _review_rows(rev, "s2")
+    assert row["status"] == "agreed"
+    assert [a["kb_ids"] for a in row["answers"]] == [{"UMLS": ["C2"], "MESH": ["D1"]}] * 2
+    first = _final(rev, "s2")[0]
+    assert (first["UMLS"], first["MESH"], first["_needs_review"], first["_review_reason"]) == \
+        ("", "", "1", "awaiting_review")
+    _confirm(rev, "s2", 0, {"UMLS": "C2", "MESH": "D1"})
     first = _final(rev, "s2")[0]
     assert (first["UMLS"], first["MESH"], first["_needs_review"], first["_review_reason"]) == \
         ("C2", "D1", "", "")
-    (row,) = rev.get("/api/sessions/s2/review").json()["rows"]
-    assert row["disagree"] is False
     by_kb = rev.get("/api/sessions/s2/agreement").json()["by_kb"]
     assert [(p["n"], p["percent"]) for p in by_kb["MESH"]] == [(1, 100.0)]
     assert [(p["n"], p["percent"]) for p in by_kb["UMLS"]] == [(1, 100.0)]
@@ -159,8 +183,9 @@ def test_one_user_resaving_one_kb_is_not_a_false_disagreement(world, as_user):
         _post(c, "s2", 0, {"annotations": {"UMLS": "C1", "MESH": "D1"}})
     _post(ca, "s2", 0, {"annotations": {"UMLS": "C1"}})     # e.g. Document review
     rev = as_user(world["rev"])
-    (row,) = rev.get("/api/sessions/s2/review").json()["rows"]
-    assert row["disagree"] is False
+    (row,) = _review_rows(rev, "s2")
+    assert row["status"] == "agreed"
+    _confirm(rev, "s2", 0, {"UMLS": "C1", "MESH": "D1"})
     first = _final(rev, "s2")[0]
     assert (first["UMLS"], first["MESH"], first["_needs_review"]) == ("C1", "D1", "")
 

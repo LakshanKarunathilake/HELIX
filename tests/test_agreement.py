@@ -1,10 +1,7 @@
-"""Agreement and final-value rules (pure functions)."""
+"""Agreement rules (pure functions)."""
 import pytest
 
-from eltool.agreement import FinalRow, final_rows, pairwise_agreement
-
-KBS = ["drug", "disease"]
-BLANK = {"drug": "", "disease": ""}
+from eltool.agreement import pairwise_agreement
 
 
 def test_percent_agreement_counts_shared_rows_only():
@@ -65,50 +62,3 @@ def test_three_users_give_three_pairs():
     pairs = pairwise_agreement(values)
     assert [(p["a"], p["b"]) for p in pairs] == [(1, 2), (1, 3), (2, 3)]
     assert [p["percent"] for p in pairs] == [0.0, 100.0, 0.0]
-
-
-def test_final_prefers_adjudication():
-    human = {
-        1: {0: {"drug": "A", "disease": "X"}},
-        2: {0: {"drug": "B", "disease": "X"}},
-    }
-    adj = {0: {"drug": "C"}}  # missing KB filled with ""
-    out = final_rows(human, adj, 1, KBS)
-    assert out[0] == FinalRow({"drug": "C", "disease": ""}, False, "")
-
-
-def test_final_needs_two_matching_humans():
-    human = {
-        1: {0: {"drug": "A", "disease": "X"}},
-        2: {0: {"drug": "A", "disease": "X"}},
-        3: {0: {"drug": "A", "disease": "X"}},
-    }
-    out = final_rows(human, {}, 1, KBS)
-    assert out[0] == FinalRow({"drug": "A", "disease": "X"}, False, "")
-
-
-def test_final_disagree_in_one_kb_column_blocks_value():
-    human = {
-        1: {0: {"drug": "A", "disease": "X"}},
-        2: {0: {"drug": "A", "disease": "Y"}},
-    }
-    out = final_rows(human, {}, 1, KBS)
-    assert out[0] == FinalRow(BLANK, True, "disagree")
-
-
-def test_final_single_human_is_flagged_single_annotator():
-    human = {1: {0: {"drug": "A", "disease": "X"}}, 2: {}}
-    out = final_rows(human, {}, 1, KBS)
-    assert out[0] == FinalRow(BLANK, True, "single_annotator")
-
-
-def test_final_script_only_row_is_flagged():
-    out = final_rows({1: {}}, {}, 2, KBS, script_only_rows=frozenset({1}))
-    assert out[1] == FinalRow(BLANK, True, "script_only")
-    assert out[0] == FinalRow(BLANK, True, "no_decisions")
-
-
-def test_final_untouched_row_is_no_decisions():
-    out = final_rows({}, {}, 3, KBS)
-    assert sorted(out) == [0, 1, 2]
-    assert all(r == FinalRow(BLANK, True, "no_decisions") for r in out.values())

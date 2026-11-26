@@ -137,16 +137,21 @@ def test_layer_exports_are_spreadsheet_guarded(world, as_user):
 @pytest.mark.parametrize("value", ["", "   "])
 def test_blank_adjudication_value_is_rejected(world, as_user, value):
     r = as_user(world["rev"]).post("/api/sessions/s1/adjudications", json={
-        "row_idx": 0, "kb_values": {"UMLS": "C1", "MESH": value}})
+        "row_idx": 0, "kb_values": {"UMLS": "C1", "MESH": value}, "version": "x"})
     assert r.status_code == 400
     assert "MESH" in r.json()["detail"] and "NIL" in r.json()["detail"]
     assert decisions.current_adjudications("s1") == {}
 
 
 def test_nil_adjudication_is_accepted(world, as_user):
-    r = as_user(world["rev"]).post("/api/sessions/s1/adjudications", json={
-        "row_idx": 0, "kb_values": {"UMLS": "C1", "MESH": "NIL"}})
+    assert as_user(world["alice"]).post("/api/sessions/s1/rows/0", json={
+        "annotations": {"UMLS": "C1", "MESH": "NIL"}}).status_code == 200
+    rev = as_user(world["rev"])
+    (row,) = rev.get("/api/sessions/s1/review").json()["rows"]
+    r = rev.post("/api/sessions/s1/adjudications", json={
+        "row_idx": 0, "kb_values": {"UMLS": "C1", "MESH": "NIL"}, "version": row["version"]})
     assert r.status_code == 200, r.text
+    assert r.json()["kb_values"] == {"UMLS": "C1", "MESH": "NIL"}
 
 
 # ── I7: who reads the decision log ───────────────────────────────────────────
