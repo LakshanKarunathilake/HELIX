@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, ChevronLeft, ChevronRight, Download, Loader2 } from 'lucide-react'
@@ -46,6 +46,11 @@ export function Review() {
   const [open, setOpen] = useState<OpenState | null>(null)
   /** Kept here, not in the card, so it survives the card restarting on a new version. */
   const [saveError, setSaveError] = useState('')
+  /** The open row got a new version from a refetch (not from this reviewer's save). */
+  const [refreshed, setRefreshed] = useState(false)
+  /** Set synchronously, so a second click in the same tick cannot send a second save. */
+  const saving = useRef(false)
+  const seen = useRef<{ idx: number; version: string } | null>(null)
 
   const review = useQuery({
     queryKey: ['review', sessionName],
@@ -108,6 +113,7 @@ export function Review() {
 
   const openRow = (idx: number) => {
     setSaveError('')
+    setRefreshed(false)
     setOpen({ queue: shown.map(r => r.idx), idx })
   }
   const step = (delta: number) => {
@@ -115,15 +121,20 @@ export function Review() {
     const next = open.queue[open.queue.indexOf(open.idx) + delta]
     if (next === undefined) return
     setSaveError('')
+    setRefreshed(false)
     setOpen({ ...open, idx: next })
   }
   const backToList = () => {
     setSaveError('')
+    setRefreshed(false)
     setOpen(null)
   }
 
   const decide = (row: ReviewRow, kbValues: Record<string, string>, note: string) => {
+    if (saving.current) return
+    saving.current = true
     setSaveError('')
+    setRefreshed(false)
     save.mutate(
       { row_idx: row.idx, kb_values: kbValues, note, version: row.version },
       {
@@ -134,6 +145,7 @@ export function Review() {
           return next === undefined ? null : { ...prev, idx: next }
         }),
         onError: e => setSaveError(errorText(e)),
+        onSettled: () => { saving.current = false },
       },
     )
   }
@@ -169,6 +181,18 @@ export function Review() {
 
   const openRowData = open ? rowsByIdx.get(open.idx) : undefined
   const position = open ? open.queue.indexOf(open.idx) : -1
+
+  // A new version of the same open row resets the card; say so unless it came from
+  // this reviewer's own save (which navigates on, or shows its own error).
+  const openVersion = openRowData?.version
+  useEffect(() => {
+    const prev = seen.current
+    if (open && openVersion !== undefined && prev && prev.idx === open.idx
+        && prev.version !== openVersion && !save.isPending) {
+      setRefreshed(true)
+    }
+    seen.current = open && openVersion !== undefined ? { idx: open.idx, version: openVersion } : null
+  }, [open, openVersion, save.isPending])
 
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 py-8 sm:py-10">
@@ -294,6 +318,13 @@ export function Review() {
             <p className="card p-3 mb-4 text-sm text-red-600" role="alert">{saveError}</p>
           )}
 
+          {refreshed && !saveError && (
+            <p className="card p-3 mb-4 text-sm text-gray-700" role="status">
+              The answers for this row changed while it was open, so the card was refreshed.
+              Check it again.
+            </p>
+          )}
+
           {openRowData ? (
             <DecisionCard
               key={`${openRowData.idx}-${openRowData.version}`}
@@ -301,6 +332,7 @@ export function Review() {
               row={openRowData}
               kbNames={kbNames}
               saving={save.isPending}
+              settleKey={saveError}
               onSave={(kbValues, note) => decide(openRowData, kbValues, note)}
             />
           ) : (

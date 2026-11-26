@@ -106,8 +106,8 @@ export function RowList({
           {shown.map(row => (
             <li key={row.idx} className="flex items-start gap-3 px-4 py-3">
               {bulk && (
-                <div className="pt-1 w-24 shrink-0 text-xs text-gray-500">
-                  {row.bulk_eligible ? (
+                <div className="pt-1 w-4 shrink-0">
+                  {row.bulk_eligible && (
                     <input
                       type="checkbox"
                       aria-label={`Select row ${row.idx + 1} for bulk confirm`}
@@ -115,10 +115,6 @@ export function RowList({
                       disabled={bulk.busy}
                       onChange={e => bulk.onToggle(row, e.target.checked)}
                     />
-                  ) : row.pending > 0 ? (
-                    `${row.pending} annotator${row.pending === 1 ? '' : 's'} pending`
-                  ) : (
-                    'Answer incomplete'
                   )}
                 </div>
               )}
@@ -135,6 +131,13 @@ export function RowList({
                   <StatusBadge status={row.status} />
                 </div>
                 <Answers row={row} kbNames={kbNames} session={session} />
+                {bulk && !row.bulk_eligible && (
+                  <p className="text-xs text-gray-500 mt-1">
+                    {row.pending > 0
+                      ? `${row.pending} annotator${row.pending === 1 ? '' : 's'} pending`
+                      : 'Answer incomplete'}
+                  </p>
+                )}
               </button>
             </li>
           ))}

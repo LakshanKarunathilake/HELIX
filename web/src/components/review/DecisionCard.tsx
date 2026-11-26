@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Check, Loader2, Plus } from 'lucide-react'
 import * as api from '@/api/client'
@@ -8,6 +8,10 @@ import { ConceptName } from './ConceptName'
 import { StatusBadge } from './RowList'
 
 const NIL = 'NIL'
+
+/** How long Accept and Confirm stay disabled after the card shows something new, so a
+ *  repeated click meant for the previous screen cannot decide a row nobody looked at. */
+const SETTLE_MS = 700
 
 const BASIS_LABEL: Record<Basis, string> = {
   accepted: 'accepted an annotator’s answer',
@@ -31,9 +35,9 @@ function initialTicks(row: ReviewRow, kbNames: string[]): PerKb {
   ]))
 }
 
-/** Chips beyond the annotators' options a fresh card needs: a decided row's own
- *  concepts that no annotator chose, so unticking one does not make it vanish. */
-function initialAdded(row: ReviewRow, kbNames: string[]): PerKb {
+/** A decided row's own concepts that no annotator chose: chipped so that unticking
+ *  one does not make it vanish, and labelled as coming from the stored decision. */
+function decisionExtras(row: ReviewRow, kbNames: string[]): PerKb {
   return Object.fromEntries(kbNames.map(kb => {
     const proposed = new Set((row.options[kb] ?? []).map(o => o.id))
     const own = row.status === 'decided' && row.decision ? row.decision.kb_ids[kb] ?? [] : []
@@ -82,18 +86,29 @@ function DecisionSummary({ decision, kbNames, session }: {
  * final answer built from tickable concepts. The page keys it by idx and version, so
  * changed answers start it afresh.
  */
-export function DecisionCard({ session, row, kbNames, saving, onSave }: {
+export function DecisionCard({ session, row, kbNames, saving, settleKey, onSave }: {
   session: string
   row: ReviewRow
   kbNames: string[]
   saving: boolean
+  /** Changing it (e.g. a save error appearing above the card) restarts the settle period. */
+  settleKey?: string
   onSave: (kbValues: Record<string, string>, note: string) => void
 }) {
   const uid = useId()
   const [ticks, setTicks] = useState<PerKb>(() => initialTicks(row, kbNames))
-  const [added, setAdded] = useState<PerKb>(() => initialAdded(row, kbNames))
+  const [fromDecision] = useState<PerKb>(() => decisionExtras(row, kbNames))
+  /** Concepts typed into this card. */
+  const [added, setAdded] = useState<PerKb>(() => Object.fromEntries(kbNames.map(kb => [kb, []])))
   const [typed, setTyped] = useState<Record<string, string>>({})
   const [note, setNote] = useState('')
+  // The card is keyed by row and version, so it mounts afresh for anything new on screen.
+  const [settled, setSettled] = useState(false)
+  useEffect(() => {
+    setSettled(false)
+    const t = window.setTimeout(() => setSettled(true), SETTLE_MS)
+    return () => window.clearTimeout(t)
+  }, [settleKey])
 
   const context = useQuery({
     queryKey: ['review-row', session, row.idx],
@@ -111,7 +126,7 @@ export function DecisionCard({ session, row, kbNames, saving, onSave }: {
   const untickedKbs = kbNames.filter(kb => (ticks[kb] ?? []).length === 0)
   const override = kbNames.some(kb => (ticks[kb] ?? []).some(id => !proposed[kb].has(id)))
   const noteMissing = override && !note.trim()
-  const canConfirm = hasAnswers && !saving && untickedKbs.length === 0 && !noteMissing
+  const canConfirm = hasAnswers && settled && !saving && untickedKbs.length === 0 && !noteMissing
 
   const toggle = (kb: string, id: string, on: boolean) => setTicks(prev => {
     const cur = prev[kb] ?? []
@@ -128,7 +143,8 @@ export function DecisionCard({ session, row, kbNames, saving, onSave }: {
     } else {
       setAdded(prev => {
         const cur = prev[kb] ?? []
-        const fresh = ids.filter(id => !proposed[kb].has(id) && !cur.includes(id))
+        const fresh = ids.filter(id => !proposed[kb].has(id) && !cur.includes(id)
+          && !(fromDecision[kb] ?? []).includes(id))
         return { ...prev, [kb]: [...cur, ...fresh] }
       })
       setTicks(prev => {
@@ -228,7 +244,7 @@ export function DecisionCard({ session, row, kbNames, saving, onSave }: {
                     type="button"
                     className="btn-secondary !py-1"
                     aria-label={`Accept ${a.user_name}'s answer`}
-                    disabled={saving || !a.complete}
+                    disabled={saving || !settled || !a.complete}
                     onClick={() => onSave(
                       Object.fromEntries(kbNames.map(kb => [kb, joinIds(a.kb_ids[kb] ?? [])])),
                       note.trim(),
@@ -251,6 +267,7 @@ export function DecisionCard({ session, row, kbNames, saving, onSave }: {
             const chips = [
               ...options.map(o => o.id),
               ...(proposed[kb].has(NIL) ? [] : [NIL]),
+              ...(fromDecision[kb] ?? []),
               ...(added[kb] ?? []),
             ]
             const chosenBy = new Map(options.map(o => [o.id, o.user_ids]))
@@ -261,7 +278,8 @@ export function DecisionCard({ session, row, kbNames, saving, onSave }: {
                 <div className="flex flex-wrap gap-2">
                   {chips.map(id => {
                     const by = chosenBy.get(id)
-                    const isAdded = !by && id !== NIL
+                    const isStored = !by && (fromDecision[kb] ?? []).includes(id)
+                    const isAdded = !by && id !== NIL && !isStored
                     return (
                       <label
                         key={id}
@@ -277,12 +295,13 @@ export function DecisionCard({ session, row, kbNames, saving, onSave }: {
                           onChange={e => toggle(kb, id, e.target.checked)}
                         />
                         <span className="min-w-0 break-words">
-                          <ConceptName session={session} kb={kb} id={id} warn={isAdded} />
+                          <ConceptName session={session} kb={kb} id={id} warn={isAdded || isStored} />
                           {by && (
                             <span className="block text-xs text-gray-500">
                               chosen by {by.map(u => names.get(u) ?? `user ${u}`).join(', ')}
                             </span>
                           )}
+                          {isStored && <span className="block text-xs text-gray-500">from the current decision</span>}
                           {isAdded && <span className="block text-xs text-gray-500">added by you</span>}
                         </span>
                       </label>
