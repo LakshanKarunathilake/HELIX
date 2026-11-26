@@ -46,8 +46,11 @@ export function Review() {
   const [open, setOpen] = useState<OpenState | null>(null)
   /** Kept here, not in the card, so it survives the card restarting on a new version. */
   const [saveError, setSaveError] = useState('')
-  /** The open row got a new version from a refetch (not from this reviewer's save). */
-  const [refreshed, setRefreshed] = useState(false)
+  /** The open row's version that a refetch (not this reviewer's save) brought in; the
+   *  notice shows only while that same row and version are on screen. */
+  const [refreshed, setRefreshed] = useState<{ idx: number; version: string } | null>(null)
+  /** The row and version this reviewer last saved from: a new version of it is their own. */
+  const ownSave = useRef<{ idx: number; version: string } | null>(null)
   /** Set synchronously, so a second click in the same tick cannot send a second save. */
   const saving = useRef(false)
   const seen = useRef<{ idx: number; version: string } | null>(null)
@@ -113,7 +116,7 @@ export function Review() {
 
   const openRow = (idx: number) => {
     setSaveError('')
-    setRefreshed(false)
+    setRefreshed(null)
     setOpen({ queue: shown.map(r => r.idx), idx })
   }
   const step = (delta: number) => {
@@ -121,20 +124,21 @@ export function Review() {
     const next = open.queue[open.queue.indexOf(open.idx) + delta]
     if (next === undefined) return
     setSaveError('')
-    setRefreshed(false)
+    setRefreshed(null)
     setOpen({ ...open, idx: next })
   }
   const backToList = () => {
     setSaveError('')
-    setRefreshed(false)
+    setRefreshed(null)
     setOpen(null)
   }
 
   const decide = (row: ReviewRow, kbValues: Record<string, string>, note: string) => {
     if (saving.current) return
     saving.current = true
+    ownSave.current = { idx: row.idx, version: row.version }
     setSaveError('')
-    setRefreshed(false)
+    setRefreshed(null)
     save.mutate(
       { row_idx: row.idx, kb_values: kbValues, note, version: row.version },
       {
@@ -185,14 +189,20 @@ export function Review() {
   // A new version of the same open row resets the card; say so unless it came from
   // this reviewer's own save (which navigates on, or shows its own error).
   const openVersion = openRowData?.version
+  // `saving.current` (not `save.isPending`) is checked: it clears only in the per-call
+  // onSettled, after onSuccess has already moved to the next row.
+  const openIdx = open?.idx
   useEffect(() => {
     const prev = seen.current
-    if (open && openVersion !== undefined && prev && prev.idx === open.idx
-        && prev.version !== openVersion && !save.isPending) {
-      setRefreshed(true)
+    const own = ownSave.current
+    if (openIdx !== undefined && openVersion !== undefined && prev && prev.idx === openIdx
+        && prev.version !== openVersion && !saving.current
+        && !(own && own.idx === openIdx && own.version === prev.version)) {
+      setRefreshed({ idx: openIdx, version: openVersion })
     }
-    seen.current = open && openVersion !== undefined ? { idx: open.idx, version: openVersion } : null
-  }, [open, openVersion, save.isPending])
+    seen.current = openIdx !== undefined && openVersion !== undefined
+      ? { idx: openIdx, version: openVersion } : null
+  }, [openIdx, openVersion])
 
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 py-8 sm:py-10">
@@ -318,7 +328,8 @@ export function Review() {
             <p className="card p-3 mb-4 text-sm text-red-600" role="alert">{saveError}</p>
           )}
 
-          {refreshed && !saveError && (
+          {refreshed && !saveError && open && refreshed.idx === open.idx
+            && refreshed.version === openRowData?.version && (
             <p className="card p-3 mb-4 text-sm text-gray-700" role="status">
               The answers for this row changed while it was open, so the card was refreshed.
               Check it again.

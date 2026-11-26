@@ -102,19 +102,25 @@ export function DecisionCard({ session, row, kbNames, saving, settleKey, onSave 
   const [added, setAdded] = useState<PerKb>(() => Object.fromEntries(kbNames.map(kb => [kb, []])))
   const [typed, setTyped] = useState<Record<string, string>>({})
   const [note, setNote] = useState('')
-  // The card is keyed by row and version, so it mounts afresh for anything new on screen.
-  const [settled, setSettled] = useState(false)
-  useEffect(() => {
-    setSettled(false)
-    const t = window.setTimeout(() => setSettled(true), SETTLE_MS)
-    return () => window.clearTimeout(t)
-  }, [settleKey])
 
   const context = useQuery({
     queryKey: ['review-row', session, row.idx],
     queryFn: () => api.getReviewRow(session, row.idx),
     staleTime: Infinity,
+    retry: 1,
   })
+
+  // The card is keyed by row and version, so it mounts afresh for anything new on screen.
+  // The row's details sit above the answers, so the buttons stay unusable until that
+  // request has finished (or failed) and settle again from when it lands.
+  const contextStatus = context.status
+  const [settled, setSettled] = useState(false)
+  useEffect(() => {
+    setSettled(false)
+    if (contextStatus === 'pending') return
+    const t = window.setTimeout(() => setSettled(true), SETTLE_MS)
+    return () => window.clearTimeout(t)
+  }, [settleKey, contextStatus])
 
   const names = useMemo(() => new Map(row.answers.map(a => [a.user_id, a.user_name])), [row.answers])
   const proposed = useMemo(
