@@ -129,9 +129,11 @@ of pipe-joined ids does not matter. Nothing is final until a reviewer or admin d
 | One annotator | Exactly one person has answered | To decide |
 | Changed | Decided, then an answer changed, appeared or disappeared | To decide |
 | Agreed | Two or more people gave the same answer; not yet confirmed | Agreed |
-| Decided | Has a current decision (it can be decided again) | Decided |
+| Decided | Has a current decision (it can be decided again while it has an answer) | Decided |
 
-Rows nobody has answered are not listed, only counted as waiting for annotators.
+Undecided rows that nobody has answered are not listed, only counted as waiting for annotators.
+A decided row whose answers have all gone stays listed: as *Changed*, or as *Decided* if its
+decision is a `legacy` one.
 
 * **Accept or combine.** Open a row, then either press **Accept** on one person's whole answer
   (enabled only when it has a value for every KB), or tick concepts from one or more answers
@@ -149,13 +151,14 @@ Rows nobody has answered are not listed, only counted as waiting for annotators.
   pending, or that the answer is incomplete. The server checks each row again when saving, and
   skips and reports any that no longer qualify.
 * **Changes after a decision.** A decided row returns to **To decide** as *Changed* if an
-  annotator's answer changes, appears or disappears. A row with no annotator answer cannot be
-  decided. That includes a previously decided row whose answers have all gone: it shows as
-  *Changed* and exports blank as `changed_since_review`. A *Changed* row counts as decided
-  again if the answers return to exactly what they were at decision time. A decision sent from
-  an out-of-date screen is refused.
+  annotator's answer changes, appears or disappears (`legacy` decisions excepted, below). A row
+  with no annotator answer cannot be decided. That includes a previously decided row whose
+  answers have all gone: it shows as *Changed* and exports blank as `changed_since_review`. A
+  *Changed* row counts as decided again if the answers return to exactly what they were at
+  decision time. A decision sent from an out-of-date screen is refused.
 * **Older decisions.** Decisions saved before this workflow are kept, shown as `legacy`, and
-  never marked changed.
+  never marked changed: such a row stays *Decided* and still exports its values after its
+  answers change, even when they have all gone.
 * **Added KBs.** A decision with no value for one of the session's current KBs (a KB added
   since) does not decide the row.
 
@@ -174,8 +177,8 @@ says why:
 | `single_annotator` | has one person's answer |
 | `awaiting_review` | has agreeing answers that nobody has confirmed |
 | `changed_since_review` | was decided, and the answers changed afterwards |
-| `script_only` | has no answer, only script-written values |
-| `no_decisions` | has no answer |
+| `script_only` | is undecided and has no answer, only script-written values |
+| `no_decisions` | is undecided and has no answer |
 
 Decision notes are kept in `helix.db`; this file does not include them.
 
@@ -191,8 +194,9 @@ Decision notes are kept in `helix.db`; this file does not include them.
   decisions (`auto_annotate`) that do not count towards agreement. An annotator-facing
   Auto-annotate is a possible follow-up.
 * Countdown auto-accept saves (the Annotate page timer running out with no interaction) are
-  logged as `human` decisions with method `auto_accept`, and they DO count towards agreement
-  and the final export.
+  logged as `human` decisions (study sessions also record the method, `auto_accept` for an
+  accepted candidate), and they DO count towards agreement and review, including bulk-confirm
+  eligibility.
 * In the final export, a KB column, `_basis`, `_decided_by`, `_needs_review` or
   `_review_reason` with the same name as an input column overwrites that input column.
 * The login cookie's `Secure` attribute follows `HELIX_HOSTED`: run with `HELIX_HOSTED=1`
@@ -231,10 +235,10 @@ docker compose -f deploy/hosted/docker-compose.yml --env-file deploy/hosted/.env
 
 `backup.sh` archives the whole sessions volume to `$BACKUP_DIR/sessions-<date>.tgz` and deletes
 archives older than 14 days. The volume holds `helix.db` (the user table, invitations,
-memberships and the decision log) beside the per-session folders, so every archive contains
-the accounts and the full decision history. The archives also contain every stored secret, so
-the script makes `$BACKUP_DIR` mode `700` and writes the archives readable by their owner only.
-Add it to cron (`crontab -e`):
+memberships, the decision log and the review decisions) beside the per-session folders, so
+every archive contains the accounts and the full history of both. The archives also contain
+every stored secret, so the script makes `$BACKUP_DIR` mode `700` and writes the archives
+readable by their owner only. Add it to cron (`crontab -e`):
 
 ```
 0 3 * * * BACKUP_DIR=/var/backups/helix /path/to/helix/deploy/hosted/backup.sh
@@ -253,17 +257,35 @@ taken from a one-off `python:3.11-alpine` container instead (nothing is writing 
 
 **Back up `sessions/helix.db` before you upgrade.** The first time a version with this review
 workflow opens the database, it adds three columns (`basis`, `source_users`, `based_on`) to the
-table of reviewer decisions; existing rows are kept. Run `backup.sh` before rebuilding, and
+table of review decisions; existing rows are kept. Run `backup.sh` before rebuilding, and
 copy the archive to another name: a later run on the same day overwrites
 `sessions-<date>.tgz`, and the script deletes `sessions-*.tgz` archives older than 14 days.
-From the repo root:
+
+The archive is written by a container running as root, so on a Linux server it belongs to root
+with mode `600`: run the backup and the copy with `sudo`, as below (leave `sudo` out if you are
+root). From the repo root, with your own backup directory in the three places. Each command runs
+only if the one before it succeeded, so a failed backup stops the upgrade:
 
 ```
-BACKUP_DIR=/var/backups/helix deploy/hosted/backup.sh
-cp -p /var/backups/helix/sessions-$(date +%F).tgz /var/backups/helix/pre-upgrade.tgz
-git pull
+sudo env BACKUP_DIR=/var/backups/helix deploy/hosted/backup.sh &&
+sudo cp -p "/var/backups/helix/sessions-$(date +%F).tgz" \
+  "/var/backups/helix/pre-upgrade-$(date +%Y%m%d-%H%M%S).tgz" &&
+git pull &&
 docker compose -f deploy/hosted/docker-compose.yml --env-file deploy/hosted/.env up -d --build
 ```
+
+The `pre-upgrade-*.tgz` name carries the date and time, so a repeat run does not overwrite an
+earlier copy. A copy made after the new version has started holds the upgraded database, so keep
+the earliest one. The script does not delete these copies; they contain the stored secrets, so
+remove them once you no longer need them.
+
+To restore a pre-upgrade copy, follow "Restoring a backup" below with the same `BACKUP_DIR`,
+and set `ARCHIVE` to the copy's file name, `pre-upgrade-<date>-<time>.tgz`, instead of
+`sessions-YYYY-MM-DD.tgz` (`sudo ls /var/backups/helix` lists the copies). This takes the
+database, and the session files in the archive, back to that moment. Its last command,
+`start api`, runs the version that is currently built, which adds the columns again; to return
+to the earlier version, check out the commit you ran before and use the `up -d --build` command
+above in place of `start api`.
 
 ### Restoring a backup
 
