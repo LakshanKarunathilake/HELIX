@@ -124,7 +124,7 @@ def test_basis_combined_from_two_users():
     assert basis_for(_a("C1|C2"), {1: _a("C1"), 2: _a("C2")}) == ("combined", [1, 2])
 
 def test_basis_combined_for_a_subset():
-    assert basis_for(_a("C1"), {1: _a("C1|C2"), 2: _a("C3")}) == ("combined", [1])
+    assert basis_for(_a("C1"), {1: _a("C1|C2"), 2: _a("C3", "D2")}) == ("combined", [1])
 
 def test_basis_override_keeps_partial_sources():
     assert basis_for(_a("C1|C9"), {1: _a("C1"), 2: _a("C2", "D2")}) == ("override", [1])
@@ -383,10 +383,11 @@ def test_answer_change_marks_decided_row_changed(world, as_user):
     # export reason "changed_since_review", KB blank.
 
 def test_bulk_confirms_only_qualifying_rows(world, as_user, make_user):
-    # row 0 agreed by alice+bob (both annotator members) -> confirmed, basis "bulk_agreed"
-    # row 1 disagree -> not_agreed; row 2 agreed but a third annotator member has not answered
-    # for it -> pending; row 99 -> out_of_range; a stale version -> changed.
-    # Assert the exact skipped list and that only row 0 is stored.
+    # a third annotator member Carol. Row 0: all three agree. Row 1: they differ.
+    # Row 2: alice and bob agree, Carol has not answered.
+    # Call 1: row 0 with version "stale" -> skipped "changed", nothing stored.
+    # Call 2: rows 0, 1, 2, 99 -> confirmed [0] with basis "bulk_agreed"; skipped exactly
+    # (1, "not_agreed"), (2, "pending"), (99, "out_of_range"); only row 0 is stored.
 
 def test_bulk_skips_a_row_changed_since_it_was_ticked(world, as_user):
     # read version, both annotators change to a new agreed id -> skipped "changed"
