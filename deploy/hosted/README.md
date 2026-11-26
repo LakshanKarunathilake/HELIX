@@ -261,6 +261,10 @@ table of review decisions; existing rows are kept. Run `backup.sh` before rebuil
 copy the archive to another name: a later run on the same day overwrites
 `sessions-<date>.tgz`, and the script deletes `sessions-*.tgz` archives older than 14 days.
 
+**The final export changes too.** Rows that the previous version exported as final just because
+annotators agreed now export blank, with `_review_reason` `awaiting_review`, until a reviewer
+or admin confirms them on the Review page, individually or in bulk.
+
 The archive is written by a container running as root, so on a Linux server it belongs to root
 with mode `600`: run the backup and the copy with `sudo`, as below (leave `sudo` out if you are
 root). From the repo root, with your own backup directory in the three places. Each command runs
