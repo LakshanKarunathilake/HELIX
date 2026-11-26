@@ -7,6 +7,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from itertools import combinations
 
+from eltool.answers import join_ids, parse_ids
+
 
 @dataclass
 class FinalRow:
@@ -30,21 +32,28 @@ def _cohen_kappa(a: list[str], b: list[str]) -> float | None:
 
 
 def pairwise_agreement(values: dict[int, dict[int, str]]) -> list[dict]:
-    """Agreement for every user pair (a < b) over the rows both have decided.
+    """Agreement for every user pair (a < b) over the rows both have answered.
 
-    ``values[user_id][row_idx]`` is one KB's value (human decisions only).
-    ``percent`` is exact-match agreement in 0-100 (None when no shared rows);
-    ``kappa`` is Cohen's kappa (None when n < 2 or expected agreement is 1).
+    ``values[user_id][row_idx]`` is one KB's value (human decisions only),
+    compared as a set of concept ids; a row where either set is empty is not
+    shared. ``percent`` is exact-set agreement and ``overlap`` the mean Jaccard
+    index, both in 0-100 (None when no shared rows); ``kappa`` is Cohen's kappa
+    over the sets (None when n < 2 or expected agreement is 1).
     """
     out: list[dict] = []
     for a, b in combinations(sorted(values), 2):
-        shared = sorted(values[a].keys() & values[b].keys())
-        va = [values[a][r] for r in shared]
-        vb = [values[b][r] for r in shared]
+        shared = []
+        for row in sorted(values[a].keys() & values[b].keys()):
+            ids_a, ids_b = parse_ids(values[a][row]), parse_ids(values[b][row])
+            if ids_a and ids_b:
+                shared.append((set(ids_a), set(ids_b)))
         n = len(shared)
-        percent = 100.0 * sum(x == y for x, y in zip(va, vb)) / n if n else None
+        percent = 100.0 * sum(x == y for x, y in shared) / n if n else None
+        overlap = 100.0 * sum(len(x & y) / len(x | y) for x, y in shared) / n if n else None
+        kappa = _cohen_kappa([join_ids(x) for x, _ in shared],
+                             [join_ids(y) for _, y in shared])
         out.append({"a": a, "b": b, "n": n, "percent": percent,
-                    "kappa": _cohen_kappa(va, vb)})
+                    "kappa": kappa, "overlap": overlap})
     return out
 
 

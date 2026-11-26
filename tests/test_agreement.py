@@ -36,6 +36,22 @@ def test_kappa_none_for_under_two_shared_rows():
     assert one["n"] == 1 and one["percent"] == 100.0 and one["kappa"] is None
     (zero,) = pairwise_agreement({1: {0: "a"}, 2: {1: "a"}})
     assert zero["n"] == 0 and zero["percent"] is None and zero["kappa"] is None
+    assert zero["overlap"] is None
+
+
+def test_selection_order_is_agreement():
+    (p,) = pairwise_agreement({1: {0: "C1|C2"}, 2: {0: "C2|C1"}})
+    assert (p["percent"], p["overlap"]) == (100.0, 100.0)
+
+
+def test_partial_overlap_is_reported():
+    (p,) = pairwise_agreement({1: {0: "C1|C2", 1: "C3"}, 2: {0: "C1", 1: "C3"}})
+    assert (p["n"], p["percent"], p["overlap"]) == (2, 50.0, 75.0)
+
+
+def test_blank_values_are_not_shared_rows():
+    (p,) = pairwise_agreement({1: {0: "", 1: "a"}, 2: {0: "", 1: "a"}})
+    assert (p["n"], p["percent"]) == (1, 100.0)
 
 
 def test_kappa_none_when_expected_agreement_is_one():
