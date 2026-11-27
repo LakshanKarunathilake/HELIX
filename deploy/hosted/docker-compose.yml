@@ -39,7 +39,7 @@ services:
     restart: unless-stopped
 
   caddy:
-    image: caddy:2.8.4
+    image: caddy:2.8.4@sha256:226d1f059b75399fe19182893c7184591c07b97afc8dfcf44eeb80c9a77a530f
     ports:
       - "80:80"
       - "443:443"
@@ -59,6 +59,7 @@ services:
       dockerfile: docker/Dockerfile.kb
     environment:
       KB_INDEX_PATH: /data/index/mesh-diseases
+      HF_HUB_DISABLE_TELEMETRY: "1"
     volumes:
       # Built on this server by scripts/build_demo_index.py; a relative path starts here.
       - ${DEMO_INDEX_DIR:-./demo-index}:/data/index:ro
@@ -72,6 +73,10 @@ services:
       # Sets the password only when the data volume is first created (README.md).
       NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?set NEO4J_PASSWORD in .env}
       NEO4J_server_memory_heap_max__size: 1G
+      # The demo graph is small; without a cap Neo4j sizes this from the server's memory.
+      NEO4J_server_memory_pagecache_size: 256M
+      # Neo4j sends no usage data from this server.
+      NEO4J_dbms_usage__report_enabled: "false"
     volumes:
       - neo4j_data:/data
     restart: unless-stopped

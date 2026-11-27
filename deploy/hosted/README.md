@@ -59,7 +59,9 @@ Then configure HELIX:
 cp deploy/hosted/.env.example deploy/hosted/.env
 ```
 
-Edit `deploy/hosted/.env`:
+Edit `deploy/hosted/.env`. Compose expands `$` in `.env` values (`ab$cd` becomes `ab` followed
+by the variable `cd`, usually nothing), so use letters and digits in passwords and keep `$` out
+of the other values.
 
 * `HELIX_DOMAIN`: your hostname. The compose file also derives `HELIX_PUBLIC_URL`
   (`https://<HELIX_DOMAIN>`) from it; invitation sign-in links use that URL.
@@ -67,8 +69,8 @@ Edit `deploy/hosted/.env`:
   three values from the Firebase web config. They are public web identifiers, not secrets:
   `GET /api/info` hands them to the browser. The compose file refuses to start without them.
   The API verifies sign-ins against the project id.
-* `NEO4J_PASSWORD`: the demo graph's password (step 4). `docker compose` commands for this
-  server refuse to run while it is empty.
+* `NEO4J_PASSWORD`: the demo graph's password (step 4), 8 or more letters and digits.
+  `docker compose` commands for this server refuse to run while it is empty.
 * `DEMO_INDEX_DIR`: the folder holding the demo index. Leave it empty to use
   `deploy/hosted/demo-index`.
 * `HELIX_URL_ALLOWLIST`: comma-separated `host:port` of further KB servers that may use plain
@@ -96,11 +98,16 @@ Follow the steps in this order, from the repo root. **The index must be built be
 
 **The builders replace data, so run them only through this compose project**, as written here.
 The graph builder deletes every `:Concept` node at the address it is given (by default this
-project's `neo4j`): never give it the address of any other database. Read "Rebuilding the demo
-data" below before running any of them a second time.
+project's `neo4j`). As a guard, before it writes anything it counts the `:Concept` nodes whose
+`cui` is not a MeSH `D...` id; if there is even one, it names the address and the count, changes
+nothing and stops, unless you add `--replace`. The guard cannot tell the demo graph from another
+graph whose concepts all have such ids, so never give the builder the address of any other
+database. Read "Rebuilding the demo data" below before running any of them a second time.
+
+For a server that is not meant to serve the demo, see "Running without the demo" below.
 
 **4.1 Set the graph password.** In `deploy/hosted/.env`, set `NEO4J_PASSWORD` to 8 or more
-characters. Letters and digits are safest (`openssl rand -hex 24` makes a suitable one).
+letters and digits (`openssl rand -hex 24` makes a suitable one).
 
 **4.2 Download the MeSH descriptor file,** `desc2026.gz`, from
 <https://nlmpubs.nlm.nih.gov/projects/mesh/MESH_FILES/xmlmesh/> into `deploy/hosted/mesh/`. Read
@@ -114,7 +121,10 @@ curl -fL -o deploy/hosted/mesh/desc2026.gz \
 gzip -t deploy/hosted/mesh/desc2026.gz && echo "download is complete"
 ```
 
-If it does not end with `download is complete`, do not go on.
+If it does not end with `download is complete`, do not go on. NLM normally moves a year's files
+to an archive path once the next year's files are published. Check this on NLM's site (it has not
+been verified here): if the 2026 file is no longer at the address above, get `desc2026.gz` from
+the archive and save it at the same path.
 
 **4.3 Build the images:**
 
@@ -142,11 +152,14 @@ access. Its model card gives the licence as Apache-2.0 and says it was trained w
 data. The download is kept in the `hf_cache` volume; `kb` downloads the model again if it starts
 without it.
 
-The build embeds every disease term, on the CPU. How long that takes has not been measured, and
-the script prints no progress of its own: it ends with `Indexed <number> terms to
-/data/out/mesh-diseases`. The folder then holds `mesh-diseases.faiss`,
-`mesh-diseases_metadata.pkl` and `mesh-diseases_config.json`. If the command fails, fix the cause
-and run it again before going on.
+The build embeds every disease term, on the CPU. How long that takes has not been measured. It
+prints `Embedded <done> of <total> terms` every 50 batches (3,200 terms at the default batch
+size) and ends with `Indexed <number> terms to /data/out/mesh-diseases`. The folder then holds
+`mesh-diseases.faiss`, `mesh-diseases_metadata.pkl` and `mesh-diseases_config.json`. If the
+command fails, fix the cause and run it again before going on.
+
+The build runs as root in the container, so on a Linux server these files belong to root: use
+`sudo` to remove or replace them by hand.
 
 **4.5 Start the server:**
 
@@ -181,6 +194,31 @@ saved answers.
 invite each evaluator as `annotator` or `reviewer` with the session `demo` ("Inviting people",
 below). Each annotator has a private layer, so annotators do not see each other's answers.
 
+### Running without the demo
+
+A team server that does not want the demo skips step 4 and does not start `kb` or `neo4j`. In
+`deploy/hosted/.env`:
+
+* Still set `NEO4J_PASSWORD` (8 or more letters and digits). Compose reads the whole compose file
+  and refuses to run while it is empty, whichever containers you start.
+* Set `HELIX_NOTICE=" "` (one space, in quotes) to show no notice. Left empty, the MeSH
+  attribution is shown, although the server serves no MeSH demo data.
+
+Then name `caddy` when starting; Compose adds what it depends on, `web` and `api`:
+
+```
+docker compose -f deploy/hosted/docker-compose.yml --env-file deploy/hosted/.env up -d --build caddy
+```
+
+Keep the final `caddy` on every `up` command, including the ones under "Before upgrading": without
+it, `kb` and `neo4j` start too. If they are already running, stop them with
+`docker compose -f deploy/hosted/docker-compose.yml --env-file deploy/hosted/.env stop kb neo4j`.
+Items 9 and 10 of the smoke checklist do not apply, and sessions need the addresses of your own KB
+servers and graph. If `kb` is started without an index, it keeps restarting, and unless
+`HELIX_NOTICE` is changed the MeSH notice is shown.
+
+This was checked with `docker compose config` only; a server has not yet been started this way.
+
 ### Data source notice
 
 The web app shows this at the foot of its pages, to meet NLM's terms:
@@ -200,12 +238,15 @@ deployment, they replace its data:
 
 * **Index builder:** overwrites the index files at its `--out` prefix. It removes the old
   `_config.json` before it writes anything, so a build that fails after that leaves nothing `kb`
-  can load until a build succeeds. After a successful rebuild, restart the search server, which still holds the old
-  index: `docker compose -f deploy/hosted/docker-compose.yml --env-file deploy/hosted/.env
-  restart kb`.
+  can load until a build succeeds. On a Linux server the files belong to root (use `sudo` to
+  remove or replace them by hand). After a successful rebuild, restart the search server, which
+  still holds the old index: `docker compose -f deploy/hosted/docker-compose.yml --env-file
+  deploy/hosted/.env restart kb`.
 * **Graph builder:** deletes every `:Concept` node at the address it is given and loads the MeSH
-  graph in its place. Use it only with this compose project's `neo4j`. If a load stops part-way,
-  run it again.
+  graph in its place. An empty database and an earlier demo load, complete or partial, are
+  replaced without asking. If any `:Concept` node has no MeSH `D...` id, it changes nothing and
+  stops; adding `--replace` to the command deletes every `:Concept` node there all the same. Use
+  it only with this compose project's `neo4j`. If a load stops part-way, run it again.
 * **Session seed script:** refuses to run when the `demo` session already exists. With
   `--update-config` it rewrites that session's `session.json` only; the input rows and saved
   answers stay as they are, but the settings are rebuilt from defaults, so **edits made to the
@@ -389,6 +430,12 @@ Decision notes are kept in `helix.db`; this file does not include them.
 
 ## 6. Move existing sessions (optional)
 
+**Study sessions do not belong on the public demo server.** They can hold UMLS-derived content
+(concept ids and names, candidates and hints, annotations), and no UMLS-derived data belongs
+there (step 4). The script below copies everything under `--src`, so on a demo server skip this
+step, or point `--src` at a folder holding only sessions you have checked are free of such
+content.
+
 On the Mac that has the sessions, from the repo root:
 
 ```
@@ -467,9 +514,12 @@ the earliest one. The script does not delete these copies; they contain the stor
 remove them once you no longer need them.
 
 **Upgrading from a version without `kb` and `neo4j`:** use only the first three commands above
-(backup, copy, `git pull`; leave the `&&` off the third). Then add a `NEO4J_PASSWORD=` line to
-your existing `deploy/hosted/.env` (do not copy the example file over it; step 3 describes the
-other new settings, which are optional) and follow step 4 from the top.
+(backup, copy, `git pull`; leave the `&&` off the third). Then, in your existing
+`deploy/hosted/.env` (do not copy the example file over it), set `NEO4J_PASSWORD` to 8 or more
+letters and digits, for example the output of `openssl rand -hex 24`. Adding an empty
+`NEO4J_PASSWORD=` line is not enough. Step 3 describes the other new settings, which are
+optional. Then follow step 4 from the top, or, for a server without the demo, "Running without
+the demo".
 
 To restore a pre-upgrade copy, follow "Restoring a backup" below with the same `BACKUP_DIR`,
 and set `ARCHIVE` to the copy's file name, `pre-upgrade-<date>-<time>.tgz`, instead of

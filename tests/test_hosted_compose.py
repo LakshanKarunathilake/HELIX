@@ -83,6 +83,24 @@ def test_graph_password_is_required_and_data_is_kept(services):
     assert neo4j["restart"] == "unless-stopped"
 
 
+def test_graph_sends_no_usage_reports(services):
+    environment = services["neo4j"]["environment"]
+    assert environment["NEO4J_dbms_usage__report_enabled"] == "false"
+
+
+def test_graph_page_cache_is_capped(services):
+    assert services["neo4j"]["environment"]["NEO4J_server_memory_pagecache_size"] == "256M"
+
+
+def test_search_server_sends_no_hub_telemetry(services):
+    assert services["kb"]["environment"]["HF_HUB_DISABLE_TELEMETRY"] == "1"
+
+
+def test_front_door_image_is_pinned_by_digest(services):
+    assert services["caddy"]["image"] == (
+        "caddy:2.8.4@sha256:226d1f059b75399fe19182893c7184591c07b97afc8dfcf44eeb80c9a77a530f")
+
+
 def test_api_gets_the_graph_password_for_the_builders(services):
     password = services["api"]["environment"]["NEO4J_PASSWORD"]
     assert password.startswith("${NEO4J_PASSWORD:?"), password
