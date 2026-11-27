@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE DescriptorRecordSet SYSTEM "https://www.nlm.nih.gov/databases/dtd/nlmdescriptorrecordset_20260101.dtd">
+<!-- Hand-written miniature of the MeSH descriptor file, for tests only.
+     The index builder tests allow at most 16 distinct terms here. -->
+<DescriptorRecordSet LanguageCode="eng">
+  <DescriptorRecord DescriptorClass="1">
+    <DescriptorUI>D012140</DescriptorUI>
+    <DescriptorName><String>Respiratory Tract Diseases</String></DescriptorName>
+    <TreeNumberList>
+      <TreeNumber>C08</TreeNumber>
+    </TreeNumberList>
+    <ConceptList>
+      <Concept PreferredConceptYN="Y">
+        <ConceptUI>M0000001</ConceptUI>
+        <ConceptName><String>Respiratory Tract Diseases</String></ConceptName>
+        <ScopeNote>Diseases of the respiratory system.</ScopeNote>
+        <TermList>
+          <Term><TermUI>T000001</TermUI><String>Respiratory Tract Diseases</String></Term>
+          <Term><TermUI>T000002</TermUI><String>Respiratory Tract Disease</String></Term>
+        </TermList>
+      </Concept>
+    </ConceptList>
+  </DescriptorRecord>
+  <DescriptorRecord DescriptorClass="1">
+    <DescriptorUI>D001982</DescriptorUI>
+    <DescriptorName><String>Bronchial Diseases</String></DescriptorName>
+    <TreeNumberList>
+      <TreeNumber>C08.127</TreeNumber>
+    </TreeNumberList>
+    <ConceptList>
+      <Concept PreferredConceptYN="Y">
+        <ConceptUI>M0000002</ConceptUI>
+        <ConceptName><String>Bronchial Diseases</String></ConceptName>
+        <TermList>
+          <Term><TermUI>T000003</TermUI><String>Bronchial Diseases</String></Term>
+          <Term><TermUI>T000004</TermUI><String>Bronchial Disease</String></Term>
+        </TermList>
+      </Concept>
+    </ConceptList>
+  </DescriptorRecord>
+  <DescriptorRecord DescriptorClass="1">
+    <DescriptorUI>D001249</DescriptorUI>
+    <DescriptorName><String>Asthma</String></DescriptorName>
+    <SeeRelatedList>
+      <SeeRelatedDescriptor>
+        <DescriptorReferredTo>
+          <DescriptorUI>D001982</DescriptorUI>
+          <DescriptorName><String>Bronchial Diseases</String></DescriptorName>
+        </DescriptorReferredTo>
+      </SeeRelatedDescriptor>
+    </SeeRelatedList>
+    <TreeNumberList>
+      <TreeNumber>C08.127.108</TreeNumber>
+    </TreeNumberList>
+    <ConceptList>
+      <Concept PreferredConceptYN="Y">
+        <ConceptUI>M0000003</ConceptUI>
+        <ConceptName><String>Asthma</String></ConceptName>
+        <ScopeNote>
+          A disease of the airways with recurring narrowing of the bronchi.
+        </ScopeNote>
+        <TermList>
+          <Term><TermUI>T000005</TermUI><String>Asthma</String></Term>
+          <Term><TermUI>T000006</TermUI><String>Bronchial Asthma</String></Term>
+        </TermList>
+      </Concept>
+      <Concept PreferredConceptYN="N">
+        <ConceptUI>M0000004</ConceptUI>
+        <ConceptName><String>bronchial asthma</String></ConceptName>
+        <TermList>
+          <Term><TermUI>T000007</TermUI><String>bronchial asthma</String></Term>
+        </TermList>
+      </Concept>
+    </ConceptList>
+  </DescriptorRecord>
+  <DescriptorRecord DescriptorClass="1">
+    <DescriptorUI>D000001</DescriptorUI>
+    <DescriptorName><String>Calcimycin</String></DescriptorName>
+    <TreeNumberList>
+      <TreeNumber>D03.633</TreeNumber>
+    </TreeNumberList>
+    <ConceptList>
+      <Concept PreferredConceptYN="Y">
+        <ConceptUI>M0000005</ConceptUI>
+        <ConceptName><String>Calcimycin</String></ConceptName>
+        <ScopeNote>An antibiotic that carries ions across membranes.</ScopeNote>
+        <TermList>
+          <Term><TermUI>T000008</TermUI><String>Calcimycin</String></Term>
+        </TermList>
+      </Concept>
+    </ConceptList>
+  </DescriptorRecord>
+</DescriptorRecordSet>
