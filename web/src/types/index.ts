@@ -283,3 +283,156 @@ export const DEFAULT_KB: KBConfig = {
   enable_dense: true,
   enable_lexical: false,
 }
+
+// ── auth ──────────────────────────────────────────────────────────────────────
+
+export type Role = 'admin' | 'reviewer' | 'annotator'
+
+export interface User {
+  id: number
+  email: string
+  name: string
+  role: Role
+}
+
+/** A user as the admin Users page sees them (`/api/admin/users`). */
+export interface AdminUser {
+  id: number
+  email: string
+  name: string
+  role: Role
+  active: boolean
+  session_names: string[]
+}
+
+export type InviteStatus = 'pending' | 'accepted' | 'revoked'
+
+export interface Invite {
+  id: number
+  email: string
+  role: Role
+  session_names: string[]
+  status: InviteStatus
+}
+
+export interface InviteCreated {
+  invite: Invite
+  sign_in_url: string
+  already_registered: boolean
+}
+
+export interface FirebaseWebConfig {
+  apiKey: string
+  authDomain: string
+  projectId: string
+}
+
+export interface AppInfo {
+  hosted: boolean
+  auth: boolean
+  firebase: FirebaseWebConfig | null
+}
+
+// ── review (reviewer / admin) ─────────────────────────────────────────────────
+
+/** A listed row's status; rows nobody has answered (`waiting`) are only counted. */
+export type ReviewStatus = 'disagree' | 'single' | 'agreed' | 'changed' | 'decided'
+
+/** How a decision was reached; the server derives it. `legacy`: saved before bases existed. */
+export type Basis = 'accepted' | 'combined' | 'override' | 'bulk_agreed' | 'legacy'
+
+/** One annotator's latest human answer, as sorted concept ids per KB. */
+export interface ReviewAnswer {
+  user_id: number
+  user_name: string
+  kb_ids: Record<string, string[]>
+  /** Every KB has at least one id. */
+  complete: boolean
+  ts: string
+}
+
+/** A concept some annotator proposed for one KB. */
+export interface ReviewOption {
+  id: string
+  user_ids: number[]
+  /** Two or more answered and every one of them chose it. */
+  preticked: boolean
+}
+
+export interface Adjudication {
+  row_idx: number
+  kb_values: Record<string, string>
+  kb_ids: Record<string, string[]>
+  note: string
+  basis: Basis
+  source_users: number[]
+  reviewer_id: number
+  reviewer_name: string
+  ts: string
+}
+
+export interface ReviewRow {
+  idx: number
+  label: string
+  doc_id: string
+  status: ReviewStatus
+  /** Send back with a decision; changes when an answer or the decision changes. */
+  version: string
+  /** Current annotators without a complete answer. */
+  pending: number
+  bulk_eligible: boolean
+  answers: ReviewAnswer[]
+  options: Record<string, ReviewOption[]>
+  decision: Adjudication | null
+}
+
+export interface ReviewCounts {
+  to_decide: number
+  agreed: number
+  decided: number
+  waiting: number
+}
+
+export interface ReviewData {
+  kb_names: string[]
+  total: number
+  has_context: boolean
+  counts: ReviewCounts
+  rows: ReviewRow[]
+}
+
+export interface ReviewSummary extends ReviewCounts {
+  total: number
+}
+
+/** What the reviewer reads to judge one row. */
+export interface ReviewRowContext {
+  idx: number
+  label: string
+  doc_id: string
+  info: Record<string, unknown>
+  context_text: string | null
+  entity_span: string | null
+}
+
+export type BulkSkipReason = 'out_of_range' | 'changed' | 'not_agreed' | 'pending'
+
+export interface BulkResult {
+  confirmed: number[]
+  skipped: { row_idx: number; reason: BulkSkipReason }[]
+}
+
+export interface PairAgreement {
+  a: number
+  b: number
+  n: number
+  percent: number | null
+  kappa: number | null
+  /** Mean Jaccard overlap of the concept sets, 0-100. */
+  overlap: number | null
+}
+
+export interface AgreementData {
+  by_kb: Record<string, PairAgreement[]>
+  excluded_script_rows: number
+}

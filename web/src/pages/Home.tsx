@@ -1,11 +1,17 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { useNavigate } from 'react-router-dom'
-import { PenLine, Settings, ArrowRight, PlusCircle, Loader2, Download, ChevronDown, CheckCircle2 } from 'lucide-react'
+import { Link, useNavigate } from 'react-router-dom'
+import { ClipboardCheck, PenLine, Settings, ArrowRight, PlusCircle, Loader2, Download, ChevronDown, CheckCircle2 } from 'lucide-react'
 import * as api from '@/api/client'
+import { useAuth } from '@/hooks/useAuth'
+
+const reviewPath = (name: string) => `/review/${encodeURIComponent(name)}`
 
 export function Home() {
   const navigate = useNavigate()
+  const { isAdmin, auth, user, loading } = useAuth()
+  // Reviewing exists only with accounts: never offered when auth is off or still loading.
+  const role = !loading && auth ? user?.role : undefined
   const { data: sessions, isLoading, error } = useQuery({
     queryKey: ['sessions'],
     queryFn: api.getSessions,
@@ -30,10 +36,12 @@ export function Home() {
       {/* actions */}
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-lg font-semibold text-gray-800">Sessions</h2>
-        <button className="btn-primary" onClick={() => navigate('/configure')}>
-          <PlusCircle className="w-4 h-4" />
-          New session
-        </button>
+        {isAdmin && (
+          <button className="btn-primary" onClick={() => navigate('/configure')}>
+            <PlusCircle className="w-4 h-4" />
+            New session
+          </button>
+        )}
       </div>
 
       {/* list */}
@@ -51,16 +59,22 @@ export function Home() {
       {sessions && sessions.length === 0 && (
         <div className="card p-12 flex flex-col items-center gap-4 text-center">
           <PenLine className="w-10 h-10 text-gray-300" />
-          <p className="text-gray-500">No sessions yet. Create one to get started.</p>
-          <button className="btn-primary" onClick={() => navigate('/configure')}>
-            <PlusCircle className="w-4 h-4" /> New session
-          </button>
+          <p className="text-gray-500">
+            {isAdmin ? 'No sessions yet. Create one to get started.' : 'No sessions yet. An admin will add you to one.'}
+          </p>
+          {isAdmin && (
+            <button className="btn-primary" onClick={() => navigate('/configure')}>
+              <PlusCircle className="w-4 h-4" /> New session
+            </button>
+          )}
         </div>
       )}
       {sessions && sessions.length > 0 && (
         <div className="grid gap-3">
-          {sessions.map(name => (
-            <SessionCard key={name} name={name} />
+          {sessions.map(name => role === 'reviewer' ? (
+            <ReviewerCard key={name} name={name} />
+          ) : (
+            <SessionCard key={name} name={name} canConfigure={isAdmin} canReview={role === 'admin'} />
           ))}
         </div>
       )}
@@ -68,7 +82,11 @@ export function Home() {
   )
 }
 
-function SessionCard({ name }: { name: string }) {
+function SessionCard({ name, canConfigure, canReview }: {
+  name: string
+  canConfigure: boolean
+  canReview: boolean
+}) {
   const navigate = useNavigate()
   const { data: progress } = useQuery({
     queryKey: ['progress', name],
@@ -77,52 +95,100 @@ function SessionCard({ name }: { name: string }) {
     staleTime: 0,
   })
 
-  const pct = progress ? Math.round((progress.done / progress.total) * 100) : 0
   const complete = !!progress && progress.total > 0 && progress.done >= progress.total
 
   return (
     <div className="card p-5 flex items-center gap-4 hover:shadow-md transition-shadow">
       <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <p className="font-semibold text-gray-900 truncate">{name}</p>
-          {complete && (
-            <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">
-              <CheckCircle2 className="w-3 h-3" /> Complete
-            </span>
-          )}
-        </div>
+        <CardTitle name={name} complete={complete} />
         {progress ? (
-          <div className="mt-2">
-            <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
-              <span>{progress.done} / {progress.total} annotated</span>
-              <span>{pct}%</span>
-            </div>
-            <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-brand-500 rounded-full transition-all"
-                style={{ width: `${pct}%` }}
-              />
-            </div>
-          </div>
+          <ProgressBar done={progress.done} total={progress.total} unit="annotated" />
         ) : (
           <p className="text-xs text-gray-400 mt-1 animate-pulse">Loading progress…</p>
         )}
       </div>
       <div className="flex items-center gap-2 flex-shrink-0">
         <ExportMenu name={name} />
-        <button
-          className="btn-secondary"
-          onClick={() => navigate(`/configure/${name}`)}
-          title="Edit configuration"
-        >
-          <Settings className="w-4 h-4" />
-        </button>
+        {canReview && (
+          <Link className="btn-secondary" to={reviewPath(name)}>
+            <ClipboardCheck className="w-4 h-4" /> Review
+          </Link>
+        )}
+        {canConfigure && (
+          <button
+            className="btn-secondary"
+            onClick={() => navigate(`/configure/${name}`)}
+            title="Edit configuration"
+          >
+            <Settings className="w-4 h-4" />
+          </button>
+        )}
         <button
           className="btn-primary"
           onClick={() => navigate(`/annotate/${name}`)}
         >
           Annotate <ArrowRight className="w-4 h-4" />
         </button>
+      </div>
+    </div>
+  )
+}
+
+/** A reviewer's card: how many rows are decided, and the way into the review. */
+function ReviewerCard({ name }: { name: string }) {
+  const { data: summary, isError } = useQuery({
+    queryKey: ['review-summary', name],
+    queryFn: () => api.getReviewSummary(name),
+    refetchOnMount: 'always',
+    staleTime: 0,
+  })
+  const complete = !!summary && summary.total > 0 && summary.decided === summary.total
+
+  return (
+    <div className="card p-5 flex flex-wrap items-center gap-4 hover:shadow-md transition-shadow">
+      <div className="flex-1 min-w-[10rem]">
+        <CardTitle name={name} complete={complete} />
+        {summary ? (
+          <ProgressBar done={summary.decided} total={summary.total} unit="decided" />
+        ) : isError ? (
+          <p className="text-xs text-red-600 mt-1">Could not load review progress.</p>
+        ) : (
+          <p className="text-xs text-gray-400 mt-1 animate-pulse">Loading progress…</p>
+        )}
+      </div>
+      <Link className="btn-primary flex-shrink-0" to={reviewPath(name)}>
+        <ClipboardCheck className="w-4 h-4" /> Review
+      </Link>
+    </div>
+  )
+}
+
+function CardTitle({ name, complete }: { name: string; complete: boolean }) {
+  return (
+    <div className="flex items-center gap-2">
+      <p className="font-semibold text-gray-900 truncate">{name}</p>
+      {complete && (
+        <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">
+          <CheckCircle2 className="w-3 h-3" /> Complete
+        </span>
+      )}
+    </div>
+  )
+}
+
+function ProgressBar({ done, total, unit }: { done: number; total: number; unit: string }) {
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0
+  return (
+    <div className="mt-2">
+      <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+        <span>{done} / {total} {unit}</span>
+        <span>{pct}%</span>
+      </div>
+      <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+        <div
+          className="h-full bg-brand-500 rounded-full transition-all"
+          style={{ width: `${pct}%` }}
+        />
       </div>
     </div>
   )

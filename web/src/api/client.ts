@@ -1,22 +1,109 @@
-import type { Candidate, DocumentMentions, FeedbackOptions, GraphConnection, GraphData, KBConfig, LLMRerank, PanelName, ParsedFile, Progress, Reflection, RowData, SessionConfig } from '@/types'
+import type { AdminUser, Adjudication, AgreementData, BulkResult, AppInfo, Candidate, DocumentMentions, FeedbackOptions, GraphConnection, GraphData, Invite, InviteCreated, KBConfig, LLMRerank, PanelName, ParsedFile, Progress, Reflection, ReviewData, ReviewRowContext, ReviewSummary, Role, RowData, SessionConfig, User } from '@/types'
 
 const BASE = '/api'
+
+/** A failed API call; `status` lets callers tell a 401/403 from other failures. */
+export class ApiError extends Error {
+  readonly status: number
+  constructor(status: number, message: string) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
+let unauthorizedHandler: (() => void) | null = null
+
+/** Register what happens when any call (other than sign-in itself) comes back 401. */
+export const onUnauthorized = (handler: (() => void) | null) => {
+  unauthorizedHandler = handler
+}
 
 async function req<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, options)
   if (!res.ok) {
+    if (res.status === 401 && path !== '/auth/session') unauthorizedHandler?.()
     const body = await res.json().catch(() => ({}))
-    throw new Error(body.detail ?? body.error ?? `HTTP ${res.status}`)
+    throw new ApiError(res.status, body.detail ?? body.error ?? `HTTP ${res.status}`)
   }
   return res.json()
 }
+
+// ── auth ────────────────────────────────────────────────────────────────────
+
+export const sessionLogin = (idToken: string) =>
+  req<User>('/auth/session', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id_token: idToken }),
+  })
+
+export const logout = () => req<{ ok: boolean }>('/auth/logout', { method: 'POST' })
+
+export const me = () => req<User>('/auth/me')
+
+// ── admin: users and invitations ─────────────────────────────────────────────
+
+const jsonInit = (method: string, body: unknown): RequestInit => ({
+  method,
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body),
+})
+
+export const listUsers = () => req<AdminUser[]>('/admin/users')
+
+export const patchUser = (id: number, changes: { role?: Role; active?: boolean }) =>
+  req<AdminUser>(`/admin/users/${id}`, jsonInit('PATCH', changes))
+
+export const setUserSessions = (id: number, sessionNames: string[]) =>
+  req<AdminUser>(`/admin/users/${id}/sessions`, jsonInit('PUT', { session_names: sessionNames }))
+
+export const listInvites = () => req<Invite[]>('/admin/invites')
+
+export const createInvite = (body: { email: string; role: Role; session_names: string[] }) =>
+  req<InviteCreated>('/admin/invites', jsonInit('POST', body))
+
+export const revokeInvite = (id: number) =>
+  req<{ ok: boolean }>(`/admin/invites/${id}/revoke`, { method: 'POST' })
+
+// ── review (reviewer / admin) ────────────────────────────────────────────────
+
+const sessionPath = (name: string) => `/sessions/${encodeURIComponent(name)}`
+
+export const getReview = (name: string) => req<ReviewData>(`${sessionPath(name)}/review`)
+
+export const getReviewSummary = (name: string) =>
+  req<ReviewSummary>(`${sessionPath(name)}/review/summary`)
+
+export const getReviewRow = (name: string, idx: number) =>
+  req<ReviewRowContext>(`${sessionPath(name)}/review/rows/${idx}`)
+
+export const getAgreement = (name: string) => req<AgreementData>(`${sessionPath(name)}/agreement`)
+
+/**
+ * `kb_values` must hold exactly the session's KB names. `version` is the row's version
+ * on the screen the reviewer decided from; the server refuses (409) when it moved on.
+ */
+export const postAdjudication = (
+  name: string,
+  body: { row_idx: number; kb_values: Record<string, string>; note: string; version: string },
+) => req<Adjudication>(`${sessionPath(name)}/adjudications`, jsonInit('POST', body))
+
+/** Confirm the shared answer of agreed rows; the server says why it skipped any. */
+export const postBulkAdjudications = (
+  name: string,
+  rows: { row_idx: number; version: string }[],
+) => req<BulkResult>(`${sessionPath(name)}/adjudications/bulk`, jsonInit('POST', { rows }))
+
+/** Download link for the reviewed set (cookie-authenticated, so a plain link works). */
+export const finalExportUrl = (name: string) => `${BASE}${sessionPath(name)}/export?final=1`
 
 // ── sessions ────────────────────────────────────────────────────────────────
 
 export const getSessions = () =>
   req<{ sessions: string[] }>('/sessions').then(r => r.sessions)
 
-export const getInfo = () => req<{ hosted: boolean }>('/info')
+export const getInfo = () => req<AppInfo>('/info')
 
 export const uploadContext = (sessionName: string, file: File) => {
   const fd = new FormData()
@@ -120,11 +207,14 @@ export const saveRow = (
   annotations: Record<string, string>,
   llm_used?: string | null,
   provenance?: RowProvenance,
+  // `auto: true` marks a script-written save (the Auto-annotate modal): the
+  // decision log records it as `auto_annotate`, not as a human decision.
+  opts?: { auto?: boolean },
 ) =>
   req<{ ok: boolean }>(`/sessions/${name}/rows/${idx}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ annotations, llm_used, ...provenance }),
+    body: JSON.stringify({ annotations, llm_used, ...provenance, ...(opts?.auto ? { auto: true } : {}) }),
   })
 
 // ── per-decision feedback (Annotation Guide Sec. 8) ───────────────────────────

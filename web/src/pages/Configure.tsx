@@ -6,6 +6,7 @@ import {
   FlaskConical, CheckCircle2, XCircle, Loader2, ArrowRight, Zap,
 } from 'lucide-react'
 import * as api from '@/api/client'
+import { useAuth } from '@/hooks/useAuth'
 import type { Candidate, GraphConnection, KBConfig, ParsedFile, SessionConfig } from '@/types'
 import { DEFAULT_GRAPH, DEFAULT_KB } from '@/types'
 import { CandidateCard } from '@/components/CandidateCard'
@@ -18,6 +19,7 @@ export function Configure() {
   const { sessionName } = useParams<{ sessionName?: string }>()
   const navigate = useNavigate()
   const qc = useQueryClient()
+  const { auth, user, isAdmin } = useAuth()
   const isEdit = Boolean(sessionName)
 
   // ── base fields ─────────────────────────────────────────────────────────
@@ -164,7 +166,7 @@ export function Configure() {
   async function handleSave() {
     setError('')
     if (!name.trim()) { setError('Session name is required'); return }
-    if (!annotator.trim()) { setError('Annotator name is required'); return }
+    if (!auth && !annotator.trim()) { setError('Annotator name is required'); return }
     if (!labelCol) { setError('Select an entity-label column'); return }
     if (!kbs.length) { setError('Add at least one KB'); return }
     if (!parsed?.tmp_path && !isEdit) { setError('Upload a CSV/TSV file'); return }
@@ -208,7 +210,7 @@ export function Configure() {
       } else {
         const created = await api.createSession({
           session_name: name.trim(),
-          annotator: annotator.trim(),
+          annotator: auth && user ? user.name : annotator.trim(),
           tmp_path: parsed!.tmp_path,
           original_filename: parsed!.filename,
           delimiter: parsed!.delimiter,
@@ -314,15 +316,17 @@ export function Configure() {
               disabled={isEdit}
             />
           </div>
-          <div>
-            <label className="label">Annotator name</label>
-            <input
-              className="input"
-              placeholder="lakshan"
-              value={annotator}
-              onChange={e => setAnnotator(e.target.value)}
-            />
-          </div>
+          {!auth && (
+            <div>
+              <label className="label">Annotator name</label>
+              <input
+                className="input"
+                placeholder="lakshan"
+                value={annotator}
+                onChange={e => setAnnotator(e.target.value)}
+              />
+            </div>
+          )}
         </div>
 
         <div className="border-t border-gray-100 pt-4 mt-2">
@@ -927,16 +931,18 @@ export function Configure() {
               <Zap className="w-4 h-4" />
               Auto-annotate all
             </button>
-            <button
-              className="btn-secondary px-6 py-2.5"
-              onClick={() => setShowMetrics(true)}
-              disabled={deleting || saving}
-              title="Enable latency + memory tracking and view performance insights"
-            >
-              <Activity className="w-4 h-4" />
-              Performance
-            </button>
-            {enableGraph && (
+            {isAdmin && (
+              <button
+                className="btn-secondary px-6 py-2.5"
+                onClick={() => setShowMetrics(true)}
+                disabled={deleting || saving}
+                title="Enable latency + memory tracking and view performance insights"
+              >
+                <Activity className="w-4 h-4" />
+                Performance
+              </button>
+            )}
+            {isAdmin && enableGraph && (
               <button
                 className="btn-secondary px-6 py-2.5"
                 onClick={() => setShowGraphStats(true)}

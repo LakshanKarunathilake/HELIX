@@ -6,15 +6,18 @@ Run from the ELTool root:
 """
 from __future__ import annotations
 
+import csv
 import glob
 import io
 import json
 import logging
+import os
 import re
 import shutil
 import sys
 import threading
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,7 +27,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Body
+from fastapi import FastAPI, HTTPException, UploadFile, File, Body, Depends, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -36,7 +39,11 @@ from eltool.config import SLUG_RE, GraphConnection, KBConfig, SessionConfig
 from eltool import feedback as fb
 from eltool.provenance import classify_method
 from eltool.review import review_payload
-from eltool.hosting import check_neo4j_uri, check_outbound_url, cors_origins, hosted_mode
+from eltool.hosting import auth_enabled, check_neo4j_uri, check_outbound_url, cors_origins, hosted_mode
+from eltool import decisions, invites, userdb
+from eltool.auth import (annotator_access, auth_gate, current_user, require_admin,
+                         session_access)
+from api import auth_routes, review_routes
 from eltool.context_upload import ContextUploadError, extract_context_zip
 from eltool.graph_client import GraphError, Neo4jGraphClient, load_neo4j_settings
 from eltool.graph_pool import GraphClientPool, resolve_graph_client
@@ -51,7 +58,9 @@ from eltool.session import (
 )
 from eltool.store import (
     ANNOTATOR_COL, CONFIDENCE_COL, HINT_COL, LLM_COL, ROUTE_COL, detect_delimiter,
-    find_resume_index, init_output, load_input, save_output, write_feedback, write_row,
+    find_resume_index, init_output, load_input, next_revision, save_output,
+    spreadsheet_safe_cell, write_feedback,
+    write_row,
 )
 
 # Output CSVs are written by full-file read-modify-write, so concurrent saves
@@ -60,6 +69,9 @@ from eltool.store import (
 _WRITE_LOCK = threading.Lock()
 
 app = FastAPI(title="ELTool API", version="1.0")
+# Registered before CORS so CORS is the outer layer: a 401 from the gate still
+# carries CORS headers, and preflight requests never reach the gate.
+app.middleware("http")(auth_gate)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins(),
@@ -73,9 +85,25 @@ _TMP.mkdir(exist_ok=True)
 MAX_CONTEXT_UPLOAD = 50 * 1024 * 1024
 
 
+app.include_router(auth_routes.router)
+app.include_router(review_routes.router)
+
+
+def _firebase_web_config() -> dict | None:
+    """The public web-SDK config the login page needs (identifiers, not secrets)."""
+    if not auth_enabled():
+        return None
+    cfg = {
+        "apiKey": os.environ.get("HELIX_FIREBASE_API_KEY", ""),
+        "authDomain": os.environ.get("HELIX_FIREBASE_AUTH_DOMAIN", ""),
+        "projectId": os.environ.get("HELIX_FIREBASE_PROJECT_ID", ""),
+    }
+    return cfg if all(cfg.values()) else None
+
+
 @app.get("/api/info")
 def get_info():
-    return {"hosted": hosted_mode()}
+    return {"hosted": hosted_mode(), "auth": auth_enabled(), "firebase": _firebase_web_config()}
 
 
 def _require_session_name(name: str) -> str:
@@ -84,6 +112,56 @@ def _require_session_name(name: str) -> str:
     if not isinstance(name, str) or not SLUG_RE.fullmatch(name):
         raise HTTPException(404, "Session not found")
     return name
+
+
+def _out(name: str, user: userdb.User | None) -> Path:
+    """The caller's annotation layer: their own file in auth mode, else annotated.csv."""
+    return output_csv_path(name, user.id if user else None)
+
+
+def _who(cfg: SessionConfig, user: userdb.User | None) -> str:
+    """The name stamped in the annotator column: the signed-in user, else the session's."""
+    return user.name if user else cfg.annotator
+
+
+def _decision_log(user: userdb.User | None):
+    """The decision-log transaction for a layer write (a no-op with auth off).
+
+    Used inside the ``_WRITE_LOCK`` section, with ``tx.add`` before the CSV
+    write: a failed insert stops the save, a failed save rolls back the log.
+    """
+    return decisions.transaction() if user is not None else nullcontext()
+
+
+def _layer_values(out_df: pd.DataFrame, idx: int, kbs) -> dict[str, str]:
+    """The caller's current value for each of ``kbs`` on row ``idx`` ("" if none)."""
+    return {kb: str(out_df.at[idx, kb] or "")
+            if kb in out_df.columns and idx in out_df.index else "" for kb in kbs}
+
+
+def _check_annotations(annotations: dict[str, str], kb_names: list[str]) -> None:
+    """Auth mode: a save names only the session's KB columns, so it cannot write
+    another column of the layer (the annotator name, frozen provenance, ...)."""
+    if not annotations:
+        raise HTTPException(400, "No annotations given.")
+    unknown = [k for k in annotations if k not in kb_names]
+    if unknown:
+        raise HTTPException(400, f"Unknown KB: {', '.join(unknown)} "
+                            f"(this session's KBs: {', '.join(kb_names)}).")
+
+
+def _row_states(out_df: pd.DataFrame, idx: int, kb_names: list[str],
+                update: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+    """(after, before) for a decision-log entry: the row's value in EVERY session
+    KB after the write, and before it. A decision always holds the complete row
+    state, so a KB the write did not touch keeps its earlier value instead of
+    reading as missing. Call before the write, under the same lock."""
+    before = _layer_values(out_df, idx, kb_names)
+    return {**before, **update}, before
+
+
+def _int_or_none(value: str | None) -> int | None:
+    return int(value) if value not in (None, "") else None
 
 
 def _check_context_folder(folder: str | None, name: str) -> None:
@@ -133,11 +211,18 @@ def _check_hosted_urls(cfg: SessionConfig) -> None:
 # ── sessions ────────────────────────────────────────────────────────────────
 
 @app.get("/api/sessions")
-def get_sessions():
-    return {"sessions": list_sessions()}
+def get_sessions(request: Request):
+    names = list_sessions()
+    user = current_user(request)
+    if auth_enabled() and user is None:
+        raise HTTPException(401, "Not signed in")
+    if user is not None and user.role != "admin":
+        mine = set(userdb.sessions_for(user.id))
+        names = [n for n in names if n in mine]
+    return {"sessions": names}
 
 
-@app.post("/api/sessions/parse-file")
+@app.post("/api/sessions/parse-file", dependencies=[Depends(require_admin)])
 async def parse_file(file: UploadFile = File(...)):
     """Upload a CSV/TSV, return columns + preview. File stored in /tmp."""
     content = await file.read()
@@ -192,7 +277,7 @@ class CreateSessionRequest(BaseModel):
 
 
 @app.post("/api/sessions")
-def create_session(req: CreateSessionRequest):
+def create_session(req: CreateSessionRequest, admin=Depends(require_admin)):
     # Everything is validated before the first side effect (mkdir / move).
     if not SLUG_RE.fullmatch(req.session_name):
         raise HTTPException(400, "session_name must contain only letters, digits, '-' or '_'.")
@@ -226,7 +311,8 @@ def create_session(req: CreateSessionRequest):
     try:
         cfg = SessionConfig(
             session_name=req.session_name,
-            annotator=req.annotator,
+            # Auth mode: the signed-in admin, never a name the client typed.
+            annotator=admin.name if admin else req.annotator,
             input_path=str(dest),
             delimiter=req.delimiter,
             label_column=req.label_column,
@@ -267,19 +353,19 @@ def create_session(req: CreateSessionRequest):
     shutil.move(str(src), str(dest))
     cfg.save(session_config_path(req.session_name))
     df, _ = load_input(dest, req.delimiter)
-    init_output(output_csv_path(req.session_name), df, [k.name for k in kbs], req.annotator)
+    init_output(_out(req.session_name, admin), df, [k.name for k in kbs], cfg.annotator)
     return {"session_name": req.session_name}
 
 
 @app.get("/api/sessions/{name}")
-def get_session(name: str):
+def get_session(name: str, user=Depends(session_access)):
     cfg = _load_cfg(name)
     # Secrets (LLM key, KB headers, Neo4j password) are write-only: masked here.
     return mask_session(cfg)
 
 
 @app.put("/api/sessions/{name}")
-def update_session(name: str, body: dict = Body(...)):
+def update_session(name: str, body: dict = Body(...), admin=Depends(require_admin)):
     existing = _load_cfg(name)
     # Blank secrets keep the stored value while the address is unchanged.
     body = merge_secrets(body, existing)
@@ -298,7 +384,7 @@ def update_session(name: str, body: dict = Body(...)):
     try:
         cfg.save(session_config_path(name))
         df, _ = load_input(Path(cfg.input_path), cfg.delimiter)
-        init_output(output_csv_path(name), df, [k.name for k in cfg.kbs], cfg.annotator)
+        init_output(_out(name, admin), df, [k.name for k in cfg.kbs], cfg.annotator)
     except ValidationError as e:
         raise HTTPException(400, _safe_validation_error(e))
     except Exception as e:
@@ -307,7 +393,7 @@ def update_session(name: str, body: dict = Body(...)):
     return {"ok": True}
 
 
-@app.post("/api/sessions/{name}/context")
+@app.post("/api/sessions/{name}/context", dependencies=[Depends(require_admin)])
 async def upload_context(name: str, file: UploadFile = File(...)):
     """Upload a .zip of <doc_id>.txt files as this session's context folder."""
     cfg = _load_cfg(name)
@@ -347,30 +433,43 @@ def llm_default_prompt():
     return {"prompt": DEFAULT_SYSTEM_PROMPT}
 
 
-@app.delete("/api/sessions/{name}")
+@app.delete("/api/sessions/{name}", dependencies=[Depends(require_admin)])
 def delete_session(name: str):
     path = session_dir(_require_session_name(name))
-    if not path.exists():
-        raise HTTPException(404, "Session not found")
-    shutil.rmtree(path)
+    with _WRITE_LOCK:   # no save can log a decision between the check and the delete
+        if not path.exists():
+            raise HTTPException(404, "Session not found")
+        if auth_enabled() and decisions.has_decisions(name):
+            raise HTTPException(409, "This session has logged decisions and cannot be deleted")
+        if auth_enabled() and decisions.has_adjudications(name):
+            raise HTTPException(409, "This session has adjudications and cannot be deleted")
+        shutil.rmtree(path)
+        if auth_enabled():
+            userdb.delete_memberships_for_session(name)
+            invites.forget_session(name)
     return {"ok": True}
 
 
 # ── progress ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/sessions/{name}/progress")
-def get_progress(name: str):
+def get_progress(name: str, user=Depends(session_access)):
     cfg = _load_cfg(name)
     kb_names = [k.name for k in cfg.kbs]
-    out_path = output_csv_path(name)
+    out_path = _out(name, user)
     # Read-only + vectorised: never rewrite the output here (it fights with
     # concurrent annotation writes and is O(n) per poll). Only initialise on
     # first access when no output exists yet.
     if out_path.exists():
         out_df = pd.read_csv(out_path, dtype=str, keep_default_na=False)
+        # A layer written before a KB was added has no column for it yet:
+        # count it as blank (in memory only; the file is not rewritten here).
+        for kb in kb_names:
+            if kb not in out_df.columns:
+                out_df[kb] = ""
     else:
         df, _ = load_input(Path(cfg.input_path), cfg.delimiter)
-        out_df = init_output(out_path, df, kb_names, cfg.annotator)
+        out_df = init_output(out_path, df, kb_names, _who(cfg, user))
     total = len(out_df)
     if kb_names and total:
         filled = pd.Series(True, index=out_df.index)
@@ -462,12 +561,12 @@ def _read_context(folder: Path, doc_id: str) -> str | None:
 
 
 @app.get("/api/sessions/{name}/rows/{idx}")
-def get_row(name: str, idx: int):
+def get_row(name: str, idx: int, user=Depends(session_access)):
     cfg = _load_cfg(name)
     df, _ = load_input(Path(cfg.input_path), cfg.delimiter)
     if idx < 0 or idx >= len(df):
         raise HTTPException(404, "Row index out of range")
-    out_df = init_output(output_csv_path(name), df, [k.name for k in cfg.kbs], cfg.annotator)
+    out_df = init_output(_out(name, user), df, [k.name for k in cfg.kbs], _who(cfg, user))
     row = df.iloc[idx].fillna("").to_dict()
 
     context_text: str | None = None
@@ -559,18 +658,28 @@ class BatchAnnotateRequest(BaseModel):
 # FastAPI matches "/rows/batch" against the parameterised route (idx="batch")
 # and 422s on the int-parse.
 @app.post("/api/sessions/{name}/rows/batch")
-def save_rows_batch(name: str, req: BatchAnnotateRequest):
+def save_rows_batch(name: str, req: BatchAnnotateRequest, user=Depends(annotator_access)):
     """Apply many row updates in ONE atomic write (used by Auto-match)."""
     cfg = _load_cfg(name)
     df, _ = load_input(Path(cfg.input_path), cfg.delimiter)
-    out_path = output_csv_path(name)
+    out_path = _out(name, user)
+    who = _who(cfg, user)
     n = len(df)
-    with _WRITE_LOCK, metrics.timer("write.batch", name, rows=len(req.updates)):
-        out_df = init_output(out_path, df, [k.name for k in cfg.kbs], cfg.annotator)
+    kb_names = [k.name for k in cfg.kbs]
+    if user is not None:               # auth mode: the whole batch is checked first
+        for u in req.updates:
+            _check_annotations(u.annotations, kb_names)
+    with _WRITE_LOCK, metrics.timer("write.batch", name, rows=len(req.updates)), \
+            _decision_log(user) as tx:
+        out_df = init_output(out_path, df, kb_names, who)
         for u in req.updates:
             if u.idx < 0 or u.idx >= n or _ai_accepted(cfg, out_df, u.idx):
                 continue
-            out_df.at[u.idx, ANNOTATOR_COL] = cfg.annotator
+            if tx:
+                after, before = _row_states(out_df, u.idx, kb_names, u.annotations)
+                tx.add(name, u.idx, user.id, "auto_match", "batch", after, before,
+                       llm_used=u.llm_used)
+            out_df.at[u.idx, ANNOTATOR_COL] = who
             if u.llm_used is not None:
                 out_df.at[u.idx, LLM_COL] = u.llm_used
             for kb, val in u.annotations.items():
@@ -594,6 +703,11 @@ class AnnotateRequest(BaseModel):
     # What the LLM banner showed (C4). None = nothing shown (cache miss / error).
     llm_id: str | None = None
     llm_confidence: float | None = None
+    # Set by the Auto-annotate modal's bulk save: the values came from a script,
+    # so the decision log records actor "auto_annotate" and the row does not count
+    # as a human decision. The flag can only lower trust (a human save that claims
+    # to be a script is merely left out of agreement), so the client may set it.
+    auto: bool = False
 
 
 def _records_llm(cfg) -> bool:
@@ -647,14 +761,17 @@ def _provenance_for(cfg, req: AnnotateRequest) -> dict[str, str] | None:
 
 
 @app.post("/api/sessions/{name}/rows/{idx}")
-def save_row(name: str, idx: int, req: AnnotateRequest):
+def save_row(name: str, idx: int, req: AnnotateRequest, user=Depends(annotator_access)):
     cfg = _load_cfg(name)
     df, _ = load_input(Path(cfg.input_path), cfg.delimiter)
-    out_path = output_csv_path(name)
+    if user is not None:
+        _check_annotations(req.annotations, [k.name for k in cfg.kbs])
+    out_path = _out(name, user)
+    who = _who(cfg, user)
     provenance = _provenance_for(cfg, req)
     panels = fb.format_panels(req.panels) if cfg.collect_feedback else None
-    with _WRITE_LOCK:   # atomic read-modify-write
-        out_df = init_output(out_path, df, [k.name for k in cfg.kbs], cfg.annotator,
+    with _WRITE_LOCK, _decision_log(user) as tx:   # atomic read-modify-write
+        out_df = init_output(out_path, df, [k.name for k in cfg.kbs], who,
                              provenance=_records_provenance(cfg),
                              feedback=cfg.collect_feedback, llm=_records_llm(cfg))
         if _ai_accepted(cfg, out_df, idx):
@@ -666,7 +783,17 @@ def save_row(name: str, idx: int, req: AnnotateRequest):
                 if col in provenance and col in out_df.columns \
                         and str(out_df.at[idx, col] or "").strip():
                     del provenance[col]
-        write_row(out_path, out_df, idx, cfg.annotator, req.annotations,
+        if tx:
+            prov = provenance or {}
+            after, before = _row_states(out_df, idx, [k.name for k in cfg.kbs],
+                                        req.annotations)
+            actor, action = ("auto_annotate", "auto") if req.auto else ("human", "save")
+            tx.add(name, idx, user.id, actor, action, after, before, llm_used=req.llm_used,
+                   method=prov.get("_method", ""),
+                   elapsed_ms=_int_or_none(prov.get("_elapsed_ms")),
+                   selected_rank=_int_or_none(prov.get("_selected_rank")),
+                   revision=next_revision(out_df, idx, provenance))
+        write_row(out_path, out_df, idx, who, req.annotations,
                   llm_used=req.llm_used, provenance=provenance, panels=panels)
     return {"ok": True}
 
@@ -684,7 +811,7 @@ class FeedbackRequest(BaseModel):
 
 
 @app.post("/api/sessions/{name}/rows/{idx}/feedback")
-def save_feedback(name: str, idx: int, req: FeedbackRequest):
+def save_feedback(name: str, idx: int, req: FeedbackRequest, user=Depends(annotator_access)):
     """Hint + confidence for a row that has already been saved. Recorded after
     the save so it never counts toward the measured decision time."""
     cfg = _load_cfg(name)
@@ -697,14 +824,16 @@ def save_feedback(name: str, idx: int, req: FeedbackRequest):
     df, _ = load_input(Path(cfg.input_path), cfg.delimiter)
     if idx < 0 or idx >= len(df):
         raise HTTPException(404, "Row index out of range")
-    out_path = output_csv_path(name)
+    out_path = _out(name, user)
     kb_names = [k.name for k in cfg.kbs]
-    with _WRITE_LOCK:
-        out_df = init_output(out_path, df, kb_names, cfg.annotator,
+    with _WRITE_LOCK, _decision_log(user) as tx:
+        out_df = init_output(out_path, df, kb_names, _who(cfg, user),
                              provenance=_records_provenance(cfg), feedback=True,
                              llm=_records_llm(cfg))
         if not all(str(out_df.at[idx, kb] or "").strip() for kb in kb_names):
             raise HTTPException(409, "Save the annotation before recording feedback.")
+        if tx:
+            tx.add(name, idx, user.id, "human", "feedback", {}, {})
         write_feedback(out_path, out_df, idx, req.hint, req.confidence)
     return {"ok": True}
 
@@ -715,14 +844,14 @@ class ReflectionRequest(BaseModel):
 
 
 @app.get("/api/sessions/{name}/reflection")
-def get_reflection(name: str):
+def get_reflection(name: str, user=Depends(session_access)):
     _load_cfg(name)
-    path = reflection_path(name)
+    path = reflection_path(name, user.id if user else None)
     return json.loads(path.read_text()) if path.exists() else None
 
 
 @app.put("/api/sessions/{name}/reflection")
-def save_reflection(name: str, req: ReflectionRequest):
+def save_reflection(name: str, req: ReflectionRequest, user=Depends(annotator_access)):
     """End-of-session reflection: hint types ranked by usefulness, plus a
     short comment on what helped or misled."""
     cfg = _load_cfg(name)
@@ -734,13 +863,13 @@ def save_reflection(name: str, req: ReflectionRequest):
         raise HTTPException(422, str(e))
     record = {
         "session_name": name,
-        "annotator": cfg.annotator,
+        "annotator": _who(cfg, user),
         "study_condition": cfg.study_condition,
         "ranking": req.ranking,
         "comment": req.comment.strip(),
         "submitted_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    reflection_path(name).write_text(json.dumps(record, indent=2))
+    reflection_path(name, user.id if user else None).write_text(json.dumps(record, indent=2))
     return record
 
 
@@ -792,7 +921,7 @@ def _pick_best(dense: list, lexical: list, entity_type: str, threshold: float):
 
 
 @app.get("/api/sessions/{name}/kb/{kb_name}/entity/{entity_id:path}")
-def lookup_entity(name: str, kb_name: str, entity_id: str):
+def lookup_entity(name: str, kb_name: str, entity_id: str, user=Depends(session_access)):
     """Resolve a manually typed id against the KB index.
 
     Returns {found: false} rather than an HTTP error when the index simply does
@@ -836,13 +965,16 @@ def lookup_entity(name: str, kb_name: str, entity_id: str):
 # ── auto-annotate ─────────────────────────────────────────────────────────────
 
 @app.post("/api/sessions/{name}/auto-annotate")
-def auto_annotate_session(name: str, skip_annotated: bool = True):
+def auto_annotate_session(name: str, skip_annotated: bool = True,
+                          user=Depends(annotator_access)):
     """Automatically pick and save the best candidate for every unannotated row."""
     cfg = _load_cfg(name)
     df, _ = load_input(Path(cfg.input_path), cfg.delimiter)
     kb_names = [k.name for k in cfg.kbs]
-    out_path = output_csv_path(name)
-    out_df = init_output(out_path, df, kb_names, cfg.annotator)
+    out_path = _out(name, user)
+    who = _who(cfg, user)
+    with _WRITE_LOCK:
+        out_df = init_output(out_path, df, kb_names, who)
 
     threshold = float(cfg.score_tie_threshold or 0.02)
     entity_type_col = cfg.entity_type_col
@@ -891,7 +1023,25 @@ def auto_annotate_session(name: str, skip_annotated: bool = True):
                 new_annotations[kb_cfg.name] = best.id
 
         if new_annotations:
-            write_row(out_path, out_df, idx, cfg.annotator, new_annotations)
+            # KB calls above run unlocked; the write re-reads the layer under the
+            # lock so a save made meanwhile is neither clobbered nor overwritten:
+            # only KBs still blank are written, and a row filled meanwhile is skipped
+            # (no write, no log entry, so a human decision stays human).
+            with _WRITE_LOCK, _decision_log(user) as tx:
+                out_df = init_output(out_path, df, kb_names, who)
+                now_done = all(str(out_df.at[idx, kb] or "").strip() for kb in kb_names)
+                if skip_annotated:
+                    new_annotations = {kb: val for kb, val in new_annotations.items()
+                                       if not str(out_df.at[idx, kb] or "").strip()}
+                if skip_annotated and now_done:
+                    skipped_count += 1
+                    continue
+                if not new_annotations:
+                    continue
+                if tx:
+                    after, before = _row_states(out_df, idx, kb_names, new_annotations)
+                    tx.add(name, idx, user.id, "auto_annotate", "auto", after, before)
+                write_row(out_path, out_df, idx, who, new_annotations)
             annotated_count += 1
 
     return {"annotated": annotated_count, "skipped": skipped_count, "total": len(df)}
@@ -940,7 +1090,7 @@ class CandidateRequest(BaseModel):
 
 
 @app.post("/api/sessions/{name}/candidates")
-def get_candidates(name: str, req: CandidateRequest):
+def get_candidates(name: str, req: CandidateRequest, user=Depends(session_access)):
   _require_session_name(name)
   with metrics.timer("candidates", name, kb=req.kb_name, mlen=len(req.label or "")):
     cfg = _load_cfg(name)
@@ -1031,7 +1181,7 @@ class GraphTestRequest(BaseModel):
     session_name: str | None = None   # reuse that session's stored password if unchanged
 
 
-@app.post("/api/graph/test")
+@app.post("/api/graph/test", dependencies=[Depends(require_admin)])
 def graph_test(req: GraphTestRequest):
     """Check a Neo4j connection before saving it. Never raises; returns ok/error."""
     try:
@@ -1058,7 +1208,7 @@ class GraphCandidateRequest(BaseModel):
 
 
 @app.post("/api/sessions/{name}/graph/candidates")
-def graph_candidates(name: str, req: GraphCandidateRequest):
+def graph_candidates(name: str, req: GraphCandidateRequest, user=Depends(session_access)):
     """Individual level — how one mention's candidates connect to each other + neighbors."""
     cfg = _load_cfg(name)
     if not cfg.enable_graph:
@@ -1076,7 +1226,7 @@ class GraphDocumentRequest(BaseModel):
 
 
 @app.post("/api/sessions/{name}/graph/document")
-def graph_document(name: str, req: GraphDocumentRequest):
+def graph_document(name: str, req: GraphDocumentRequest, user=Depends(session_access)):
     """Document level — subgraph among the accepted CUIs, with isolated-pick flags."""
     cfg = _load_cfg(name)
     if not cfg.enable_graph:
@@ -1134,7 +1284,7 @@ def _saved_pins(out_df, idxs, kb: str) -> tuple[dict[int, str], set[int]]:
 
 
 @app.post("/api/sessions/{name}/graph/optimize")
-def graph_optimize(name: str, req: GraphOptimizeRequest):
+def graph_optimize(name: str, req: GraphOptimizeRequest, user=Depends(annotator_access)):
     """Auto-match: break retrieval ties across the document with the graph.
 
     Saved annotations are kept: they anchor the graph but are never returned,
@@ -1154,7 +1304,7 @@ def graph_optimize(name: str, req: GraphOptimizeRequest):
         raise HTTPException(404, "Row index out of range")
     doc_id = str(df.iloc[req.idx].get(cfg.doc_id_col, "")).strip()
     same = df.index[df[cfg.doc_id_col].astype(str).str.strip() == doc_id].tolist()
-    out_df = init_output(output_csv_path(name), df, [k.name for k in cfg.kbs], cfg.annotator)
+    out_df = init_output(_out(name, user), df, [k.name for k in cfg.kbs], _who(cfg, user))
     fixed, saved = _saved_pins(out_df, same, kb_cfg.name)
 
     # retrieve candidate IDs per unsaved mention (top-N, capped to the LLM/graph budget)
@@ -1190,7 +1340,8 @@ def graph_optimize(name: str, req: GraphOptimizeRequest):
 
 
 @app.post("/api/sessions/{name}/graph/optimize-all")
-def graph_optimize_all(name: str, skip_annotated: bool = True):
+def graph_optimize_all(name: str, skip_annotated: bool = True,
+                       user=Depends(annotator_access)):
     """
     Bulk graph match — run the connection-maximising optimiser over EVERY document
     in the session and write all results in one atomic pass. Already-annotated
@@ -1207,7 +1358,8 @@ def graph_optimize_all(name: str, skip_annotated: bool = True):
     kb = kb_cfg.name
 
     df, _ = load_input(Path(cfg.input_path), cfg.delimiter)
-    out_path = output_csv_path(name)
+    out_path = _out(name, user)
+    who = _who(cfg, user)
     top_n = max(5, cfg.llm_top_n)
 
     updates: list[dict[str, Any]] = []
@@ -1220,7 +1372,7 @@ def graph_optimize_all(name: str, skip_annotated: bool = True):
         return {"enabled": True, "error": str(e)}
 
     with _WRITE_LOCK:
-        out_df = init_output(out_path, df, [k.name for k in cfg.kbs], cfg.annotator)
+        out_df = init_output(out_path, df, [k.name for k in cfg.kbs], who)
 
         for doc_id, group in df.groupby(df[cfg.doc_id_col].astype(str).str.strip()):
             if not str(doc_id).strip():
@@ -1265,11 +1417,16 @@ def graph_optimize_all(name: str, skip_annotated: bool = True):
             docs_done += 1
 
         # single atomic write of everything
-        for u in updates:
-            out_df.at[u["idx"], ANNOTATOR_COL] = cfg.annotator
-            out_df.at[u["idx"], LLM_COL] = ""        # graph-driven, not LLM
-            out_df.at[u["idx"], kb] = u["cui"]
-        save_output(out_path, out_df)
+        with _decision_log(user) as tx:
+            kb_names = [k.name for k in cfg.kbs]
+            for u in updates:
+                if tx:
+                    after, before = _row_states(out_df, u["idx"], kb_names, {kb: u["cui"]})
+                    tx.add(name, u["idx"], user.id, "auto_match", "auto", after, before)
+                out_df.at[u["idx"], ANNOTATOR_COL] = who
+                out_df.at[u["idx"], LLM_COL] = ""        # graph-driven, not LLM
+                out_df.at[u["idx"], kb] = u["cui"]
+            save_output(out_path, out_df)
 
     return {
         "enabled": True,
@@ -1281,7 +1438,7 @@ def graph_optimize_all(name: str, skip_annotated: bool = True):
 
 
 @app.get("/api/sessions/{name}/documents")
-def list_documents(name: str):
+def list_documents(name: str, user=Depends(session_access)):
     """Document index for the session (for chunked, resumable bulk operations)."""
     cfg = _load_cfg(name)
     if not cfg.doc_id_col:
@@ -1298,14 +1455,15 @@ def list_documents(name: str):
 
 
 @app.get("/api/sessions/{name}/documents/mentions")
-def document_mentions(name: str, idx: int = -1, doc_id: str = ""):
+def document_mentions(name: str, idx: int = -1, doc_id: str = "",
+                      user=Depends(session_access)):
     """All mentions of a document with their current selections (for Level-2 review)."""
     cfg = _load_cfg(name)
     if not cfg.doc_id_col:
         raise HTTPException(400, "This session has no doc_id_col configured.")
     df, _ = load_input(Path(cfg.input_path), cfg.delimiter)
     kb_names = [k.name for k in cfg.kbs]
-    out_df = init_output(output_csv_path(name), df, kb_names, cfg.annotator)
+    out_df = init_output(_out(name, user), df, kb_names, _who(cfg, user))
 
     if not doc_id:
         if idx < 0 or idx >= len(df):
@@ -1351,7 +1509,7 @@ def _safe_validation_error(e: ValidationError) -> str:
     )
 
 
-@app.post("/api/kb/test")
+@app.post("/api/kb/test", dependencies=[Depends(require_admin)])
 def test_kb(req: TestKBRequest):
     try:
         try:
@@ -1371,45 +1529,45 @@ class MetricsToggleRequest(BaseModel):
     enabled: bool
 
 
-@app.get("/api/metrics/status")
+@app.get("/api/metrics/status", dependencies=[Depends(require_admin)])
 def metrics_status():
     return {"enabled": metrics.enabled}
 
 
-@app.post("/api/metrics/toggle")
+@app.post("/api/metrics/toggle", dependencies=[Depends(require_admin)])
 def metrics_toggle(req: MetricsToggleRequest):
     metrics.set_enabled(req.enabled)
     return {"enabled": metrics.enabled}
 
 
-@app.get("/api/sessions/{name}/metrics/insights")
+@app.get("/api/sessions/{name}/metrics/insights", dependencies=[Depends(require_admin)])
 def metrics_insights(name: str):
     _load_cfg(name)
     return {"enabled": metrics.enabled, **metrics.insights(name)}
 
 
-@app.post("/api/sessions/{name}/metrics/reset")
+@app.post("/api/sessions/{name}/metrics/reset", dependencies=[Depends(require_admin)])
 def metrics_reset(name: str):
     _load_cfg(name)
     metrics.reset(name)
     return {"ok": True}
 
 
-@app.get("/api/sessions/{name}/graph/stats")
+@app.get("/api/sessions/{name}/graph/stats", dependencies=[Depends(require_admin)])
 def graph_stats(name: str):
     """Neo4j query cost / scale for each graph-optimise call (always recorded)."""
     _load_cfg(name)
     return metrics.graph_insights(name)
 
 
-@app.post("/api/sessions/{name}/graph/stats/reset")
+@app.post("/api/sessions/{name}/graph/stats/reset", dependencies=[Depends(require_admin)])
 def graph_stats_reset(name: str):
     _load_cfg(name)
     metrics.reset_graph(name)
     return {"ok": True}
 
 
-@app.get("/api/sessions/{name}/metrics/export")
+@app.get("/api/sessions/{name}/metrics/export", dependencies=[Depends(require_admin)])
 def metrics_export(name: str):
     _load_cfg(name)
     path = session_dir(name) / "metrics.jsonl"
@@ -1424,53 +1582,108 @@ def metrics_export(name: str):
 
 # ── export & per-step snapshots ───────────────────────────────────────────────
 
-_STAGE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_STAGE_RE = re.compile(r"[A-Za-z0-9_-]+")   # always used with fullmatch
 
 
 @app.post("/api/sessions/{name}/snapshot")
-def snapshot_stage(name: str, stage: str):
-    """Copy the current output to a per-step snapshot (e.g. 'retrieval', 'graph')."""
+def snapshot_stage(name: str, stage: str, user=Depends(annotator_access)):
+    """Copy the caller's current output to a per-step snapshot (e.g. 'retrieval', 'graph')."""
     _load_cfg(name)
-    if not _STAGE_RE.match(stage):
+    if not _STAGE_RE.fullmatch(stage):
         raise HTTPException(400, "Invalid stage name.")
-    src = output_csv_path(name)
+    src = _out(name, user)
     if not src.exists():
         raise HTTPException(404, "No output file yet")
-    shutil.copy(src, output_snapshot_path(name, stage))
+    shutil.copy(src, output_snapshot_path(name, stage, user.id if user else None))
     return {"ok": True, "stage": stage}
 
 
 @app.get("/api/sessions/{name}/snapshots")
-def list_snapshots(name: str):
-    """Which per-step snapshots exist for this session."""
+def list_snapshots(name: str, user=Depends(session_access)):
+    """Which per-step snapshots exist for this session (the caller's own, in auth mode)."""
     _load_cfg(name)
     d = session_dir(name)
-    stages = []
-    if d.exists():
-        for p in d.glob("annotated.*.csv"):
-            stages.append(p.name[len("annotated."):-len(".csv")])
-    return {"stages": sorted(stages)}
+    if user is None:
+        stages = []
+        if d.exists():
+            for p in d.glob("annotated.*.csv"):
+                stages.append(p.name[len("annotated."):-len(".csv")])
+        return {"stages": sorted(stages)}
+    # Stage names cannot contain '.' (_STAGE_RE), so annotated.<stage>.<uid>.csv
+    # parses unambiguously and a legacy annotated.<stage>.csv never matches.
+    suffix = f".{user.id}.csv"
+    stages = [p.name[len("annotated."):-len(suffix)] for p in d.glob(f"annotated.*{suffix}")]
+    return {"stages": sorted(s for s in stages if _STAGE_RE.fullmatch(s))}
 
 
 @app.get("/api/sessions/{name}/export")
-def export_csv(name: str, stage: str = ""):
-    """Download the final output, or a per-step snapshot via ?stage=retrieval|graph."""
+def export_csv(name: str, request: Request, stage: str = "", user: int | None = None,
+               final: bool = False, legacy: bool = False, caller=Depends(session_access)):
+    """Download the caller's output, or a per-step snapshot via ?stage=retrieval|graph.
+
+    In auth mode an admin may name another user's layer with ?user=<id>, a
+    reviewer or admin may download the reviewed set with ?final=1, and an admin
+    may download the session's pre-accounts ``annotated.csv`` as-is with ?legacy=1.
+    In auth mode a layer's cells are spreadsheet-guarded (they come from users).
+    """
     _require_session_name(name)
+    if final:
+        review_routes.reviewer_access(name, request)
+        if stage or user is not None or legacy:
+            raise HTTPException(400, "?final= cannot be combined with ?stage=, ?user= or "
+                                "?legacy=.")
+        return review_routes.final_export(name)
+    if legacy:
+        require_admin(request)
+        if stage or user is not None:
+            raise HTTPException(400, "?legacy= cannot be combined with ?stage= or ?user=.")
+        path = output_csv_path(name, None)
+        if not path.exists():
+            raise HTTPException(404, "This session has no legacy annotated.csv")
+        return _csv_download(path.read_bytes(), f"{name}_legacy_annotated.csv")
+    layer = _export_layer(caller, user)
     if stage:
-        if not _STAGE_RE.match(stage):
+        if not _STAGE_RE.fullmatch(stage):
             raise HTTPException(400, "Invalid stage name.")
-        path = output_snapshot_path(name, stage)
+        path = output_snapshot_path(name, stage, layer)
         fname = f"{name}_{stage}.csv"
     else:
-        path = output_csv_path(name)
+        path = output_csv_path(name, layer)
         fname = f"{name}_annotated.csv"
     if not path.exists():
         raise HTTPException(404, "No output file for that stage yet")
+    data = _spreadsheet_safe_csv(path) if caller is not None else path.read_bytes()
+    return _csv_download(data, fname)
+
+
+def _csv_download(data: bytes, fname: str) -> StreamingResponse:
     return StreamingResponse(
-        io.BytesIO(path.read_bytes()),
+        io.BytesIO(data),
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
+
+
+def _spreadsheet_safe_csv(path: Path) -> bytes:
+    """A layer CSV with every cell passed through ``spreadsheet_safe_cell``."""
+    with open(path, newline="", encoding="utf-8") as f:
+        rows = list(csv.reader(f))
+    buf = io.StringIO()
+    out = csv.writer(buf, lineterminator="\n")
+    for row in rows:
+        out.writerow([spreadsheet_safe_cell(c) for c in row])
+    return buf.getvalue().encode("utf-8")
+
+
+def _export_layer(caller: userdb.User | None, user_id: int | None) -> int | None:
+    """Whose layer an export reads: ?user=<id> (admins only), else the caller's own."""
+    if user_id is None:
+        return caller.id if caller else None
+    if caller is None:
+        raise HTTPException(400, "?user= needs sign-in mode (HELIX_AUTH=1).")
+    if caller.role != "admin":
+        raise HTTPException(403, "Administrators only")
+    return user_id
 
 
 # ── helper ────────────────────────────────────────────────────────────────────

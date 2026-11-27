@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { X, Play, Pause, Square, CheckCircle2, Loader2, Search, Share2, Download, Activity } from 'lucide-react'
 import * as api from '@/api/client'
+import { useAuth } from '@/hooks/useAuth'
 import type { Candidate, MetricsInsights, SessionConfig } from '@/types'
 import { hasSemanticGroup } from '@/lib/semantic'
 
@@ -38,6 +39,7 @@ function pickBest(dense: Candidate[], lexical: Candidate[], entityType: string, 
 }
 
 export function AutoAnnotateModal({ sessionName, cfg, onClose, onComplete }: Props) {
+  const { isAdmin } = useAuth()   // metrics endpoints are admin-only when auth is on
   const graphStep = !!(cfg.enable_graph && cfg.doc_id_col && cfg.kbs.length)
 
   // current saved progress of the session (so the modal reflects real status)
@@ -74,8 +76,8 @@ export function AutoAnnotateModal({ sessionName, cfg, onClose, onComplete }: Pro
   useEffect(() => {
     refreshProgress()
     api.listSnapshots(sessionName).then(st => setSnaps({ retrieval: st.includes('retrieval'), graph: st.includes('graph') })).catch(() => {})
-    api.getMetricsStatus().then(s => setPerf(s.enabled)).catch(() => {})
-  }, [sessionName, refreshProgress])
+    if (isAdmin) api.getMetricsStatus().then(s => setPerf(s.enabled)).catch(() => {})
+  }, [sessionName, refreshProgress, isAdmin])
 
   const waitIfPaused = useCallback(async () => {
     if (isPaused.current) await new Promise<void>(res => { pauseResolve.current = res })
@@ -118,7 +120,8 @@ export function AutoAnnotateModal({ sessionName, cfg, onClose, onComplete }: Pro
         } catch { setS1(s => ({ ...s, errors: ++err })) }
       }
       if (any) {
-        try { await api.saveRow(sessionName, idx, newAnn); setS1(s => ({ ...s, annotated: ++ann })) }
+        // A script's pick: logged as `auto_annotate`, never as a human decision.
+        try { await api.saveRow(sessionName, idx, newAnn, undefined, undefined, { auto: true }); setS1(s => ({ ...s, annotated: ++ann })) }
         catch { setS1(s => ({ ...s, errors: ++err })) }
       }
     }
@@ -200,12 +203,14 @@ export function AutoAnnotateModal({ sessionName, cfg, onClose, onComplete }: Pro
           </div>
 
           {/* perf toggle */}
-          <label className="flex items-center justify-between text-xs">
-            <span className="flex items-center gap-1.5 text-gray-500"><Activity className="w-3.5 h-3.5 text-brand-500" /> Track latency &amp; memory</span>
-            <button onClick={togglePerf} disabled={active !== 'none'} className={`relative w-9 h-5 rounded-full ${perf ? 'bg-emerald-500' : 'bg-gray-300'} disabled:opacity-50`}>
-              <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform ${perf ? 'translate-x-4' : ''}`} />
-            </button>
-          </label>
+          {isAdmin && (
+            <label className="flex items-center justify-between text-xs">
+              <span className="flex items-center gap-1.5 text-gray-500"><Activity className="w-3.5 h-3.5 text-brand-500" /> Track latency &amp; memory</span>
+              <button onClick={togglePerf} disabled={active !== 'none'} className={`relative w-9 h-5 rounded-full ${perf ? 'bg-emerald-500' : 'bg-gray-300'} disabled:opacity-50`}>
+                <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform ${perf ? 'translate-x-4' : ''}`} />
+              </button>
+            </label>
+          )}
 
           {/* ── Step 1 card ── */}
           <StepCard
