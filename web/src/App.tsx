@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate, useParams } from 'react-router-dom'
 import { NavBar } from '@/components/NavBar'
+import { SourceNotice } from '@/components/SourceNotice'
 import { Home } from '@/pages/Home'
 import { Configure } from '@/pages/Configure'
 import { Annotate } from '@/pages/Annotate'
@@ -53,6 +54,7 @@ export default function App() {
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </main>
+          <SourceNotice />
         </div>
       </AuthProvider>
     </BrowserRouter>

@@ -103,7 +103,8 @@ def _firebase_web_config() -> dict | None:
 
 @app.get("/api/info")
 def get_info():
-    return {"hosted": hosted_mode(), "auth": auth_enabled(), "firebase": _firebase_web_config()}
+    return {"hosted": hosted_mode(), "auth": auth_enabled(), "firebase": _firebase_web_config(),
+            "notice": os.environ.get("HELIX_NOTICE", "").strip() or None}
 
 
 def _require_session_name(name: str) -> str:

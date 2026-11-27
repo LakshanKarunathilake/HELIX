@@ -331,6 +331,8 @@ export interface AppInfo {
   hosted: boolean
   auth: boolean
   firebase: FirebaseWebConfig | null
+  /** The data source attribution to show on every page; null when none is configured. */
+  notice: string | null
 }
 
 // ── review (reviewer / admin) ─────────────────────────────────────────────────
