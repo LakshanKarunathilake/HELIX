@@ -69,7 +69,7 @@ export function FloatingGraphPanel({ data, selectedId, onSelect, title = 'Candid
   if (!data?.enabled) return null
 
   return (
-    <div className="fixed bottom-20 right-6 z-40">
+    <div className="fixed bottom-[calc(5rem+var(--notice-h,0px))] right-6 z-40">
       {open ? (
         <div
           className="relative rounded-xl shadow-2xl ring-1 ring-black/5 bg-white"
@@ -86,7 +86,8 @@ export function FloatingGraphPanel({ data, selectedId, onSelect, title = 'Candid
               borderTopLeftRadius: 6,
             }}
           />
-          <div className="overflow-y-auto" style={{ maxHeight: size.h + 90 }}>
+          {/* shorter by the notice footer, which the panel sits above */}
+          <div className="overflow-y-auto" style={{ maxHeight: `calc(${size.h + 90}px - var(--notice-h, 0px))` }}>
             <GraphPanel
               data={data}
               selectedId={selectedId}
