@@ -324,6 +324,7 @@ def main() -> None:
 
     logger.info(f"Loading index: {cfg['index_path']}")
     index_cfg = searcher.load_index(cfg["index_path"])
+    searcher.warm_up()  # load the model before the port opens
     logger.info(
         f"Index ready — {len(searcher.metadata):,} entities | "
         f"model: {index_cfg.get('model_name')} | "
