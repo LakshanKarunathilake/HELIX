@@ -25,6 +25,10 @@ graph/graph_config.yaml
 graph/out/
 *.RRF
 
+# Hosted demo data: the downloaded MeSH file and the index built from it
+deploy/hosted/demo-index/
+deploy/hosted/mesh/
+
 # Local eval config + results
 eval/eval_config.yaml
 eval/results.json

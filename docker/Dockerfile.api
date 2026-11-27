@@ -1,6 +1,6 @@
 # API server — FastAPI (:8000). Proxies to the KB server and Neo4j; runs the
 # LLM re-ranker. Lightweight image (no torch/faiss).
-FROM python:3.11-slim
+FROM python:3.11-slim@sha256:61e01f72680f86a5279ad510818ab7b2ee9f049822589d4e34e33e044360356c
 
 ENV PYTHONUNBUFFERED=1
 
@@ -10,11 +10,13 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends curl \
  && rm -rf /var/lib/apt/lists/*
 
-COPY requirements-api.txt .
-RUN pip install --no-cache-dir -r requirements-api.txt
+# Exact versions; the lock's header says how to update them.
+COPY requirements-api.lock .
+RUN pip install --no-cache-dir -r requirements-api.lock
 
 COPY api/ ./api/
 COPY eltool/ ./eltool/
+COPY scripts/ ./scripts/
 
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \

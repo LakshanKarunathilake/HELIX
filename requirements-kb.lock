@@ -1,0 +1,50 @@
+# Exact versions installed by docker/Dockerfile.kb (Python 3.11, linux/amd64).
+# Generated from requirements-kb.txt; do not edit by hand. To update, from the
+# repository root, with the image named in the Dockerfile's FROM line:
+#
+#   docker run --rm --platform linux/amd64 -v "$PWD":/src:ro <image> sh -ec \
+#     '(pip install -q --no-deps --index-url https://download.pytorch.org/whl/cpu torch
+#       pip install -q -r /src/requirements-kb.txt) 1>&2; pip freeze'
+#
+# and replace the lines below with the output, removing "+cpu" from the torch line
+# (the Dockerfile takes that version from the CPU-only index).
+adapters==1.3.0
+annotated-types==0.8.0
+blinker==1.9.0
+certifi==2026.11.20
+charset-normalizer==3.5.3
+click==8.5.1
+faiss-cpu==1.16.0
+filelock==4.3.1
+Flask==3.1.3
+fsspec==2026.9.0
+hf-xet==1.8.0
+huggingface_hub==0.36.2
+idna==3.20
+itsdangerous==2.2.0
+Jinja2==3.1.6
+MarkupSafe==3.0.4
+mpmath==1.3.0
+networkx==3.6.1
+numpy==2.4.6
+packaging==26.4
+pandas==3.1.1
+pydantic==2.14.4
+pydantic_core==2.50.5
+python-dateutil==4.0.0
+PyYAML==6.0.4
+rank-bm25==0.2.2
+regex==2026.11.25
+requests==2.34.2
+safetensors==0.8.0
+sympy==1.14.0
+tokenizers==0.22.2
+torch==2.15.0
+tqdm==4.70.1
+transformers==4.57.6
+typing-inspection==0.4.5
+typing_extensions==4.16.0
+tzdata==2026.6
+urllib3==2.8.0
+waitress==3.0.2
+Werkzeug==3.1.9

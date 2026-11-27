@@ -1,0 +1,55 @@
+# Exact versions installed by docker/Dockerfile.api (Python 3.11, linux/amd64).
+# Generated from requirements-api.txt; do not edit by hand. To update, from the
+# repository root, with the image named in the Dockerfile's FROM line:
+#
+#   docker run --rm --platform linux/amd64 -v "$PWD":/src:ro <image> sh -c \
+#     'pip install -q -r /src/requirements-api.txt 1>&2 && pip freeze'
+#
+# and replace the lines below with the output.
+annotated-doc==0.0.7
+annotated-types==0.8.0
+anthropic==0.125.0
+anyio==4.16.0
+certifi==2026.11.20
+cffi==2.1.1
+charset-normalizer==3.5.3
+click==8.5.1
+cryptography==50.0.2
+distro==1.9.0
+docstring_parser==0.18.0
+fastapi==0.136.3
+google-auth==2.63.1
+h11==0.16.0
+httpcore==1.0.9
+httptools==0.9.0
+httpx==0.29.0
+idna==3.20
+jiter==0.19.0
+neo4j==6.4.1
+numpy==2.4.6
+openai==2.54.0
+packaging==26.4
+pandas==3.1.1
+psutil==7.2.2
+pyasn1==0.6.5
+pyasn1_modules==0.4.2
+pycparser==3.12
+pydantic==2.14.4
+pydantic_core==2.50.5
+python-dateutil==4.0.0
+python-dotenv==1.2.4
+python-multipart==0.0.34
+pytz==2026.6
+PyYAML==6.0.4
+requests==2.34.2
+sniffio==1.3.1
+starlette==1.10.0
+tqdm==4.70.1
+typing-inspection==0.4.5
+typing_extensions==4.16.0
+tzdata==2026.6
+urllib3==2.8.0
+uvicorn==0.54.0
+uvloop==0.23.0
+watchfiles==1.3.0
+websockets==17.4
