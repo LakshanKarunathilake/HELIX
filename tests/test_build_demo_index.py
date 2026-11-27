@@ -224,6 +224,35 @@ def test_embedder_pins_the_revision_and_matches_the_searcher(
             vector, searcher._generate_single_embedding(text, 5), rtol=1e-5, atol=1e-6)
 
 
+def test_progress_is_printed_every_n_batches(tmp_path, capsys):
+    build_index(read_descriptors(FIX), fake_embed, tmp_path / "x", mesh_version="2026",
+                batch_size=1, progress_every=2)
+    assert capsys.readouterr().out.splitlines() == [
+        "Embedded 2 of 6 terms", "Embedded 4 of 6 terms", "Embedded 6 of 6 terms"]
+
+
+def test_progress_counts_batches_not_terms(tmp_path, capsys):
+    build_index(read_descriptors(FIX), fake_embed, tmp_path / "x", mesh_version="2026",
+                batch_size=4, progress_every=2)  # two batches, the second one short
+    assert capsys.readouterr().out.splitlines() == ["Embedded 6 of 6 terms"]
+
+
+@pytest.mark.parametrize("directory", [False, True])
+def test_main_refuses_a_missing_mesh_file_before_anything_else(
+        tmp_path, monkeypatch, directory):
+    prefix = tmp_path / "mesh-diseases"
+    build_index(read_descriptors(FIX), fake_embed, prefix, mesh_version="2026")
+    before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+    def loaded(*args): raise AssertionError("the model was loaded")
+    monkeypatch.setattr(bdi, "sapbert_embedder", loaded)
+    mesh = tmp_path if directory else tmp_path / "desc2026.gz"
+    with pytest.raises(SystemExit) as stop:
+        bdi.main(["--mesh", str(mesh), "--out", str(prefix)])
+    message = str(stop.value)
+    assert str(mesh) in message and "\n" not in message
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+
+
 def test_main_builds_from_the_pinned_model(tmp_path, monkeypatch, capsys):
     calls = []
     monkeypatch.setattr(bdi, "sapbert_embedder", lambda *a: calls.append(a) or fake_embed)

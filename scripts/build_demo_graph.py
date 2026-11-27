@@ -7,9 +7,10 @@ Runs inside the api container, with the password in NEO4J_PASSWORD:
 
 One node per descriptor, linked to its parents, its children and its "see
 related" descriptors, in HELIX's default schema. Every :Concept node already in
-the database is replaced, so point this only at the demo's own Neo4j. The file is
-read in full before the database is touched; a load that stops part-way is put
-right by running the script again.
+the database is replaced, so point this only at the demo's own Neo4j. A database
+holding any :Concept node without a MeSH "D..." id is left untouched unless
+--replace is given. The file is read in full before the database is touched; a
+load that stops part-way is put right by running the script again.
 """
 from __future__ import annotations
 
@@ -28,11 +29,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from eltool.mesh import Descriptor, read_descriptors  # noqa: E402
 
+DEFAULT_URI = "bolt://neo4j:7687"
 MIN_PASSWORD_LENGTH = 8  # Neo4j 5 refuses shorter passwords by default
 WAIT_SECONDS = 120
 RETRY_SECONDS = 2
 
 # The labels and property names are the defaults of eltool.graph_client.GraphSchema.
+# Concepts the demo load cannot have made. =~ matches the whole value, and is null
+# for a cui that is not a string, which the outer coalesce counts as no match.
+COUNT_FOREIGN = ("MATCH (c:Concept) "
+                 "WHERE NOT coalesce(coalesce(c.cui, '') =~ 'D[0-9]+', false) "
+                 "RETURN count(c) AS n")
 CONSTRAINT = ("CREATE CONSTRAINT concept_cui IF NOT EXISTS "
               "FOR (c:Concept) REQUIRE c.cui IS UNIQUE")
 DELETE_BATCH = "MATCH (c:Concept) WITH c LIMIT $limit DETACH DELETE c RETURN count(*) AS n"
@@ -71,9 +78,13 @@ def graph_rows(descriptors: Iterable[Descriptor]) -> tuple[list[dict], list[dict
     return nodes, rels
 
 
-def load_graph(driver, nodes: list[dict], rels: list[dict], *,
-               batch: int = 5000) -> tuple[int, int]:
-    """Replace every concept with these rows; return (nodes, relationships) created."""
+def load_graph(driver, nodes: list[dict], rels: list[dict], *, uri: str = DEFAULT_URI,
+               replace: bool = False, batch: int = 5000) -> tuple[int, int]:
+    """Replace every concept with these rows; return (nodes, relationships) created.
+
+    Exits, before writing anything, if the database holds a concept that is not
+    from MeSH and ``replace`` is false. ``uri`` only names the database then.
+    """
     if batch < 1:
         raise ValueError("batch must be at least 1")
     if not nodes:
@@ -86,6 +97,11 @@ def load_graph(driver, nodes: list[dict], rels: list[dict], *,
             return sum(count(query, rows=rows[start:start + batch])
                        for start in range(0, len(rows), batch))
 
+        foreign = count(COUNT_FOREIGN)  # first: the constraint below is already a write
+        if foreign and not replace:
+            raise SystemExit(f"Neo4j at {uri} holds {foreign} :Concept node(s) without a MeSH "
+                             f"D... id: this does not look like the demo graph, so nothing was "
+                             f"changed (--replace deletes every :Concept node there).")
         session.run(CONSTRAINT).consume()  # also the index the relationship matches use
         while count(DELETE_BATCH, limit=batch):  # in batches, to bound transaction memory
             pass
@@ -114,8 +130,11 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--mesh", type=Path, required=True,
                         help="MeSH descriptor file (desc<year>.xml or .gz)")
-    parser.add_argument("--uri", default="bolt://neo4j:7687")
+    parser.add_argument("--uri", default=DEFAULT_URI)
     parser.add_argument("--user", default="neo4j")
+    parser.add_argument("--replace", action="store_true",
+                        help="delete every :Concept node even if the database does not look "
+                             "like the demo graph")
     args = parser.parse_args(argv)
 
     password = os.environ.get("NEO4J_PASSWORD", "")
@@ -125,12 +144,17 @@ def main(argv: list[str] | None = None) -> None:
     if not args.mesh.is_file():
         raise SystemExit(f"MeSH descriptor file not found: {args.mesh}")
     nodes, rels = graph_rows(read_descriptors(args.mesh))
+    if not nodes:
+        raise SystemExit(f"No disease (tree number C...) descriptors found in {args.mesh}")
 
     try:
-        with GraphDatabase.driver(args.uri, auth=(args.user, password),
-                                  connection_timeout=10) as driver:
+        # No server notifications: on an empty database the guard's query would warn
+        # that the label and property do not exist yet.
+        with GraphDatabase.driver(args.uri, auth=(args.user, password), connection_timeout=10,
+                                  notifications_min_severity="OFF") as driver:
             _wait_for_neo4j(driver, args.uri)
-            node_count, rel_count = load_graph(driver, nodes, rels)
+            node_count, rel_count = load_graph(driver, nodes, rels, uri=args.uri,
+                                               replace=args.replace)
     except AuthError:
         raise SystemExit(f"Neo4j at {args.uri} rejected the login for user {args.user}; "
                          f"check NEO4J_PASSWORD.") from None

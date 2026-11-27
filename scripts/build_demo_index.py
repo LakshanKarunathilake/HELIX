@@ -29,6 +29,7 @@ from eltool.mesh import Descriptor, read_descriptors  # noqa: E402
 MODEL_NAME = "cambridgeltl/SapBERT-from-PubMedBERT-fulltext"
 MODEL_REVISION = "090663c3ae57bf35ffe4d0d468a2a88d03051a4d"  # model card licence: apache-2.0
 MAX_LENGTH = 25
+PROGRESS_EVERY = 50  # batches between progress lines
 
 
 def entries(descriptors: Iterable[Descriptor]) -> list[dict]:
@@ -64,7 +65,8 @@ def _write(path: Path, save: Callable[[Path], object]) -> None:
 
 def build_index(descriptors: Iterable[Descriptor],
                 embed: Callable[[list[str]], np.ndarray],
-                out_prefix: Path, *, mesh_version: str, batch_size: int = 64) -> dict:
+                out_prefix: Path, *, mesh_version: str, batch_size: int = 64,
+                progress_every: int = PROGRESS_EVERY) -> dict:
     """Embed every term into a flat index at ``out_prefix``; return its config."""
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
@@ -76,13 +78,15 @@ def build_index(descriptors: Iterable[Descriptor],
         raise ValueError("no descriptors to index")
 
     index = None
-    for start in range(0, len(rows), batch_size):
+    for number, start in enumerate(range(0, len(rows), batch_size), start=1):
         texts = [row["processed_text"] for row in rows[start:start + batch_size]]
         vectors = np.array(embed(texts), dtype=np.float32)  # a copy: normalised in place
         faiss.normalize_L2(vectors)
         if index is None:
             index = faiss.IndexFlatIP(vectors.shape[1])
         index.add(vectors)
+        if number % progress_every == 0:
+            print(f"Embedded {index.ntotal} of {len(rows)} terms", flush=True)
 
     config = {
         "index_type": "Flat",
@@ -136,6 +140,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--mesh-version", default="2026")
     parser.add_argument("--batch-size", type=int, default=64)
     args = parser.parse_args(argv)
+    if not args.mesh.is_file():  # before the model loads and the old index is removed
+        raise SystemExit(f"MeSH descriptor file not found: {args.mesh}")
 
     embed = sapbert_embedder(MODEL_NAME, MODEL_REVISION, MAX_LENGTH)
     config = build_index(read_descriptors(args.mesh), embed, args.out,

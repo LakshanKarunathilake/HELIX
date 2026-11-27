@@ -3,6 +3,7 @@
 No Neo4j server is used: a fake driver records every query and its parameters.
 """
 import importlib.util
+import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -36,9 +37,11 @@ class FakeResult:
 
 class FakeDriver:
     """Records queries. ``deletes`` scripts what each delete batch reports removed;
-    ``connect_errors`` are raised by successive connectivity checks."""
+    ``connect_errors`` are raised by successive connectivity checks; ``foreign`` is
+    what the guard counts: concepts without a MeSH id."""
 
-    def __init__(self, deletes=(2, 0), connect_errors=(), query_error=None):
+    def __init__(self, deletes=(2, 0), connect_errors=(), query_error=None, foreign=0):
+        self.foreign = foreign
         self.deletes = list(deletes)
         self.connect_errors = list(connect_errors)
         self.query_error = query_error
@@ -75,7 +78,9 @@ class FakeSession:
         self.driver.calls.append((query, params))
         if self.driver.query_error:
             raise self.driver.query_error
-        if "DELETE" in query:
+        if "=~" in query:
+            count = self.driver.foreign
+        elif "DELETE" in query:
             count = self.driver.deletes.pop(0)
         else:
             count = len(params.get("rows", []))
@@ -84,6 +89,8 @@ class FakeSession:
 
 
 def kind(query):
+    if "=~" in query:
+        return "guard"
     if query.startswith("CREATE CONSTRAINT"):
         return "constraint"
     if "DETACH DELETE" in query:
@@ -171,14 +178,14 @@ def test_load_clears_then_creates():
     driver = FakeDriver(deletes=[2, 1, 0])
     assert load_graph(driver, nodes, rels) == (3, 5)
     assert [kind(q) for q, _ in driver.calls] == [
-        "constraint", "delete", "delete", "delete", "nodes", "rels"]
+        "guard", "constraint", "delete", "delete", "delete", "nodes", "rels"]
     assert all(result.consumed for result in driver.results)
-    constraint = driver.calls[0][0]
+    constraint = driver.calls[1][0]
     assert "(c:Concept)" in constraint and "c.cui IS UNIQUE" in constraint
-    for query, params in driver.calls[1:4]:
+    for query, params in driver.calls[2:5]:
         assert "LIMIT $limit" in query and params == {"limit": 5000}
-    assert driver.calls[4][1] == {"rows": nodes}
-    assert driver.calls[5][1] == {"rows": rels}
+    assert driver.calls[5][1] == {"rows": nodes}
+    assert driver.calls[6][1] == {"rows": rels}
 
 
 def test_queries_use_the_schema_helix_reads_by_default():
@@ -213,7 +220,8 @@ def test_second_load_issues_the_same_queries():
     second = load_graph(driver, nodes, rels)
     assert first == second == (3, 5)
     assert driver.calls == once + once
-    assert [kind(q) for q, _ in once] == ["constraint", "delete", "delete", "nodes", "rels"]
+    assert [kind(q) for q, _ in once] == [
+        "guard", "constraint", "delete", "delete", "nodes", "rels"]
 
 
 def test_empty_input_leaves_the_graph_alone():
@@ -229,6 +237,44 @@ def test_batch_below_one_is_refused_before_any_query(batch):
     with pytest.raises(ValueError, match="batch"):
         load_graph(driver, *graph_rows(read_descriptors(FIX)), batch=batch)
     assert driver.calls == []
+
+
+# -- delete guard ------------------------------------------------------------
+
+def writes(driver):
+    return [q for q, _ in driver.calls
+            if re.search(r"\b(CREATE|DELETE|MERGE|SET|REMOVE|DROP)\b", q)]
+
+
+def test_the_guard_counts_concepts_without_a_mesh_id():
+    driver = FakeDriver()
+    load_graph(driver, *graph_rows(read_descriptors(FIX)))
+    query, params = driver.calls[0]
+    assert "MATCH (c:Concept)" in query and "count(c) AS n" in query
+    # =~ gives null, not false, for a cui that is not a string; those count too
+    assert "NOT coalesce(coalesce(c.cui, '') =~ 'D[0-9]+', false)" in query
+    assert params == {}
+
+
+@pytest.mark.parametrize("foreign", [1, 250_000])
+def test_a_graph_that_is_not_the_demo_is_left_alone(foreign):
+    driver = FakeDriver(foreign=foreign)
+    with pytest.raises(SystemExit) as stop:
+        load_graph(driver, *graph_rows(read_descriptors(FIX)), uri="bolt://mine:7687")
+    message = str(stop.value)
+    assert "bolt://mine:7687" in message and f" {foreign} " in message
+    assert "does not look like the demo graph" in message
+    assert "--replace" in message and "\n" not in message
+    assert [kind(q) for q, _ in driver.calls] == ["guard"]
+    assert writes(driver) == []
+
+
+def test_replace_loads_over_another_graph():
+    driver = FakeDriver(foreign=7)
+    assert load_graph(driver, *graph_rows(read_descriptors(FIX)), replace=True) == (3, 5)
+    assert [kind(q) for q, _ in driver.calls] == [
+        "guard", "constraint", "delete", "delete", "nodes", "rels"]
+    assert len(writes(driver)) == 5
 
 
 # -- command line ------------------------------------------------------------
@@ -254,6 +300,44 @@ def test_missing_mesh_file_is_refused_before_connecting(monkeypatch, tmp_path):
     assert str(missing) in str(stop.value)
 
 
+def test_main_refuses_a_graph_that_is_not_the_demo(monkeypatch, capsys):
+    monkeypatch.setenv("NEO4J_PASSWORD", "12345678")
+    fake = FakeDriver(foreign=4)
+    use_driver(monkeypatch, fake)
+    with pytest.raises(SystemExit) as stop:
+        bdg.main(["--mesh", str(FIX), "--uri", "bolt://mine:7687"])
+    message = str(stop.value)
+    assert "bolt://mine:7687" in message and " 4 " in message and "\n" not in message
+    assert writes(fake) == [] and fake.closed
+    assert "Loaded" not in capsys.readouterr().out
+
+
+def test_main_replace_loads_over_another_graph(monkeypatch, capsys):
+    monkeypatch.setenv("NEO4J_PASSWORD", "12345678")
+    fake = FakeDriver(foreign=4)
+    use_driver(monkeypatch, fake)
+    bdg.main(["--mesh", str(FIX), "--replace"])
+    assert [kind(q) for q, _ in fake.calls][-2:] == ["nodes", "rels"]
+    assert "3 concepts and 5 relationships" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("record", [
+    "",  # no descriptors at all
+    "<DescriptorRecord><DescriptorUI>D1</DescriptorUI>"
+    "<TreeNumberList><TreeNumber>A01</TreeNumber></TreeNumberList></DescriptorRecord>",
+])
+def test_file_without_disease_descriptors_is_refused_before_connecting(
+        monkeypatch, tmp_path, record):
+    forbid_driver(monkeypatch)
+    monkeypatch.setenv("NEO4J_PASSWORD", "12345678")
+    other = tmp_path / "other.xml"
+    other.write_text(f"<DescriptorRecordSet>{record}</DescriptorRecordSet>", encoding="utf-8")
+    with pytest.raises(SystemExit) as stop:
+        bdg.main(["--mesh", str(other)])
+    message = str(stop.value)
+    assert str(other) in message and "\n" not in message
+
+
 def test_truncated_file_fails_before_connecting(monkeypatch, tmp_path):
     forbid_driver(monkeypatch)
     monkeypatch.setenv("NEO4J_PASSWORD", "12345678")
@@ -277,6 +361,16 @@ def test_main_loads_the_graph(monkeypatch, capsys, extra, uri, user):
     assert fake.checks == 1 and fake.closed
     assert [kind(q) for q, _ in fake.calls][-2:] == ["nodes", "rels"]
     assert "3 concepts and 5 relationships" in capsys.readouterr().out
+
+
+def test_main_asks_for_no_server_notifications(monkeypatch):
+    # on an empty database the guard's query would otherwise log "label does not exist"
+    monkeypatch.setenv("NEO4J_PASSWORD", "12345678")
+    options = {}
+    monkeypatch.setattr(bdg.GraphDatabase, "driver",
+                        lambda uri, **kwargs: options.update(kwargs) or FakeDriver())
+    bdg.main(["--mesh", str(FIX)])
+    assert options["notifications_min_severity"] == "OFF"
 
 
 def test_main_waits_for_neo4j_to_accept_connections(monkeypatch, clock):
