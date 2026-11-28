@@ -1,0 +1,52 @@
+[
+  {
+    "id": "demo-01",
+    "text": "A man in his sixties came to the clinic with three days of worsening breathlessness. He has COPD from long-term smoking, together with hypertension and type 2 diabetes mellitus. The chest film showed pneumonia in the right lower lobe. His ankles were not swollen, and there was nothing on examination to suggest heart failure.",
+    "mentions": ["COPD", "hypertension", "type 2 diabetes mellitus", "pneumonia", "heart failure"]
+  },
+  {
+    "id": "demo-02",
+    "text": "An older woman was admitted overnight with crushing chest pain. Blood tests and the tracing confirmed an MI. She had been treated for CHF since the previous winter, and the monitor now showed atrial fibrillation. Her daughter reported that she also had a small stroke two years ago. Kidney blood tests were in keeping with CKD.",
+    "mentions": ["MI", "CHF", "atrial fibrillation", "stroke", "CKD"]
+  },
+  {
+    "id": "demo-03",
+    "text": "Ten days after a knee operation, a middle-aged patient noticed a painful, swollen calf. Ultrasound showed a DVT. By evening he was short of breath, and a scan of the chest confirmed PE. His history includes obesity, osteoarthritis of both knees and obstructive sleep apnea, for which he uses a mask at night.",
+    "mentions": ["DVT", "PE", "obesity", "osteoarthritis", "obstructive sleep apnea"]
+  },
+  {
+    "id": "demo-04",
+    "text": "A young adult described a burning feeling behind the breastbone that was worse after late meals, typical of GERD. She had a peptic ulcer in the past. Several relatives have celiac disease, and one cousin has Crohn disease. Her own blood tests showed iron deficiency anemia, so a camera examination was arranged to look for ulcerative colitis or another cause.",
+    "mentions": ["GERD", "peptic ulcer", "celiac disease", "Crohn disease", "iron deficiency anemia", "ulcerative colitis"]
+  },
+  {
+    "id": "demo-05",
+    "text": "A frail resident of a care home became confused and feverish. Urine testing pointed to a UTI, and within hours the team was treating sepsis. Blood results showed AKI, probably made worse by poor fluid intake. Imaging found kidney stones on the left side. Later that night her oxygen levels fell and the intensive care doctor raised the possibility of ARDS.",
+    "mentions": ["UTI", "sepsis", "AKI", "kidney stones", "ARDS"]
+  },
+  {
+    "id": "demo-06",
+    "text": "The neurology clinic reviewed a woman in her thirties whose MS had been stable for a year. She asked about her father, who has Parkinson disease, and her grandmother, who developed Alzheimer disease late in life. She also mentioned that her migraine attacks had become more frequent, and that a childhood diagnosis of epilepsy no longer needed treatment.",
+    "mentions": ["MS", "Parkinson disease", "Alzheimer disease", "migraine", "epilepsy"]
+  },
+  {
+    "id": "demo-07",
+    "text": "A retired gardener was referred with progressive weakness of the hands. The specialist was concerned about ALS and ordered nerve studies. His long list of other problems includes gout, rheumatoid arthritis and osteoporosis. At the same visit he showed a band of blisters across his ribs, which was diagnosed as shingles, and a patch of red, hot skin on the shin that looked like cellulitis.",
+    "mentions": ["ALS", "gout", "rheumatoid arthritis", "osteoporosis", "shingles", "cellulitis"]
+  },
+  {
+    "id": "demo-08",
+    "text": "A traveller returned from a long trip with fever, aching joints and a cough. Tests for malaria and dengue were negative. Because of weight loss and night sweats, samples were sent to check for TB. A swab was positive for influenza. The doctor explained that this was much more than a cold, and noted mild asthma and recurrent sinusitis in the record.",
+    "mentions": ["malaria", "dengue", "TB", "influenza", "cold", "asthma", "sinusitis"]
+  },
+  {
+    "id": "demo-09",
+    "text": "During a yearly review, a patient with systemic lupus erythematosus reported a flare of her psoriasis and itchy eczema on both wrists. She is on replacement tablets for hypothyroidism. The eye clinic is following early glaucoma and a cataract in the right eye, and last week she was given drops for conjunctivitis.",
+    "mentions": ["systemic lupus erythematosus", "psoriasis", "eczema", "hypothyroidism", "glaucoma", "cataract", "conjunctivitis"]
+  },
+  {
+    "id": "demo-10",
+    "text": "A man with a history of heavy drinking presented with severe pain in the upper abdomen. The working diagnosis was pancreatitis, although the scan also showed gallstones. Liver tests and imaging suggested cirrhosis, and he was found to have untreated hepatitis C. The surgeon examined him and ruled out appendicitis.",
+    "mentions": ["pancreatitis", "gallstones", "cirrhosis", "hepatitis C", "appendicitis"]
+  }
+]

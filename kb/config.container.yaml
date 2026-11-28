@@ -1,0 +1,16 @@
+# Search server settings baked into the container image as /app/kb/config.yaml.
+# Environment variables (KB_INDEX_PATH, KB_ADAPTER_PATH, ...) override these, and
+# a compose file may mount another config over it. Keep machine paths out of it.
+server:
+  host: "0.0.0.0"
+  port: 8765
+
+index:
+  path: "/data/index/mesh-diseases"
+
+adapter:
+  path: null
+  name: null
+
+lexical:
+  enabled: false

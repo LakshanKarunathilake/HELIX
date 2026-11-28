@@ -321,7 +321,7 @@ export function Configure() {
               <label className="label">Annotator name</label>
               <input
                 className="input"
-                placeholder="lakshan"
+                placeholder="annotator_1"
                 value={annotator}
                 onChange={e => setAnnotator(e.target.value)}
               />

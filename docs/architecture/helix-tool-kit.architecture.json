@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "HELIX Hosted Demo (proposed)",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "viewBox": [1190, 660]
+  },
+  "components": [
+    { "id": "firebase", "type": "external", "label": "Google sign-in", "sublabel": "outside service", "pos": [500, 50], "size": [150, 64] },
+    { "id": "llm", "type": "external", "label": "LLM API", "sublabel": "outside, optional", "pos": [760, 50], "size": [150, 64] },
+
+    { "id": "browser", "type": "external", "label": "Evaluator", "sublabel": "browser", "pos": [30, 290], "size": [110, 64] },
+    { "id": "caddy", "type": "security", "label": "caddy container", "sublabel": "HTTPS :443", "pos": [220, 290], "size": [150, 64] },
+    { "id": "web", "type": "frontend", "label": "web container", "sublabel": "nginx", "pos": [430, 290], "size": [140, 64] },
+    { "id": "api", "type": "backend", "label": "api container", "sublabel": "FastAPI :8000", "pos": [630, 290], "size": [140, 64] },
+    { "id": "kb", "type": "backend", "label": "kb container", "sublabel": "search :8765", "pos": [830, 290], "size": [140, 64] },
+    { "id": "index", "type": "database", "label": "Demo index", "sublabel": "folder", "pos": [1030, 290], "size": [110, 64] },
+
+    { "id": "sessions", "type": "database", "label": "Sessions volume", "sublabel": "answers, accounts", "pos": [630, 460], "size": [140, 64] },
+    { "id": "neo4j", "type": "database", "label": "neo4j container", "sublabel": "demo graph :7687", "pos": [830, 460], "size": [140, 64] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "Your Linux server (docker compose), DGX later", "wraps": ["caddy", "web", "api", "kb", "index", "sessions", "neo4j"], "pad": 30 }
+  ],
+  "connections": [
+    { "id": "open-site", "from": "browser", "to": "caddy", "label": "HTTPS", "variant": "emphasis" },
+    { "id": "caddy-to-web", "from": "caddy", "to": "web", "variant": "emphasis" },
+    { "id": "web-to-api", "from": "web", "to": "api", "label": "/api", "variant": "emphasis" },
+    { "id": "api-to-kb", "from": "api", "to": "kb", "label": "/query", "variant": "emphasis" },
+    { "id": "kb-reads-index", "from": "kb", "to": "index" },
+    { "id": "api-to-firebase", "from": "api", "to": "firebase", "label": "verify", "variant": "security", "fromSide": "top", "toSide": "bottom" },
+    { "id": "api-to-llm", "from": "api", "to": "llm", "variant": "dashed", "fromSide": "top", "toSide": "left" },
+    { "id": "api-to-sessions", "from": "api", "to": "sessions", "fromSide": "bottom", "toSide": "top" },
+    { "id": "api-to-neo4j", "from": "api", "to": "neo4j", "label": "Bolt", "fromSide": "bottom", "toSide": "left" }
+  ],
+  "cards": [
+    { "dot": "emerald", "title": "Docker containers", "items": ["caddy and neo4j: public images", "web, api, kb: built on the server", "Only caddy is open to the internet"] },
+    { "dot": "cyan", "title": "Demo data (to build)", "items": ["Disease index from NLM's MeSH file", "Matching small graph", "Sample session with no answers"] },
+    { "dot": "rose", "title": "Not on the server", "items": ["UMLS data", "Full indexes and graphs", "Study sessions and annotations"] }
+  ]
+}

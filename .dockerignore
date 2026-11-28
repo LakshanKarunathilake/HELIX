@@ -13,4 +13,10 @@ graph/out
 # secrets / machine-local config — provided at runtime, never baked into images
 neo4j.yaml
 graph/graph_config.yaml
-.env
+kb/config.yaml
+**/.env
+**/.env.local
+**/.env.*.local
+# demo data built on the server; mounted at runtime
+deploy/hosted/demo-index
+deploy/hosted/mesh

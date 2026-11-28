@@ -147,9 +147,11 @@ class SAPBERTIndexSearcher:
 
         model_name = self.model_name or self.index_config.get('model_name',
                                                               'cambridgeltl/SapBERT-from-PubMedBERT-fulltext')
+        # Pins the Hub commit the index was built with (None = latest)
+        revision = self.index_config.get('model_revision')
 
         logger.info(f"Loading SAPBERT tokenizer: {model_name}")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, revision=revision)
 
         if self.use_adapter:
             try:
@@ -159,7 +161,7 @@ class SAPBERTIndexSearcher:
                 raise
 
             logger.info("Loading model with adapters library...")
-            self.model = AutoAdapterModel.from_pretrained(model_name)
+            self.model = AutoAdapterModel.from_pretrained(model_name, revision=revision)
 
             # Load adapter (path wins over name)
             try:
@@ -190,7 +192,7 @@ class SAPBERTIndexSearcher:
                 raise
         else:
             logger.info(f"Loading base model without adapters: {model_name}")
-            self.model = AutoModel.from_pretrained(model_name)
+            self.model = AutoModel.from_pretrained(model_name, revision=revision)
 
         # Device + eval + no-grad
         try:
@@ -204,7 +206,8 @@ class SAPBERTIndexSearcher:
         for p in self.model.parameters():
             p.requires_grad = False
 
-        self.model.adapter_summary()
+        if self.use_adapter:  # plain transformers models have no adapter_summary()
+            self.model.adapter_summary()
 
         logger.info(f"Model loaded successfully on {self.device} (adapter={'on' if self.use_adapter else 'off'})")
 
@@ -281,6 +284,28 @@ class SAPBERTIndexSearcher:
             logger.error(f"Error generating embedding for text: {text[:50]}... Error: {e}")
             raise
 
+    def _neighbours(self, query_embedding: np.ndarray, k: int):
+        """
+        FAISS (scores, indices) for a query. An index flagged ``distinct_entities``
+        holds several rows per concept, so the request widens until it covers
+        k concepts or the whole index.
+        """
+        if not self.index_config.get('distinct_entities'):
+            return self.index.search(query_embedding, k)
+
+        total = max(self.index.ntotal, 1)  # FAISS rejects a request for 0 rows
+        n = min(4 * k, total)
+        while True:
+            scores, indices = self.index.search(query_embedding, n)
+            found = {self.metadata[i]['entity_id'] for i in indices[0] if i != -1}
+            if len(found) >= k or n == total:
+                return scores, indices
+            n = min(4 * n, total)
+
+    def warm_up(self) -> None:
+        """Load the model and run one query, so the first real request is not slow."""
+        self.search("warm up", k=1)
+
     def search(self,
                query_text: str,
                k: int = 10,
@@ -301,7 +326,7 @@ class SAPBERTIndexSearcher:
         query_embedding = query_embedding.reshape(1, -1).astype(np.float32)
         faiss.normalize_L2(query_embedding)
 
-        scores, indices = self.index.search(query_embedding, k)
+        scores, indices = self._neighbours(query_embedding, k)
 
         results = []
         seen_entities = set()
@@ -329,6 +354,7 @@ class SAPBERTIndexSearcher:
 
         if return_scores and results:
             results.sort(key=lambda x: x['similarity_score'], reverse=True)
+        results = results[:k]  # a widened request can hold more than k concepts
         for i, r in enumerate(results):
             r['rank'] = i + 1
         return results

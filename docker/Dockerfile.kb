@@ -1,8 +1,9 @@
 # KB server — SAPBERT FAISS + lexical search (Flask, :8765).
 # The FAISS index and adapter are mounted at runtime (they're large + licensed),
 # never copied into the image. Configure their paths via KB_INDEX_PATH /
-# KB_ADAPTER_PATH env vars (see docker-compose.yml).
-FROM python:3.11-slim
+# KB_ADAPTER_PATH env vars (see docker-compose.yml). The image's own config is
+# kb/config.container.yaml; a local kb/config.yaml is never copied in.
+FROM python:3.11-slim@sha256:61e01f72680f86a5279ad510818ab7b2ee9f049822589d4e34e33e044360356c
 
 ENV PYTHONUNBUFFERED=1 \
     KMP_DUPLICATE_LIB_OK=TRUE
@@ -13,11 +14,17 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential curl \
  && rm -rf /var/lib/apt/lists/*
 
-COPY requirements-kb.txt .
-RUN pip install --no-cache-dir -r requirements-kb.txt
+# Exact versions; the lock's header says how to update them. torch comes first, from the
+# CPU-only index (PyPI's x86 Linux build pulls in several GB of GPU libraries).
+COPY requirements-kb.lock .
+RUN pip install --no-cache-dir --no-deps --index-url https://download.pytorch.org/whl/cpu \
+      "$(grep '^torch==' requirements-kb.lock)" \
+ && pip install --no-cache-dir -r requirements-kb.lock
 
 COPY kb/ ./kb/
+COPY kb/config.container.yaml ./kb/config.yaml
 COPY eltool/ ./eltool/
+COPY scripts/ ./scripts/
 
 EXPOSE 8765
 HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \

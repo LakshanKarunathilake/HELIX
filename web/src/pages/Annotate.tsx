@@ -510,7 +510,7 @@ export function Annotate() {
   )
 
   return (
-    <div className="relative flex flex-col h-[calc(100vh-56px)]">
+    <div className="relative flex flex-col h-[calc(100vh-56px-var(--notice-h,0px))]">
 
       {/* ── DEBUG MODE BANNER ───────────────────────────────────────────────
           Deliberately loud and impossible to miss. Any row saved while this is
